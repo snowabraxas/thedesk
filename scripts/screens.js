@@ -1,22 +1,35 @@
 #!/usr/bin/env node
 // npm run screens -- <baseUrl> <outDir> [label] [--now=<ISO>|--now=real]
 //
-// Screenshots The Desk at 1440x900 (laptop) and 390x844 (phone):
-//   <label>-room-<phase>-<width>.png   the room in morning, golden and night light
-//   <label>-feed-<width>.png           the Product Feed, full page
-//   <label>-feed-<width>-screen.png    the Product Feed's first screen, as it opens
+// Screenshots The Desk at 1440x900 (laptop) and 390x844 (phone), in morning, golden and night light:
+//   <label>-room-<phase>-<width>.png          the room
+//   <label>-feed-<phase>-<width>.png          the Product Feed, full page
+//   <label>-feed-<phase>-<width>-screen.png   the Product Feed's first screen, as it opens
+//   <label>-news-<phase>-<width>.png          the News desk, full page (skipped when the page has no #news)
+//   <label>-news-<phase>-<width>-screen.png   the News desk's first screen
+//   <label>-news-reading-<width>.png          News in the morning with story 1 marked read, the
+//   <label>-news-reading-<width>-screen.png   shelf open and its first story expanded
 //
-// Example (the prototype, served on its own):
+// Example (the prototype, served on its own; it has no News desk):
 //   python3 -m http.server 4400 --bind 127.0.0.1 --directory prototype
 //   node scripts/screens.js http://127.0.0.1:4400 docs/screens/prototype prototype
 //
+// Example (the News desk with a breaking banner, on a test Desk; never port 4321):
+//   node scripts/screens-home.js .tmp-design/home
+//   DESK_HOME=.tmp-design/home PORT=4423 node server/index.js
+//   node scripts/screens.js http://127.0.0.1:4423 docs/screens/news app
+//
 // Shots are made deterministic: reduced motion, Toronto time zone, en-CA locale and a frozen
 // clock (default 2026-11-27 10:00 Toronto; --now=<ISO> to pick another, --now=real to use the
-// real time). The phone viewport emulates a touch screen, so hover-only details look as they do
-// on a phone.
+// real time). The desk pages are shot later in the day for golden (+6 h) and night (+10.5 h), so
+// Wila's greeting fits the light; the Preview chip picks the plate either way. The phone viewport
+// emulates a touch screen, so hover-only details look as they do on a phone.
+//
+// The shots never change the Desk they look at: saves (PUT /api/state, PUT /api/news/state) are
+// answered by the script and never reach the server, so marking a story read pays no real XP.
 //
 // Exits 1 with a clear message if the page doesn't load, a console error or page error happens,
-// a same-origin request fails, a font or image fails, or the room/feed never renders.
+// a same-origin request fails, a font or image fails, or the room or a desk page never renders.
 // Uses the installed Google Chrome (playwright-core, channel 'chrome'); no browser download.
 import path from 'node:path';
 import { mkdir, writeFile } from 'node:fs/promises';
@@ -33,6 +46,9 @@ const ROOM_FONTS = ['Fredoka', 'Inter'];
 // Caveat is only for Snow's own notes, so the browser loads it only when a note is on screen.
 // A Caveat file that fails to load is still caught (any font with status "error" fails the run).
 const FEED_FONTS = ['Fredoka', 'Inter'];
+const NEWS_FONTS = ['Fredoka', 'Inter'];
+// Hours after the frozen clock for each light on the desk pages (10:00 → 16:00 golden, 20:30 night).
+const PHASE_HOURS = { morning: 0, golden: 6, night: 10.5 };
 const STEP_TIMEOUT = 15_000;
 
 class ShotError extends Error {}
@@ -177,6 +193,37 @@ async function showPhase(page, phase, step) {
   }
 }
 
+// Saves are answered here and never reach the server (see the header).
+const SAVE_PATH = /^\/api\/(news\/)?state$/;
+async function keepDataUntouched(page) {
+  await page.route(url => url.origin === base.origin && SAVE_PATH.test(url.pathname), route => (
+    route.request().method() === 'PUT'
+      ? route.fulfill({ status: 200, contentType: 'application/json', body: '{"ok":true}' })
+      : route.continue()));
+}
+
+// A desk page in one light: open the room (where the Preview chip lives), pick the light, then
+// follow the hash to the desk, as the room's own links do. Returns the page and its watcher.
+async function openDeskPage(context, { hash, ready, fonts, phase, step }) {
+  if (frozenNow) await context.clock.setFixedTime(new Date(frozenNow.getTime() + PHASE_HOURS[phase] * 3600e3));
+  const page = await context.newPage();
+  const w = watch(page);
+  await keepDataUntouched(page);
+  await load(page, base.href, step);
+  w.check(step);
+  await showPhase(page, phase, step);
+  await page.evaluate(h => { location.hash = h; }, hash);
+  try {
+    await page.locator(ready).first().waitFor({ state: 'visible' });
+  } catch {
+    throw new ShotError(`${step}: ${hash} never rendered (${ready}).`);
+  }
+  await page.evaluate(() => window.scrollTo(0, 0));
+  await settle(page, step, fonts);
+  w.check(step);
+  return { page, w };
+}
+
 // Chrome may first paint a big downscaled plate with a quick filter and sharpen it a moment
 // later, so keep shooting until two shots in a row match. Then before/after diffs are real.
 //
@@ -254,23 +301,57 @@ async function run() {
         roomWatch.check(step);
         written.push(await shoot(room, `${label}-room-${phase}-${vp.width}.png`));
       }
+      // The prototype has no News desk: skip it there.
+      const hasNews = (await room.locator('#news').count()) > 0;
+      if (!hasNews && vp === VIEWPORTS[0]) console.log('  (no #news on this page, so no News shots)');
       await room.close();
 
-      // The Product Feed, full page.
-      const feed = await context.newPage();
-      const feedWatch = watch(feed);
-      const step = `feed @${vp.width}`;
-      await load(feed, new URL('#feed', base).href, step);
-      try {
-        await feed.locator('#list').locator('.art, .empty-state, .notecard').first().waitFor({ state: 'visible' });
-      } catch {
-        throw new ShotError(`${step}: the feed list (#list) never rendered.`);
+      // The Product Feed, in each light.
+      for (const phase of PHASES) {
+        const step = `feed ${phase} @${vp.width}`;
+        const { page, w } = await openDeskPage(context, { hash: '#feed', ready: '#list .art, #list .empty-state, #list .notecard', fonts: FEED_FONTS, phase, step });
+        written.push(await shoot(page, `${label}-feed-${phase}-${vp.width}-screen.png`, { whole: false }));
+        written.push(await shoot(page, `${label}-feed-${phase}-${vp.width}.png`));
+        w.check(step);
+        await page.close();
       }
-      await settle(feed, step, FEED_FONTS);
-      feedWatch.check(step);
-      written.push(await shoot(feed, `${label}-feed-${vp.width}-screen.png`, { whole: false }));
-      written.push(await shoot(feed, `${label}-feed-${vp.width}.png`));
-      await feed.close();
+
+      // The News desk, in each light, then with a story read and the shelf open.
+      if (hasNews) {
+        const NEWS_READY = '#newsStories .nstory, #newsStories .empty-state';
+        for (const phase of PHASES) {
+          const step = `news ${phase} @${vp.width}`;
+          const { page, w } = await openDeskPage(context, { hash: '#news', ready: NEWS_READY, fonts: NEWS_FONTS, phase, step });
+          if (phase === PHASES[0] && vp === VIEWPORTS[0] && (await page.locator('#newsBreaking').isHidden())) {
+            console.warn('  (warning) no breaking story today, so no banner (make a test Desk with scripts/screens-home.js).');
+          }
+          written.push(await shoot(page, `${label}-news-${phase}-${vp.width}-screen.png`, { whole: false }));
+          written.push(await shoot(page, `${label}-news-${phase}-${vp.width}.png`));
+          w.check(step);
+          await page.close();
+        }
+        const step = `news reading @${vp.width}`;
+        const { page, w } = await openDeskPage(context, { hash: '#news', ready: NEWS_READY, fonts: NEWS_FONTS, phase: 'morning', step });
+        try {
+          // Only what isn't so already: on a Desk where story 1 is read or the shelf was left open, a click would undo it.
+          if ((await page.locator('#newsStories [data-read="t0"]').getAttribute('aria-pressed')) !== 'true') await page.locator('#newsStories [data-read="t0"]').click();
+          await page.locator('#newsStories [data-read="t0"][aria-pressed="true"]').waitFor();
+          if ((await page.locator('#newsMoreBtn').getAttribute('aria-expanded')) !== 'true') await page.locator('#newsMoreBtn').click();
+          await page.locator('#newsMoreBtn[aria-expanded="true"]').waitFor();
+          await page.locator('#newsMoreList [data-item="m0"]').click();
+          await page.locator('#newsMoreList [data-item="m0"][aria-expanded="true"]').waitFor();
+          // The XP toast fades after a few seconds; the shots show the page under it.
+          await page.waitForFunction(() => !document.querySelector('#toast.on'), null, { timeout: 10_000 });
+        } catch (e) {
+          throw new ShotError(`${step}: couldn't mark story 1 read and open the shelf.\n  ${e.message.split('\n')[0]}`);
+        }
+        await page.evaluate(() => { document.activeElement?.blur(); window.scrollTo(0, 0); });
+        await settle(page, step, NEWS_FONTS);
+        written.push(await shoot(page, `${label}-news-reading-${vp.width}-screen.png`, { whole: false }));
+        written.push(await shoot(page, `${label}-news-reading-${vp.width}.png`));
+        w.check(step);
+        await page.close();
+      }
 
       await context.close();
     }

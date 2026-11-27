@@ -36,12 +36,12 @@ What the desk pages talk to. Everything is JSON, never cached, and only answers 
 | Route | What it does |
 | --- | --- |
 | `GET /api/feed` | Product Feed's edition. The `X-Desk-Feed-Source` header says which one: `live` (`product-feed/feed.json`), `last-good` (the last valid one, kept in `product-feed/last-good.json`), `edition:<YYYY-MM-DD.json>` (from `product-feed/editions/`) or `sample` (marked `"sample": true`). |
-| `GET` / `PUT /api/state` | Snow's Product Feed state (reads, saves, folders, notes, XP, streak, badges) in `product-feed/state.json`. |
+| `GET` / `PUT /api/state` | Snow's Product Feed state (reads, saves, folders, notes, XP, streak, badges, and `awarded`, the articles already paid XP) in `product-feed/state.json`. |
 | `GET /api/news` | The News morning edition, in the same order: `X-Desk-News-Source` is `live` (`news/news.json`), `last-good` (`news/last-good.json`), `edition:<file>` (`news/editions/`) or `sample` (`data/samples/news.sample.json`, marked `"sample": true`). |
 | `GET /api/breaking` | `{"breaking": {...}}` when `news/breaking.json` is valid and from today in Toronto, otherwise `{"breaking": null}`. |
-| `GET` / `PUT /api/news/state` | Snow's News state (`read`, `dismissed`, `shelfOpen`) in `news/state.json`. |
+| `GET` / `PUT /api/news/state` | Snow's News state (`read`, `dismissed`, `shelfOpen`, and `awarded`, the stories already paid XP) in `news/state.json`. |
 
-`PUT` takes a JSON object up to 1 MB (`Content-Type: application/json`) and saves it whole, so a crash never leaves half a file. Details: `docs/notes/sprint-2-build.md` (N3).
+`PUT` takes a JSON object up to 1 MB (`Content-Type: application/json`) and saves it whole, so a crash never leaves half a file. Each save is merged into the file as it is now, so a second tab can't take anything back: `awarded`, `dismissed`, `badges` and `days` only grow, and XP is added as a change from the `_sync.xp` the page sends (never saved). Folders, saved items, notes and reads are last-save-wins. Details: `docs/notes/sprint-2-build.md` (N3, and N4's review fixes).
 
 ## Always on
 
@@ -76,3 +76,5 @@ npm run deploy                # update ~/the-desk-live to main and restart The D
 ```
 
 It ends with `The Desk is live at http://localhost:4321 on main @ 1a2b3c4 "Subject"`. It takes the committed `main`, never this folder's files, so uncommitted work and story branches stay out. It installs packages only when `package-lock.json` changed, in a folder beside the live copy first, so a failed install changes nothing. It refuses if someone edited the live copy by hand, and it won't run from inside the live copy. The very first time, it makes `~/the-desk-live` and asks you to run `npm run service:install` once to move the service there. Details: `docs/notes/sprint-2-build.md`.
+
+**After deploying, reload any open Desk pages** (the Claude app's pane and any browser tab). A page keeps running the code it loaded. A page from before the deploy still saves safely (the server merges what it sends), but it only gets the new behaviour once it's reloaded.

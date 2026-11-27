@@ -115,6 +115,72 @@
   </div>
 </section>
 
+<!-- The News desk (news.js). Everything inside the empty containers is drawn from the edition. -->
+<section id="news" class="view news" hidden aria-labelledby="newsTitle">
+  <div class="fwrap nwrap">
+    <nav class="rail glass" id="newsRail" aria-label="News sections">
+      <a class="rb back" href="#" aria-label="Back to the room" title="Back to the room">
+        <svg class="ic" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 11l8-7 8 7v9H4z"/><path d="M10 20v-5h4v5"/></svg></a>
+      <button class="rb" type="button" data-news-go="top" aria-current="true" aria-label="Today’s edition" title="Today’s edition">
+        <svg class="ic" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="3" y="7" width="18" height="13" rx="3"/><path d="M9 3l3 4 3-4"/></svg></button>
+      <span class="rb soon" role="img" aria-label="Lenses, coming in Phase 2" title="Lenses, coming in Phase 2">
+        <svg class="ic" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="9" cy="12" r="5"/><circle cx="15" cy="12" r="5"/></svg></span>
+    </nav>
+
+    <div class="fmain">
+      <header class="capsule glass">
+        <span class="orb" aria-hidden="true"></span>
+        <div class="ftitle">
+          <h1 id="newsTitle"><span class="sr">News: </span><span id="newsGreeting">Hello, Snow</span></h1>
+          <p><span id="newsDate">Morning edition</span><span id="newsSample" hidden> · <span class="nsample">Sample stories</span></span></p>
+        </div>
+        <p class="mentor pill"><strong>Wila</strong> · <span id="newsLine">Settling in…</span></p>
+        <p class="nprog pill" id="newsProgress" hidden><span id="newsProgressText"></span><span class="bar" aria-hidden="true"><span id="newsProgressFill"></span></span></p>
+      </header>
+
+      <p class="nnote glass" id="newsNote" hidden></p>
+
+      <section class="nbreaking" id="newsBreaking" aria-labelledby="newsBreakingLabel" hidden></section>
+
+      <div class="ncols">
+        <div class="nmain">
+          <section class="ntop" aria-labelledby="newsTopTitle">
+            <h2 class="nh2" id="newsTopTitle" tabindex="-1">Today’s top 3</h2>
+            <div class="nstories" id="newsStories"></div>
+          </section>
+
+          <section class="nshelf glass" id="newsShelf" aria-labelledby="newsMoreTitle" hidden>
+            <h2 id="newsMoreTitle"><button type="button" id="newsMoreBtn" aria-expanded="false" aria-controls="newsMoreList">
+              <span>More stories <span class="nmorecount" id="newsMoreCount"></span></span>
+              <span class="pill nmorelabel" id="newsMoreLabel" aria-hidden="true">Open</span></button></h2>
+            <ul class="nmore" id="newsMoreList" hidden></ul>
+          </section>
+        </div>
+
+        <aside class="nside" aria-label="Edition at a glance">
+          <section class="card glass" aria-labelledby="newsGlanceTitle">
+            <h2 id="newsGlanceTitle">Today at a glance</h2>
+            <div class="nglance" id="newsGlance"></div>
+          </section>
+          <section class="card glass" aria-labelledby="newsRegionsTitle">
+            <h2 id="newsRegionsTitle">Where it happened</h2>
+            <ul class="nregions" id="newsRegions"></ul>
+            <p class="hint" id="newsRegionsHint">US and China weighted highest; others by relevance.</p>
+          </section>
+          <section class="card glass" aria-labelledby="newsKindsTitle">
+            <h2 id="newsKindsTitle">What kind of news</h2>
+            <ul class="nkinds" id="newsKinds"></ul>
+          </section>
+          <section class="card glass nsoon" aria-labelledby="newsLensesTitle">
+            <h2 id="newsLensesTitle">Lenses arrive in Phase 2</h2>
+            <p>Feminism, matriarchy, astrology, enlightenment and Gen Alpha, plus a daily deep cut.</p>
+          </section>
+        </aside>
+      </div>
+    </div>
+  </div>
+</section>
+
 <!-- Fixed layers live directly in <body>: an ancestor with transform, filter or backdrop-filter
      (every glass and frost panel has one) would pin them to that panel instead of the screen. -->
 <div class="scrim" id="scrim" hidden></div>

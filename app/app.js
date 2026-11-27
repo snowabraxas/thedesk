@@ -4,24 +4,25 @@
 import {
   PHASE_LABEL, WEEK_GOAL, BADGES, articlesFor, autoPhase, awardText, blank, cnt, createStateClient, dayKey, esc, fmtDate, fmtDay,
   freshBadges, level as levelFor, mentorLine, moon, moonPath, readsThisWeek as readsSince, safeUrl,
-  streak as streakOf, themeScores as scoresFor, uid, wilaLine,
+  readArticle, streak as streakOf, themeScores as scoresFor, uid, wilaLine,
 } from './lib.js';
+import { createNewsPage } from './news.js';
 
 /* ================= constants ================= */
 const FEED_URL = '/api/feed';
-// Object hotspots, in % of the painted room. Later desks show their place in the build order.
+// Object hotspots, in % of the painted room. `go` opens a desk's page; later desks show their place in the build order.
 const OBJECTS = [
   { id: 'books', name: 'Bookstore', l: 90, t: 2, w: 10, h: 88, desk: 11, tagIn: true },
   { id: 'workout', name: 'Workout Coach', l: 84.5, t: 63, w: 10.5, h: 30, desk: 4 },
   { id: 'sched', name: 'Scheduler', l: 72, t: 12, w: 15, h: 31, desk: 5 },
-  { id: 'news', name: 'News', l: 71.5, t: 46, w: 9.5, h: 13, desk: 2 },
+  { id: 'news', name: 'News', l: 71.5, t: 46, w: 9.5, h: 13, go: 'news' },
   { id: 'lang', name: 'Language', l: 81, t: 48, w: 8.5, h: 13, desk: 4.5 },
   { id: 'games', name: 'Games', l: 69.5, t: 75, w: 14.5, h: 9, desk: 3 },
   { id: 'astro', name: 'Astrology · Cycle Sync', l: 52.5, t: 30.5, w: 5.5, h: 14, desk: 7 },
   { id: 'opps', name: 'Opportunities', l: 22, t: 15.5, w: 5.6, h: 14.5, lock: 6 },
   { id: 'typewriter', name: 'Typewriter', l: 17, t: 55, w: 13, h: 13, desk: 10 },
   { id: 'projects', name: 'Projects', l: 36.5, t: 40.5, w: 17, h: 11, lock: 9 },
-  { id: 'feed', name: 'Product Feed', l: 39, t: 52, w: 12, h: 15, open: true }
+  { id: 'feed', name: 'Product Feed', l: 39, t: 52, w: 12, h: 15, go: 'feed' }
 ];
 
 /* ================= helpers ================= */
@@ -50,8 +51,12 @@ let feed = { articles: [], themes: [] };
 // Nothing that depends on Snow's state is drawn until the first GET /api/state has finished,
 // and the store won't save unless that GET worked, so a blank state never overwrites hers.
 let ready = false;
+// Snow keeps The Desk open in more than one place. The server merges every save into the file as it
+// is now (awarded, badges and days as unions; server/state-store.js), and XP is sent as a counter:
+// each save carries the XP last synced, so the server adds only this tab's own XP to the latest total.
 const store = createStateClient({
   getState: () => S,
+  counters: ['xp'],
   onSaveFail: () => toast("I couldn't save that just now. I'll keep it here and keep trying."),
 });
 const save = () => store.save();
@@ -68,6 +73,37 @@ async function loadState() {
   const r = await store.load();
   S = r.state;
   if (!r.ok) toast("I couldn't open your saved reads and notes, so changes won't be saved for now. Try reloading in a bit.", 'Reload', () => location.reload());
+}
+// Another tab may have changed things since this one loaded: pick up the saved state when nothing
+// here is waiting to be saved. reload hands it over only in that case, checked in the same instant,
+// so a change made while the GET was out is never thrown away. Returns whether anything changed.
+// Called when the feed or News opens, when the tab comes back into view or focus, and before paying.
+async function reloadState() {
+  if (!ready) return false;
+  const before = JSON.stringify(S);
+  await store.reload((fresh) => { S = fresh; });
+  return JSON.stringify(S) !== before;
+}
+// Redraw the feed without losing the keyboard's place (the buttons are drawn again).
+function keepFocus(draw) {
+  const a = document.activeElement;
+  const key = a && a.dataset && ['read', 'notes', 'shelf', 'edit', 'del'].find(k => a.dataset[k] !== undefined);
+  draw();
+  if (key && !document.contains(a)) refocus(attrSel('data-' + key, a.dataset[key]));
+}
+// A tab can't be clicked before it is shown or focused: catch it up first, so a tab that sat in
+// the background acts on the latest reads, folders, notes and XP. Not while a folder is being
+// renamed or the notes drawer is open (nothing there should move under Snow's hands).
+let syncing = false;
+async function syncTab() {
+  if (!ready || syncing) return;
+  syncing = true;
+  try {
+    const busy = editing !== null || !$('#drawer').hidden;
+    const [feedChanged] = await Promise.all([busy ? false : reloadState(), news.sync()]);
+    if (!feedChanged) return;
+    if (!$('#feed').hidden) keepFocus(renderFeed); else if (!$('#room').hidden) renderRoom();
+  } finally { syncing = false; }
 }
 async function loadFeed() {
   try {
@@ -103,7 +139,7 @@ function buildHotspots() {
   $('#hotspots').addEventListener('click', e => {
     const b = e.target.closest('.hs'); if (!b) return;
     const o = OBJECTS.find(x => x.id === b.dataset.id);
-    if (o.open) return openFeed();
+    if (o.go) return openDesk(o.go);
     if (!ready) return;
     if (o.lock && level() < o.lock) return toast(`${o.name} unlocks at level ${o.lock}. You're level ${level()}, so keep going.`);
     toast(`${o.name} is desk ${o.desk} in the build order. It opens once it's built.`);
@@ -126,15 +162,17 @@ function renderRoom() {
   const p = renderScene();
   if (!ready) return;
   const unread = feed.articles.filter(a => !S.read[a.id]).length;
+  // The TV's own glow and breaking mark come with N5 (news.signals() has what it needs).
   OBJECTS.forEach(o => {
     const b = document.querySelector(`.hs[data-id="${o.id}"]`); if (!b) return;
     const tag = b.querySelector('.tag');
     const locked = o.lock && level() < o.lock;
+    const isFeed = o.go === 'feed';
     b.classList.toggle('locked', !!locked);
-    b.classList.toggle('new', !!o.open && unread > 0);
-    tag.textContent = o.open ? (unread ? `${o.name} · ${unread} new` : o.name) : locked ? `${o.name} · level ${o.lock}` : o.name;
+    b.classList.toggle('new', isFeed && unread > 0);
+    tag.textContent = isFeed ? (unread ? `${o.name} · ${unread} new` : o.name) : locked ? `${o.name} · level ${o.lock}` : o.name;
     let badge = b.querySelector('.badge');
-    if (o.open && unread) { if (!badge) { badge = document.createElement('span'); badge.className = 'badge'; b.appendChild(badge); } badge.textContent = unread; }
+    if (isFeed && unread) { if (!badge) { badge = document.createElement('span'); badge.className = 'badge'; b.appendChild(badge); } badge.textContent = unread; }
     else if (badge) badge.remove();
   });
   const st = streak();
@@ -145,14 +183,21 @@ function renderRoom() {
 }
 
 /* ================= navigation ================= */
-function openFeed() { $('#frame').classList.add('zoom'); setTimeout(() => { location.hash = 'feed'; }, 750); }
+// The room zooms into the desk's object (the laptop, the TV), then the page opens.
+function openDesk(desk) { $('#frame').dataset.zoom = desk; $('#frame').classList.add('zoom'); setTimeout(() => { location.hash = desk; }, 750); }
+const openFeed = () => openDesk('feed');
+const DESK_VIEWS = { '#feed': 'feed', '#news': 'news' };
 function route() {
-  const inFeed = location.hash === '#feed';
-  $('#feed').hidden = !inFeed; $('#room').hidden = inFeed;
-  $('#backdrop').dataset.view = inFeed ? 'feed' : 'room';
+  const view = DESK_VIEWS[location.hash] || 'room';
+  $('#feed').hidden = view !== 'feed'; $('#news').hidden = view !== 'news'; $('#room').hidden = view !== 'room';
+  $('#backdrop').dataset.view = view;
   // The drawer lives outside the feed (so it stays pinned to the screen): close it when leaving.
-  if (!inFeed) { $('#drawer').hidden = true; $('#scrim').hidden = true; setBehindDrawer(false); }
-  if (inFeed) { renderScene(); if (ready) renderFeed(); window.scrollTo(0, 0); }
+  if (view !== 'feed') { $('#drawer').hidden = true; $('#scrim').hidden = true; setBehindDrawer(false); }
+  if (view === 'feed') {
+    renderScene(); window.scrollTo(0, 0);
+    if (ready) { renderFeed(); reloadState().then(changed => { if (changed && !$('#feed').hidden) keepFocus(renderFeed); }); }
+  }
+  else if (view === 'news') { renderScene(); news.render(); news.refresh(); window.scrollTo(0, 0); }
   else { requestAnimationFrame(() => requestAnimationFrame(() => $('#frame').classList.remove('zoom'))); renderRoom(); }
 }
 
@@ -267,7 +312,7 @@ function drawMap() {
 }
 const mapRO = new ResizeObserver(drawMap); mapRO.observe(mapSvg);
 function renderFeed() { renderShelves(); renderList(); renderStats(); renderBadges(); renderRail(); drawMap(); }
-function renderAll() { renderRoom(); if (!$('#feed').hidden) renderFeed(); }
+function renderAll() { renderRoom(); if (!$('#feed').hidden) renderFeed(); if (!$('#news').hidden) news.render(); }
 
 /* ================= feed actions ================= */
 function pickShelf(k) { shelf = k; editing = confirming = null; renderShelves(); renderList(); renderRail(); }
@@ -308,14 +353,19 @@ $('#folderForm').addEventListener('submit', e => {
   first ? award(5, 'folder made') : save();
   renderFeed();
 });
+// Pays once per article, ever: un-marking and re-marking doesn't pay again. Before paying it checks
+// the server's copy (another tab may have paid already) and reloads the state if nothing is waiting
+// to be saved, so the XP goes onto the latest total. Clicks made while a check is out are queued.
+let reads = Promise.resolve();
+async function readOne(id) {
+  const r = await readArticle(() => S, id, { canPay: store.canSave, peek: () => store.peek(), also: reloadState });
+  if (r.award) award(10, 'article read'); else save();
+  renderFeed(); refocus(attrSel('data-read', id), '#listTitle');
+}
 $('#list').addEventListener('click', e => {
   const t = e.target.closest('button'); if (!t) return;
-  if (t.dataset.read) {
-    const id = t.dataset.read;
-    if (S.read[id]) { delete S.read[id]; save(); }
-    else { S.read[id] = Date.now(); award(10, 'article read'); }
-    renderFeed(); refocus(attrSel('data-read', id), '#listTitle');
-  } else if (t.dataset.notes) openDrawer(t.dataset.notes);
+  if (t.dataset.read) { const id = t.dataset.read; reads = reads.then(() => readOne(id)).catch(() => {}); }
+  else if (t.dataset.notes) openDrawer(t.dataset.notes);
 });
 $('#list').addEventListener('change', e => {
   const c = e.target.closest('[data-save]'); if (!c) return;
@@ -416,7 +466,14 @@ $('#hideDialogue').addEventListener('click', () => { $('#dialogue').hidden = tru
 $('#wilaOrb').addEventListener('click', () => { $('#dialogue').hidden = !$('#dialogue').hidden; renderRoom(); });
 $('#phaseBtn').addEventListener('click', () => { const order = [null, 'morning', 'golden', 'night']; preview = order[(order.indexOf(preview) + 1) % order.length]; renderRoom(); });
 window.addEventListener('hashchange', route);
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') syncTab(); });
+window.addEventListener('focus', syncTab);
 setInterval(() => { if (!preview) renderRoom(); }, 60e3);
+
+/* ================= the News desk ================= */
+// Its page lives in news.js. Reading a story pays XP through the same award() as the feed, so XP,
+// level and the streak stay in Product Feed's state.
+const news = createNewsPage({ award, toast, isReady: () => ready, canAward: () => store.canSave, reloadXpState: reloadState });
 
 /* ================= start ================= */
 buildHotspots();
@@ -424,4 +481,4 @@ route();
 // The backdrop changes light with a soft fade, but not on the first paint: opening the page shows the
 // study straight away, so the caret stays the desk's one opening motion.
 requestAnimationFrame(() => requestAnimationFrame(() => $('#backdrop').classList.add('settled')));
-Promise.all([loadState(), loadFeed()]).then(() => { ready = true; renderAll(); });
+Promise.all([loadState(), loadFeed(), news.load()]).then(() => { ready = true; renderAll(); });
