@@ -1,7 +1,9 @@
 // npm run deploy (scripts/deploy.js). Each test builds a small git repo in a temp folder that stands in
 // for the work folder, and a temp home whose the-desk-live is the live copy. git runs for real on those
-// temp folders only (with no global or system git config, so no hooks or signing). npm, launchctl,
-// lsof and the health check are fakes: nothing here installs packages or touches Snow's service.
+// temp folders only, with no global or system git config (so no hooks or signing) and no inherited
+// GIT_* variables (so a hook's GIT_DIR can't point it at the real repo). npm, launchctl, lsof and the
+// health check are fakes, except in the one test that drives a stand-in npm through the real runner.
+// Nothing here installs packages or touches Snow's service.
 import assert from 'node:assert/strict';
 import { execFile, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -10,8 +12,8 @@ import path from 'node:path';
 import { after, describe, test } from 'node:test';
 import { REPO_ROOT } from '../server/config.js';
 import { deployedPath, readDeployed } from '../server/deployed.js';
-import { GIT, deploy, deployConfig, main, parseArgs, resolveNpmPath } from '../scripts/deploy.js';
-import { HOMEBREW_NODE, LAUNCHCTL, LSOF, buildPlist } from '../scripts/service.js';
+import { GIT, NPM_CI_TIMEOUT_MS, deploy, deployConfig, gitEnv, main, parseArgs, resolveNpmPath, stagingDir } from '../scripts/deploy.js';
+import { HOMEBREW_NODE, LAUNCHCTL, LSOF, buildPlist, runCommand } from '../scripts/service.js';
 
 const tmpDirs = [];
 after(() => tmpDirs.forEach((dir) => fs.rmSync(dir, { recursive: true, force: true })));
@@ -21,17 +23,26 @@ const tempDir = () => {
   return dir;
 };
 
-const GIT_ENV = {
-  ...process.env,
-  GIT_CONFIG_GLOBAL: '/dev/null',
-  GIT_CONFIG_NOSYSTEM: '1',
-  GIT_AUTHOR_NAME: 'Test',
-  GIT_AUTHOR_EMAIL: 'test@example.invalid',
-  GIT_COMMITTER_NAME: 'Test',
-  GIT_COMMITTER_EMAIL: 'test@example.invalid',
-};
+/**
+ * The environment the tests' own git runs with: base without any GIT_* variable (git hooks,
+ * `rebase -x` and `bisect run` export GIT_DIR, GIT_WORK_TREE, GIT_INDEX_FILE and more), no global or
+ * system config, and a fixed identity for the test commits.
+ */
+function isolatedGitEnv(base) {
+  const env = Object.fromEntries(Object.entries(base).filter(([name]) => !name.startsWith('GIT_')));
+  return {
+    ...env,
+    GIT_CONFIG_GLOBAL: '/dev/null',
+    GIT_CONFIG_NOSYSTEM: '1',
+    GIT_AUTHOR_NAME: 'Test',
+    GIT_AUTHOR_EMAIL: 'test@example.invalid',
+    GIT_COMMITTER_NAME: 'Test',
+    GIT_COMMITTER_EMAIL: 'test@example.invalid',
+  };
+}
+const GIT_ENV = isolatedGitEnv(process.env);
 
-/** Runs real git, isolated from the user's git config. Resolves { code, stdout, stderr }. */
+/** Runs real git, isolated as above. Resolves { code, stdout, stderr }. */
 function realGit(args, { cwd } = {}) {
   return new Promise((resolve) => {
     execFile('git', args, { cwd, env: GIT_ENV, encoding: 'utf8' }, (err, stdout, stderr) => {
@@ -47,19 +58,23 @@ function gitSync(cwd, ...args) {
 
 const NOW = Date.parse('2026-11-28T14:14:03Z'); // 09:14:03 in Toronto
 
+const PACKAGE_JSON = '{ "name": "the-desk", "type": "module" }\n';
 const LOCK_V1 = '{ "name": "the-desk", "lockfileVersion": 3, "packages": {} }\n';
 const LOCK_V2 = '{ "name": "the-desk", "lockfileVersion": 3, "packages": { "node_modules/ajv": {} } }\n';
 
 /**
  * A work folder (a git repo with main), a temp home, and a fake Mac around them.
  * service: 'moved' (the plist runs the live copy, loaded and running), 'old' (the plist still runs the
- * work folder), 'none' (not installed). npmCode: what npm ci exits with. health: false = never answers.
+ * work folder), 'none' (not installed). state.npmCode: what npm ci exits with (a failing npm empties
+ * node_modules in its folder first, as npm 11 does). state.health: whether The Desk answers after a
+ * (re)start. Both can change between runs.
  */
-function world({ service = 'moved', npmCode = 0, health = true } = {}) {
+function world({ service = 'moved' } = {}) {
   const root = tempDir();
   const repo = path.join(root, 'work');
   const home = path.join(root, 'home');
   const live = path.join(home, 'the-desk-live');
+  const staging = stagingDir(live);
   fs.mkdirSync(repo);
   fs.mkdirSync(home);
   const write = (rel, text) => {
@@ -75,7 +90,7 @@ function world({ service = 'moved', npmCode = 0, health = true } = {}) {
   gitSync(repo, 'init', '-q', '-b', 'main');
   const first = commit('First desk', {
     '.gitignore': 'node_modules/\n/.deployed.json*\n',
-    'package.json': '{ "name": "the-desk", "type": "module" }\n',
+    'package.json': PACKAGE_JSON,
     'package-lock.json': LOCK_V1,
     'server/index.js': '// v1\n',
     'app/index.html': '<title>v1</title>\n',
@@ -89,19 +104,25 @@ function world({ service = 'moved', npmCode = 0, health = true } = {}) {
     fs.writeFileSync(svc.plistPath, buildPlist({ ...svc, runDir, serverPath: path.join(runDir, 'server', 'index.js') }));
   }
 
-  // health: whether The Desk answers after launchd (re)starts it; a test may change it later.
-  const state = { loaded: service !== 'none', pid: service !== 'none' ? 4100 : null, deskUp: service !== 'none', health, clock: NOW, nextPid: 4242 };
+  const state = { loaded: service !== 'none', pid: service !== 'none' ? 4100 : null, deskUp: service !== 'none', health: true, npmCode: 0, clock: NOW, nextPid: 4242 };
   const calls = [];
+  const npmSaw = []; // the package files npm ci found in its folder, each time it ran
   const out = [];
   const err = [];
   const ok = (stdout = '') => ({ code: 0, stdout, stderr: '' });
   const deps = {
     async run(cmd, args, options = {}) {
-      calls.push({ cmd, args, cwd: options.cwd });
+      calls.push({ cmd, args, ...options });
       if (cmd === GIT) return realGit(args, options);
       if (cmd === cfg.npm) {
-        if (npmCode !== 0) return { code: npmCode, stdout: '', stderr: 'npm error code E404\nnpm error 404 Not Found - GET https://registry.npmjs.org/ajv\n' };
-        fs.mkdirSync(path.join(options.cwd, 'node_modules', 'ajv'), { recursive: true });
+        const read = (f) => (fs.existsSync(path.join(options.cwd, f)) ? fs.readFileSync(path.join(options.cwd, f), 'utf8') : null);
+        npmSaw.push({ 'package.json': read('package.json'), 'package-lock.json': read('package-lock.json') });
+        const modules = path.join(options.cwd, 'node_modules');
+        fs.rmSync(modules, { recursive: true, force: true }); // npm ci starts by emptying node_modules
+        fs.mkdirSync(modules);
+        if (state.npmCode !== 0) return { code: state.npmCode, stdout: '', stderr: 'npm error code E404\nnpm error 404 Not Found - GET https://registry.npmjs.org/ajv\n' };
+        fs.mkdirSync(path.join(modules, 'ajv'));
+        fs.writeFileSync(path.join(modules, 'ajv', 'index.js'), '// new ajv\n');
         return ok('added 1 package\n');
       }
       if (cmd === LSOF) return state.pid ? ok(`${state.pid}\n`) : { code: 1, stdout: '', stderr: '' };
@@ -134,25 +155,32 @@ function world({ service = 'moved', npmCode = 0, health = true } = {}) {
   const liveHead = () => gitSync(live, 'rev-parse', 'HEAD');
   const commands = (cmd) => calls.filter((c) => c.cmd === cmd);
   const launchctl = () => commands(LAUNCHCTL).map((c) => c.args.join(' '));
-  return { root, repo, home, live, cfg, svc, state, calls, out, err, deps, run, write, commit, first, liveHead, commands, launchctl, text: () => out.join('\n'), errors: () => err.join('\n') };
+  const indexOf = (pred) => calls.findIndex(pred);
+  const reset = () => {
+    calls.length = 0;
+    npmSaw.length = 0;
+    out.length = 0;
+    err.length = 0;
+  };
+  return { root, repo, home, live, staging, cfg, svc, state, calls, npmSaw, out, err, deps, run, write, commit, first, liveHead, commands, launchctl, indexOf, reset, text: () => out.join('\n'), errors: () => err.join('\n') };
 }
 
 /** A world whose service runs the live copy, already deployed at the first commit (packages installed). */
 async function deployedWorld() {
   const w = world();
   assert.equal(await deploy(w.cfg, w.deps), 0, w.errors());
-  w.calls.length = 0;
-  w.out.length = 0;
-  w.err.length = 0;
+  w.reset();
   return w;
 }
 
-// git subcommands that only read. A dry run may use these and nothing else.
-const READ_ONLY = new Set(['log', 'rev-parse', 'status', 'diff']);
+const ajvIn = (dir) => fs.readFileSync(path.join(dir, 'node_modules', 'ajv', 'index.js'), 'utf8');
+
+// git commands that only read. A dry run may use these and nothing else.
+const READ_ONLY = new Set(['log', 'rev-parse', 'status', 'diff', 'worktree list']);
 const gitSubcommand = (args) => {
   const rest = [...args];
   while (rest[0] === '-C' || rest[0] === '--no-optional-locks') rest.splice(0, rest[0] === '-C' ? 2 : 1);
-  return rest[0];
+  return rest[0] === 'worktree' ? `worktree ${rest[1]}` : rest[0];
 };
 
 describe('deploy: arguments and config', () => {
@@ -173,6 +201,7 @@ describe('deploy: arguments and config', () => {
     assert.equal(cfg.service.runDir, '/Users/snow/the-desk-live');
     assert.equal(cfg.service.serverPath, '/Users/snow/the-desk-live/server/index.js');
     assert.equal(cfg.ref, 'main');
+    assert.equal(stagingDir(cfg.liveDir), '/Users/snow/the-desk-live.staging', 'packages are staged beside the live copy, not inside it');
     assert.equal(deployConfig({ env: { DESK_LIVE_DIR: '/tmp/x' }, home: '/Users/snow', uid: 501, nodePath: 'n', npm: 'npm' }).service.runDir, '/tmp/x');
   });
 
@@ -197,8 +226,50 @@ describe('deploy: arguments and config', () => {
   });
 });
 
+describe('deploy: git never follows an inherited GIT_DIR', () => {
+  const leaky = {
+    PATH: '/usr/bin:/bin',
+    HOME: '/Users/x',
+    GIT_DIR: '/real/repo/.git',
+    GIT_WORK_TREE: '/real/repo',
+    GIT_INDEX_FILE: '/real/repo/.git/index',
+    GIT_COMMON_DIR: '/real/repo/.git',
+    GIT_OBJECT_DIRECTORY: '/real/repo/.git/objects',
+    GIT_ALTERNATE_OBJECT_DIRECTORIES: '/elsewhere/objects',
+    GIT_CONFIG_PARAMETERS: "'core.hooksPath'='/x'",
+    GIT_CONFIG_COUNT: '1',
+    GIT_CONFIG_KEY_0: 'core.hooksPath',
+    GIT_CONFIG_VALUE_0: '/x',
+  };
+
+  test('gitEnv drops every variable that redirects git, and keeps the rest', () => {
+    assert.deepEqual(gitEnv(leaky), { PATH: '/usr/bin:/bin', HOME: '/Users/x' });
+  });
+
+  test("the tests' own git drops every GIT_* variable it inherits", () => {
+    const env = isolatedGitEnv(leaky);
+    for (const name of Object.keys(leaky).filter((n) => n.startsWith('GIT_'))) assert.equal(name in env, false, name);
+    assert.equal(env.GIT_CONFIG_GLOBAL, '/dev/null');
+    assert.equal(env.PATH, '/usr/bin:/bin');
+  });
+
+  test('every git command deploy runs gets the cleaned environment', async () => {
+    const w = world();
+    w.deps.env = { ...leaky, PATH: process.env.PATH };
+    assert.equal(await deploy(w.cfg, w.deps), 0, w.errors());
+    const gits = w.commands(GIT);
+    assert.ok(gits.length > 5);
+    for (const c of gits) {
+      assert.equal(c.env.GIT_DIR, undefined, c.args.join(' '));
+      assert.equal(c.env.GIT_WORK_TREE, undefined);
+      assert.equal(c.env.GIT_INDEX_FILE, undefined);
+      assert.equal(c.env.PATH, process.env.PATH);
+    }
+  });
+});
+
 describe('deploy: the first time (no live copy yet)', () => {
-  test('makes the live copy as a worktree detached at main, installs packages, records it, then says to move the service', async () => {
+  test('installs packages beside the live copy, then makes it, swaps them in, records it, and says to move the service', async () => {
     const w = world({ service: 'old' });
     assert.equal(await w.run(), 1);
     assert.equal(w.liveHead(), w.first);
@@ -209,8 +280,15 @@ describe('deploy: the first time (no live copy yet)', () => {
     const npm = w.commands(w.cfg.npm);
     assert.equal(npm.length, 1);
     assert.deepEqual(npm[0].args, ['ci', '--omit=dev']);
-    assert.equal(npm[0].cwd, w.live, 'npm ci runs in the live copy');
+    assert.equal(npm[0].cwd, w.staging, 'npm ci runs in the staging folder, never in the live copy or the work folder');
+    assert.equal(npm[0].timeoutMs, NPM_CI_TIMEOUT_MS);
+    assert.deepEqual(w.npmSaw, [{ 'package.json': PACKAGE_JSON, 'package-lock.json': LOCK_V1 }], "the new commit's own package files");
+    const npmAt = w.indexOf((c) => c.cmd === w.cfg.npm);
+    const addAt = w.indexOf((c) => c.cmd === GIT && c.args.includes('worktree') && c.args.includes('add'));
+    assert.ok(npmAt >= 0 && npmAt < addAt, 'packages first, then the live copy');
 
+    assert.equal(ajvIn(w.live), '// new ajv\n', 'the packages were swapped into the live copy');
+    assert.equal(fs.existsSync(w.staging), false, 'and the staging folder is gone');
     assert.deepEqual(readDeployed(w.live), { sha: w.first, shortSha: w.first.slice(0, 7), subject: 'First desk', ref: 'main', deployedAt: '2026-11-28T09:14:03-05:00' });
     assert.equal(gitSync(w.live, 'status', '--porcelain'), '', '.deployed.json and node_modules are ignored: the copy stays clean');
 
@@ -218,6 +296,16 @@ describe('deploy: the first time (no live copy yet)', () => {
     assert.ok(w.errors().includes(`The live copy is ready (main @ ${w.first.slice(0, 7)} "First desk"), but The Desk service still runs from ${w.repo}.`));
     assert.match(w.errors(), /Run npm run service:install once to move the service to the live copy\./);
     assert.doesNotMatch(w.text(), /is live at/);
+  });
+
+  test('when npm ci fails the first time, no live copy is made at all', async () => {
+    const w = world({ service: 'old' });
+    w.state.npmCode = 1;
+    assert.equal(await w.run(), 1);
+    assert.equal(fs.existsSync(w.live), false);
+    assert.equal(fs.existsSync(w.staging), false);
+    assert.ok(!w.commands(GIT).some((c) => c.args.includes('add')));
+    assert.match(w.errors(), /npm ci didn't work, so nothing was deployed: the live copy is untouched/);
   });
 
   test('with no service installed at all, says to install it', async () => {
@@ -244,6 +332,7 @@ describe('deploy: updating the live copy', () => {
     assert.equal(w.liveHead(), second);
     assert.equal(fs.readFileSync(path.join(w.live, 'app', 'index.html'), 'utf8'), '<title>v2</title>\n');
     assert.equal(w.commands(w.cfg.npm).length, 0, 'no npm ci');
+    assert.equal(fs.existsSync(w.staging), false, 'no staging folder either');
     assert.equal(readDeployed(w.live).sha, second);
     assert.equal(readDeployed(w.live).subject, 'News: routes');
     assert.deepEqual(w.launchctl().filter((c) => !c.startsWith('print')), ['kickstart -k gui/501/local.thedesk.server']);
@@ -253,14 +342,23 @@ describe('deploy: updating the live copy', () => {
     assert.equal(w.out.at(-1), `The Desk is live at http://localhost:4321 on main @ ${second.slice(0, 7)} "News: routes"`);
   });
 
-  test('runs npm ci --omit=dev in the live copy when package-lock.json changed', async () => {
+  test('package-lock.json changed: npm ci in staging first, then the checkout, then the old node_modules is swapped out', async () => {
     const w = await deployedWorld();
+    fs.writeFileSync(path.join(w.live, 'node_modules', 'old-marker'), 'old');
     w.commit('Add a package', { 'package-lock.json': LOCK_V2 });
     assert.equal(await w.run(), 0, w.errors());
     const npm = w.commands(w.cfg.npm);
     assert.equal(npm.length, 1);
     assert.deepEqual(npm[0].args, ['ci', '--omit=dev']);
-    assert.equal(npm[0].cwd, w.live);
+    assert.equal(npm[0].cwd, w.staging);
+    assert.deepEqual(w.npmSaw, [{ 'package.json': PACKAGE_JSON, 'package-lock.json': LOCK_V2 }]);
+    const npmAt = w.indexOf((c) => c.cmd === w.cfg.npm);
+    const checkoutAt = w.indexOf((c) => c.cmd === GIT && c.args.includes('checkout'));
+    assert.ok(npmAt >= 0 && npmAt < checkoutAt, 'packages first, then the checkout');
+    assert.equal(ajvIn(w.live), '// new ajv\n');
+    assert.equal(fs.existsSync(path.join(w.live, 'node_modules', 'old-marker')), false, 'the old node_modules is gone');
+    assert.equal(fs.existsSync(w.staging), false);
+    assert.equal(gitSync(w.live, 'status', '--porcelain'), '');
     assert.match(w.text(), /because package-lock\.json changed/);
   });
 
@@ -270,6 +368,7 @@ describe('deploy: updating the live copy', () => {
     w.commit('Copy change', { 'app/index.html': '<title>v2</title>\n' });
     assert.equal(await w.run(), 0, w.errors());
     assert.equal(w.commands(w.cfg.npm).length, 1);
+    assert.equal(ajvIn(w.live), '// new ajv\n');
     assert.match(w.text(), /because node_modules is missing/);
   });
 
@@ -286,13 +385,15 @@ describe('deploy: updating the live copy', () => {
     const w = await deployedWorld();
     const onMain = w.commit('On main', { 'app/index.html': '<title>main</title>\n' });
     gitSync(w.repo, 'switch', '-q', '-c', 'n9-story');
-    w.commit('Story work', { 'app/index.html': '<title>story</title>\n' });
+    w.commit('Story work', { 'app/index.html': '<title>story</title>\n', 'package-lock.json': LOCK_V2 });
     w.write('app/index.html', '<title>uncommitted</title>\n');
     w.write('app/new.js', '// untracked\n');
+    w.write('package.json', '{ "name": "uncommitted" }\n');
     assert.equal(await w.run(), 0, w.errors());
     assert.equal(w.liveHead(), onMain);
     assert.equal(fs.readFileSync(path.join(w.live, 'app', 'index.html'), 'utf8'), '<title>main</title>\n');
     assert.equal(fs.existsSync(path.join(w.live, 'app', 'new.js')), false);
+    assert.equal(w.commands(w.cfg.npm).length, 0, "main's lockfile didn't change, whatever the branch did");
     assert.match(w.text(), /This folder is on branch n9-story\. That doesn't matter: deploy always takes main\./);
     assert.match(w.text(), /This folder has uncommitted changes\. They stay here/);
     assert.equal(fs.readFileSync(path.join(w.repo, 'app', 'index.html'), 'utf8'), '<title>uncommitted</title>\n', 'and the work folder is left alone');
@@ -301,14 +402,15 @@ describe('deploy: updating the live copy', () => {
   test('refuses when the live copy has changes of its own, changing nothing', async () => {
     const w = await deployedWorld();
     const before = fs.readFileSync(deployedPath(w.live), 'utf8');
-    w.commit('Next', { 'app/index.html': '<title>v2</title>\n' });
+    w.commit('Next', { 'app/index.html': '<title>v2</title>\n', 'package-lock.json': LOCK_V2 });
     fs.writeFileSync(path.join(w.live, 'app', 'index.html'), '<title>hand edit</title>\n');
     fs.writeFileSync(path.join(w.live, 'stray.txt'), 'x');
     assert.equal(await w.run(), 1);
     assert.equal(w.liveHead(), w.first, 'not moved');
     assert.equal(fs.readFileSync(path.join(w.live, 'app', 'index.html'), 'utf8'), '<title>hand edit</title>\n', 'the hand edit is kept');
     assert.equal(fs.readFileSync(deployedPath(w.live), 'utf8'), before);
-    assert.equal(w.commands(w.cfg.npm).length, 0);
+    assert.equal(w.commands(w.cfg.npm).length, 0, 'not even staged: every check comes before any change');
+    assert.equal(fs.existsSync(w.staging), false);
     assert.deepEqual(w.launchctl(), []);
     const errors = w.errors();
     assert.match(errors, /The live copy has changes of its own, so nothing was deployed:\n {2} M app\/index\.html\n {2}\?\? stray\.txt/);
@@ -329,14 +431,26 @@ describe('deploy: updating the live copy', () => {
     assert.match(other.errors(), /isn't a live copy of this repo/);
   });
 
-  test('refuses to use the work folder itself, or a folder inside it, as the live copy', async () => {
+  test('run from inside the live copy: says to run it from the work folder, plainly', async () => {
+    const w = await deployedWorld();
+    const cfg = deployConfig({ env: { DESK_LIVE_DIR: w.live }, home: w.home, uid: 501, repoRoot: w.live, nodePath: HOMEBREW_NODE, npm: '/fake/bin/npm' });
+    assert.equal(await deploy(cfg, w.deps), 1);
+    assert.equal(w.errors(), `Run npm run deploy from your work folder (${fs.realpathSync(w.repo)}), not from the live copy. Nothing was changed.`);
+    assert.ok(w.calls.every((c) => c.cmd === GIT && gitSubcommand(c.args) === 'worktree list'), 'only asks git where the work folder is');
+  });
+
+  test('refuses a live copy that is the work folder itself, or inside it', async () => {
     const w = world();
     for (const live of [w.repo, path.join(w.repo, 'live')]) {
+      w.reset();
       const cfg = deployConfig({ env: { DESK_LIVE_DIR: live }, home: w.home, uid: 501, repoRoot: w.repo, nodePath: HOMEBREW_NODE, npm: '/fake/bin/npm' });
       assert.equal(await deploy(cfg, w.deps), 1);
+      assert.ok(
+        w.errors().startsWith(`The live copy (${live}) can't be your work folder or sit inside it (${w.repo}), so nothing was changed.\nPoint DESK_LIVE_DIR somewhere else`),
+        w.errors(),
+      );
+      assert.ok(w.calls.every((c) => c.cmd === GIT && READ_ONLY.has(gitSubcommand(c.args))));
     }
-    assert.match(w.errors(), /can't be this folder or sit inside it/);
-    assert.deepEqual(w.calls, []);
   });
 
   test('refuses when there is no main branch', async () => {
@@ -347,31 +461,47 @@ describe('deploy: updating the live copy', () => {
     assert.equal(fs.existsSync(w.live), false);
   });
 
-  test('when npm ci fails, it does not restart or record the deploy', async () => {
+  test('a failed npm ci changes nothing in the live copy: same commit, same packages, same record, no restart', async () => {
     const w = await deployedWorld();
+    fs.writeFileSync(path.join(w.live, 'node_modules', 'ajv', 'index.js'), '// old ajv\n');
     w.commit('Add a package', { 'package-lock.json': LOCK_V2 });
     const before = fs.readFileSync(deployedPath(w.live), 'utf8');
-    const failing = world({ npmCode: 1 });
-    w.deps.run = ((run) => async (cmd, args, options) => (cmd === w.cfg.npm ? failing.deps.run(cmd, args, options) : run(cmd, args, options)))(w.deps.run);
+    w.state.npmCode = 1;
     assert.equal(await w.run(), 1);
-    assert.match(w.errors(), /npm ci didn't work in the live copy, so The Desk was not restarted[\s\S]*E404/);
+    assert.equal(w.liveHead(), w.first, 'not moved: the next launchd start still runs the old code');
+    assert.equal(ajvIn(w.live), '// old ajv\n', 'with its old packages, untouched');
     assert.equal(fs.readFileSync(deployedPath(w.live), 'utf8'), before);
-    assert.ok(!w.launchctl().includes('kickstart -k gui/501/local.thedesk.server'));
+    assert.equal(fs.existsSync(w.staging), false, 'the staging folder is cleaned up');
+    assert.ok(!w.commands(GIT).some((c) => c.args.includes('checkout')));
+    assert.deepEqual(w.launchctl(), []);
+    assert.equal(gitSync(w.live, 'status', '--porcelain'), '');
+    assert.match(w.errors(), /^npm ci didn't work, so nothing was deployed: the live copy is untouched and The Desk keeps running what it had\.\n {2}npm error code E404/);
   });
 
-  test('after a failed npm ci, the next deploy installs the packages again (even though the copy already moved)', async () => {
+  test('after a failed npm ci, the next deploy installs the packages and moves the copy', async () => {
     const w = await deployedWorld();
     const second = w.commit('Add a package', { 'package-lock.json': LOCK_V2 });
-    const realRun = w.deps.run;
-    w.deps.run = async (cmd, args, options) => (cmd === w.cfg.npm ? { code: 1, stdout: '', stderr: 'npm error network\n' } : realRun(cmd, args, options));
+    w.state.npmCode = 1;
     assert.equal(await w.run(), 1);
-    assert.equal(w.liveHead(), second, 'the copy moved before npm failed');
-    w.deps.run = realRun;
-    w.calls.length = 0;
+    assert.equal(w.liveHead(), w.first);
+    w.state.npmCode = 0;
+    w.reset();
     assert.equal(await w.run(), 0, w.errors());
-    assert.equal(w.commands(w.cfg.npm).length, 1, 'npm ci again');
+    assert.equal(w.commands(w.cfg.npm).length, 1);
     assert.match(w.text(), /because package-lock\.json changed/);
+    assert.equal(w.liveHead(), second);
     assert.equal(readDeployed(w.live).sha, second);
+  });
+
+  test('a commit with no package-lock.json is refused before the live copy changes', async () => {
+    const w = await deployedWorld();
+    fs.rmSync(path.join(w.repo, 'package-lock.json'));
+    w.commit('Drop the lockfile');
+    assert.equal(await w.run(), 1);
+    assert.match(w.errors(), /main @ [0-9a-f]{7} has no package-lock\.json that git can read, so nothing was changed\./);
+    assert.equal(w.liveHead(), w.first);
+    assert.equal(fs.existsSync(w.staging), false);
+    assert.equal(w.commands(w.cfg.npm).length, 0);
   });
 
   test('a live copy with packages but no deploy recorded gets a fresh npm ci', async () => {
@@ -380,6 +510,29 @@ describe('deploy: updating the live copy', () => {
     assert.equal(await w.run(), 0, w.errors());
     assert.equal(w.commands(w.cfg.npm).length, 1);
     assert.match(w.text(), /because no earlier deploy is recorded/);
+  });
+
+  test('a staging folder left by an interrupted deploy is removed first', async () => {
+    const w = await deployedWorld();
+    fs.mkdirSync(path.join(w.staging, 'node_modules', 'half'), { recursive: true });
+    fs.mkdirSync(path.join(w.staging, 'node_modules.old'));
+    fs.writeFileSync(path.join(w.staging, 'package.json'), '{}');
+    w.commit('Next', { 'app/index.html': '<title>v2</title>\n' });
+    assert.equal(await w.run(), 0, w.errors());
+    assert.equal(fs.existsSync(w.staging), false);
+    assert.match(w.text(), /Removing a staging folder left by an interrupted deploy/);
+  });
+
+  test("a staging folder holding anything deploy didn't put there is left alone, and deploy stops", async () => {
+    const w = await deployedWorld();
+    fs.mkdirSync(w.staging);
+    fs.writeFileSync(path.join(w.staging, 'thesis.docx'), 'precious');
+    w.commit('Next', { 'app/index.html': '<title>v2</title>\n' });
+    assert.equal(await w.run(), 1);
+    assert.equal(fs.readFileSync(path.join(w.staging, 'thesis.docx'), 'utf8'), 'precious');
+    assert.equal(w.liveHead(), w.first);
+    assert.match(w.errors(), /holds things deploy didn't put there, so nothing was changed\./);
+    assert.deepEqual(w.calls, []);
   });
 
   test('when The Desk does not answer after the restart, it says so and never claims it is live', async () => {
@@ -392,6 +545,28 @@ describe('deploy: updating the live copy', () => {
   });
 });
 
+describe('deploy with the real runner', () => {
+  test('npm ci runs in the staging folder (not the work folder) and its packages land in the live copy', async () => {
+    const w = world();
+    const bin = path.join(w.root, 'bin');
+    const log = path.join(w.root, 'npm.log');
+    const npm = path.join(bin, 'npm');
+    fs.mkdirSync(bin);
+    // A stand-in npm: notes where it ran, what it was asked and which lockfile it found, then "installs".
+    fs.writeFileSync(npm, `#!/bin/sh\npwd -P >> '${log}'\necho "$*" >> '${log}'\nhead -c 40 package-lock.json >> '${log}'\necho >> '${log}'\nmkdir -p node_modules/ajv\n`, { mode: 0o755 });
+    const fakeRun = w.deps.run;
+    w.deps.run = (cmd, args, options) => (cmd === npm ? runCommand(cmd, args, options) : fakeRun(cmd, args, options));
+    assert.equal(await deploy({ ...w.cfg, npm }, w.deps), 0, w.errors());
+    assert.deepEqual(fs.readFileSync(log, 'utf8').trim().split('\n'), [
+      path.join(fs.realpathSync(w.home), 'the-desk-live.staging'),
+      'ci --omit=dev',
+      LOCK_V1.slice(0, 40),
+    ]);
+    assert.ok(fs.statSync(path.join(w.live, 'node_modules', 'ajv')).isDirectory());
+    assert.equal(fs.existsSync(path.join(w.repo, 'node_modules')), false, 'nothing was installed in the work folder');
+  });
+});
+
 describe('deploy --dry-run', () => {
   const assertReadOnly = (w) => {
     for (const c of w.calls) {
@@ -400,27 +575,46 @@ describe('deploy --dry-run', () => {
     }
   };
 
-  test('no live copy yet: prints every step, runs only read-only git, and creates nothing', async () => {
+  test('no live copy yet: prints every step in order, runs only read-only git, and creates nothing', async () => {
     const w = world({ service: 'old' });
     const plistBefore = fs.readFileSync(w.svc.plistPath, 'utf8');
     assert.equal(await w.run('--dry-run'), 0, w.errors());
     assertReadOnly(w);
     assert.equal(fs.existsSync(w.live), false, 'no live copy made');
+    assert.equal(fs.existsSync(w.staging), false, 'no staging folder made');
     assert.equal(gitSync(w.repo, 'worktree', 'list', '--porcelain').split('\n').filter((l) => l.startsWith('worktree ')).length, 1);
     assert.equal(fs.readFileSync(w.svc.plistPath, 'utf8'), plistBefore);
     const text = w.text();
     const short = w.first.slice(0, 7);
     assert.ok(text.startsWith('Dry run: nothing is changed.\n'));
     assert.ok(text.includes(`Deploying main @ ${short} "First desk" to the live copy, ${w.live}`));
-    assert.ok(text.includes(`1. There's no live copy yet. Make it, a git worktree of this repo detached at main:\n   git -C ${w.repo} worktree add --detach ${w.live} ${w.first}`));
-    assert.ok(text.includes(`2. Install its packages (a new live copy):\n   cd ${w.live} && /fake/bin/npm ci --omit=dev`));
-    assert.ok(text.includes(`3. Write ${w.live}/.deployed.json:\n   {\n     "sha": "${w.first}",`));
+    assert.ok(
+      text.includes(
+        [
+          '1. Install the packages first, outside the live copy (a new live copy):',
+          `   mkdir ${w.staging}`,
+          `   git -C ${w.repo} show ${w.first}:package.json > ${w.staging}/package.json`,
+          `   git -C ${w.repo} show ${w.first}:package-lock.json > ${w.staging}/package-lock.json`,
+          `   cd ${w.staging} && /fake/bin/npm ci --omit=dev`,
+          '   If that fails, deploy removes the staging folder and stops here: the live copy is untouched.',
+          "2. There's no live copy yet. Make it, a git worktree of this repo detached at main:",
+          `   git -C ${w.repo} worktree add --detach ${w.live} ${w.first}`,
+          '3. Swap the new packages in, then remove the staging folder:',
+          `   mv ${w.staging}/node_modules ${w.live}/node_modules`,
+          `   rm -rf ${w.staging}`,
+          `4. Write ${w.live}/.deployed.json:`,
+          '   {',
+          `     "sha": "${w.first}",`,
+        ].join('\n'),
+      ),
+      text,
+    );
     assert.ok(text.includes('"deployedAt": "2026-11-28T09:14:03-05:00"'));
-    assert.ok(text.includes(`4. Check that the service runs from the live copy (WorkingDirectory in ${w.svc.plistPath}).\n   It doesn't yet, so deploy stops here and says:`));
+    assert.ok(text.includes(`5. Check that the service runs from the live copy (WorkingDirectory in ${w.svc.plistPath}).\n   It doesn't yet, so deploy stops here and says:`));
     assert.ok(text.includes('Run npm run service:install once to move the service to the live copy.'));
   });
 
-  test('existing live copy with a new lockfile: shows the checkout, npm ci and the restart, changes nothing', async () => {
+  test('existing live copy with a new lockfile: install first, then checkout, swap, record and restart; changes nothing', async () => {
     const w = await deployedWorld();
     const second = w.commit('Add a package', { 'package-lock.json': LOCK_V2 });
     const recorded = fs.readFileSync(deployedPath(w.live), 'utf8');
@@ -428,19 +622,32 @@ describe('deploy --dry-run', () => {
     assertReadOnly(w);
     assert.equal(w.liveHead(), w.first, 'not moved');
     assert.equal(fs.readFileSync(deployedPath(w.live), 'utf8'), recorded);
+    assert.equal(fs.existsSync(w.staging), false);
     const text = w.text();
-    assert.ok(text.includes(`1. The live copy is on ${w.first.slice(0, 7)} and has no changes of its own. Move it to main:\n   git -C ${w.live} checkout --quiet --detach ${second}`));
-    assert.ok(text.includes(`2. Install its packages (package-lock.json changed):\n   cd ${w.live} && /fake/bin/npm ci --omit=dev`));
+    assert.ok(text.includes(`1. Install the packages first, outside the live copy (package-lock.json changed):\n   mkdir ${w.staging}`), text);
+    assert.ok(text.includes(`2. The live copy is on ${w.first.slice(0, 7)} and has no changes of its own. Move it to main:\n   git -C ${w.live} checkout --quiet --detach ${second}`));
+    assert.ok(text.includes(`3. Swap the new packages in, then remove the staging folder:\n   mv ${w.live}/node_modules ${w.staging}/node_modules.old\n   mv ${w.staging}/node_modules ${w.live}/node_modules\n   rm -rf ${w.staging}`));
+    assert.ok(text.includes(`4. Write ${w.live}/.deployed.json:`));
     assert.ok(text.includes('   It does.'));
-    assert.ok(text.includes('5. Restart it and wait up to 15 s for http://127.0.0.1:4321/api/feed to answer:\n   /bin/launchctl kickstart -k gui/501/local.thedesk.server'));
-    assert.ok(text.endsWith(`6. Say: The Desk is live at http://localhost:4321 on main @ ${second.slice(0, 7)} "Add a package"`));
+    assert.ok(text.includes('6. Restart it and wait up to 15 s for http://127.0.0.1:4321/api/feed to answer:\n   /bin/launchctl kickstart -k gui/501/local.thedesk.server'));
+    assert.ok(text.endsWith(`7. Say: The Desk is live at http://localhost:4321 on main @ ${second.slice(0, 7)} "Add a package"`));
   });
 
-  test('same lockfile and node_modules there: says no npm ci is needed', async () => {
+  test('same lockfile and node_modules there: no npm ci, no swap', async () => {
     const w = await deployedWorld();
     w.commit('Copy', { 'app/index.html': '<title>v2</title>\n' });
     assert.equal(await w.run('--dry-run'), 0);
-    assert.match(w.text(), /2\. Packages: node_modules is there and package-lock\.json is the same, so no npm ci\./);
+    assert.match(w.text(), /1\. Packages: node_modules is there and package-lock\.json is the same, so no npm ci\.\n2\. The live copy is on/);
+    assert.doesNotMatch(w.text(), /Swap/);
+  });
+
+  test('a leftover staging folder: says it would be removed, and leaves it there', async () => {
+    const w = await deployedWorld();
+    fs.mkdirSync(path.join(w.staging, 'node_modules'), { recursive: true });
+    assert.equal(await w.run('--dry-run'), 0);
+    assertReadOnly(w);
+    assert.ok(w.text().includes(`1. Remove a staging folder left by an interrupted deploy: rm -rf ${w.staging}`), w.text());
+    assert.ok(fs.existsSync(path.join(w.staging, 'node_modules')));
   });
 
   test('a dirty live copy: the dry run stops where the deploy would', async () => {
