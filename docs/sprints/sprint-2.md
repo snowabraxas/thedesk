@@ -18,7 +18,7 @@ Update this table the moment a story changes state (Not started, In progress, In
 | N4 The News desk page | Designer, developer | Done | Live 27 Nov. Snow approved the screenshots and tried it on the sample edition ("all good"). Save edge cases follow in N4b |
 | N5 The TV in the room | Tester | In review | Branch n5-tv-in-room. Snow approved 27 Nov with breaking mark A (the badge). Tester running; merges after N4 |
 | N6 Polish at 390 px and contrast | Designer, tester | Not started | Snow's OK before changes land |
-| N7 Sample edition and friendly states | Developer | In progress | Branch n7-friendly-states (built alongside N5/N6, merges after them). The sample edition itself landed with N3 |
+| N7 Sample edition and friendly states | Tester | In review | Branch n7-friendly-states: built, 789 tests (late, early, stale, sample, thin, can't-reach states). Merges after N5 and N6; Snow sees it with the N7 showing |
 | N9 The News agent | Snow and lead dev | Not started | After S5 |
 
 ---
