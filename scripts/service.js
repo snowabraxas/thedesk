@@ -296,10 +296,55 @@ export function outputKeeper(headMax = OUTPUT_HEAD, tailMax = OUTPUT_TAIL) {
   };
 }
 
+// Commands run in their own process group, so the terminal's Ctrl+C (or launchd's SIGTERM) no longer
+// reaches them by itself. One shared handler, installed while any command runs, passes the signal
+// that arrived (SIGINT stays SIGINT, which npm obeys) on to every running group, waits up to
+// SIGNAL_WAIT_MS for them to go, SIGKILLs whatever is left, and then stops this process the usual way.
+export const FORWARDED_SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT'];
+export const SIGNAL_WAIT_MS = 2000;
+const liveGroups = new Set();
+
+function signalGroup(group, sig) {
+  try {
+    process.kill(-group.pid, sig);
+  } catch {
+    try {
+      group.child.kill(sig);
+    } catch {
+      /* already gone */
+    }
+  }
+}
+
+function onProcessSignal(sig) {
+  for (const s of FORWARDED_SIGNALS) process.off(s, onProcessSignal); // a second Ctrl+C stops us at once
+  const groups = [...liveGroups];
+  for (const group of groups) signalGroup(group, sig);
+  const allExited = Promise.all(groups.map((group) => group.exited));
+  const waited = new Promise((resolve) => setTimeout(resolve, SIGNAL_WAIT_MS));
+  Promise.race([allExited, waited]).then(() => {
+    for (const group of groups) signalGroup(group, 'SIGKILL'); // the rest of each group, if any
+    process.kill(process.pid, sig);
+  });
+}
+
+function trackGroup(group) {
+  if (liveGroups.size === 0) for (const s of FORWARDED_SIGNALS) process.on(s, onProcessSignal);
+  liveGroups.add(group);
+}
+
+function untrackGroup(group) {
+  if (liveGroups.delete(group) && liveGroups.size === 0) for (const s of FORWARDED_SIGNALS) process.off(s, onProcessSignal);
+}
+
+/** How many commands are running right now, each in its own process group (for the tests). */
+export const runningGroups = () => liveGroups.size;
+
 /**
  * Runs a command; resolves { code, stdout, stderr } and never rejects.
  * - The command runs in its own process group, and every stop goes to the whole group, so nothing it
- *   started is left behind. If this process is stopped (Ctrl+C, launchd), the group is stopped too.
+ *   started is left behind. If this process gets SIGINT, SIGTERM, SIGHUP or SIGQUIT, the same signal
+ *   goes to the group first (see onProcessSignal). The time limit keeps running meanwhile.
  * - The time limit is hard: at timeoutMs the group gets SIGTERM, and if it is still there graceMs
  *   later (npm ignores SIGTERM while it waits on a hung registry connection), SIGKILL. It only counts
  *   as timed out if the command was still running at the deadline.
@@ -315,34 +360,18 @@ export function runCommand(cmd, args, { timeoutMs = 20_000, graceMs = KILL_GRACE
     const out = outputKeeper();
     const err = outputKeeper();
     let child = null;
+    let group = null;
     let timedOut = false;
     let exited = null;
     let done = false;
     let killTimer = null;
     let drainTimer = null;
-    const signalGroup = (sig) => {
-      if (!child?.pid) return;
-      try {
-        process.kill(-child.pid, sig);
-      } catch {
-        try {
-          child.kill(sig);
-        } catch {
-          /* already gone */
-        }
-      }
-    };
-    const onSignal = (sig) => {
-      signalGroup('SIGTERM');
-      cleanup();
-      process.kill(process.pid, sig); // then stop the way we would have without this listener
-    };
+    const toGroup = (sig) => group && signalGroup(group, sig);
     const cleanup = () => {
       clearTimeout(termTimer);
       clearTimeout(killTimer);
       clearTimeout(drainTimer);
-      process.off('SIGINT', onSignal);
-      process.off('SIGTERM', onSignal);
+      if (group) untrackGroup(group);
     };
     const finish = (code, signal, error) => {
       if (done) return;
@@ -358,16 +387,21 @@ export function runCommand(cmd, args, { timeoutMs = 20_000, graceMs = KILL_GRACE
     const termTimer = setTimeout(() => {
       if (exited) return;
       timedOut = true;
-      signalGroup('SIGTERM');
-      killTimer = setTimeout(() => signalGroup('SIGKILL'), graceMs);
+      toGroup('SIGTERM');
+      killTimer = setTimeout(() => toGroup('SIGKILL'), graceMs);
     }, timeoutMs);
     try {
       child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'], detached: true, ...(cwd ? { cwd } : {}), ...(env ? { env } : {}) });
     } catch (e) {
       return finish(null, null, e);
     }
-    process.on('SIGINT', onSignal);
-    process.on('SIGTERM', onSignal);
+    if (child.pid) {
+      let markExited;
+      group = { pid: child.pid, child, exited: new Promise((resolve) => (markExited = resolve)) };
+      child.once('exit', () => markExited());
+      child.once('error', () => markExited());
+      trackGroup(group);
+    }
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
     child.stdout.on('data', (c) => out.add(c));
@@ -377,7 +411,7 @@ export function runCommand(cmd, args, { timeoutMs = 20_000, graceMs = KILL_GRACE
       exited = { code, signal };
       clearTimeout(termTimer);
       clearTimeout(killTimer);
-      if (timedOut) signalGroup('SIGKILL'); // whatever of the group is left after a timeout goes too
+      if (timedOut) toGroup('SIGKILL'); // whatever of the group is left after a timeout goes too
       drainTimer = setTimeout(() => {
         child.stdout.destroy();
         child.stderr.destroy();
@@ -475,11 +509,12 @@ function describeExit(svc) {
 // ---------- the real launchd service is shared ----------
 
 // launchd's label (local.thedesk.server in gui/<uid>) is the same whatever HOME says. A test, a
-// review or an experiment run with a fake HOME that reached the real launchctl would restart, stop
-// or remove Snow's live Desk. So the real runner refuses every launchctl verb that changes state
-// unless HOME is the real home folder and the live copy sits inside it. Read-only verbs (print,
-// print-disabled) still run. Tests must inject their own runner; they never reach the real one.
-export const LAUNCHD_CHANGES = new Set(['bootstrap', 'bootout', 'kickstart', 'enable', 'disable', 'kill', 'load', 'unload', 'remove']);
+// review or an experiment that reached the real launchctl would restart, stop or remove Snow's live
+// Desk. So the real runner lets through only launchctl verbs that read, unless every one of these
+// holds: HOME is the real home folder, this is not a test run (NODE_TEST_CONTEXT), a service config
+// is bound to the runner (realDeps(cfg)) and it is for the real home with the live copy inside it.
+// A bootstrap must also name the real plist. Tests inject their own runner; they never reach this one.
+export const LAUNCHD_READS = new Set(['print', 'print-disabled', 'list', 'blame', 'version', 'help']);
 
 function userHome() {
   try {
@@ -491,10 +526,11 @@ function userHome() {
 
 /**
  * Why this run must not change the real launchd service, or null when it may.
- * @param {{ env?: Record<string, string|undefined>, cfg?: { home: string, runDir: string } | null, homedir?: string, realHome?: string|null }} [facts]
- *   homedir: what HOME says (os.homedir()); realHome: the account's real home (os.userInfo().homedir)
+ * @param {{ env?: Record<string, string|undefined>, cfg?: { home: string, runDir: string } | null, homedir?: string, realHome?: string|null, requireCfg?: boolean }} [facts]
+ *   homedir: what HOME says (os.homedir()); realHome: the account's real home (os.userInfo().homedir);
+ *   requireCfg: refuse when no config is given (the real runner always asks this way)
  */
-export function launchdRefusal({ env = process.env, cfg = null, homedir = os.homedir(), realHome = userHome() } = {}) {
+export function launchdRefusal({ env = process.env, cfg = null, homedir = os.homedir(), realHome = userHome(), requireCfg = false } = {}) {
   const tail = "so I won't touch the real launchd service (its name is shared). Use --dry-run or the test hooks.";
   if (!realHome) return `I can't tell your real home folder, ${tail}`;
   const real = path.resolve(realHome);
@@ -502,7 +538,9 @@ export function launchdRefusal({ env = process.env, cfg = null, homedir = os.hom
     const r = path.resolve(p);
     return r === real || r.startsWith(real + path.sep);
   };
+  if (env.NODE_TEST_CONTEXT) return `This is a test run (NODE_TEST_CONTEXT is set), ${tail}`;
   if (path.resolve(homedir) !== real) return `HOME (${homedir}) is not your real home folder (${real}), ${tail}`;
+  if (requireCfg && !cfg) return `No service config was bound to this runner, ${tail}`;
   if (cfg && path.resolve(cfg.home) !== real) return `This run's home folder (${cfg.home}) is not your real one (${real}), ${tail}`;
   if ((env.DESK_LIVE_DIR || '').trim() && !insideReal(resolveLiveDir(env, homedir))) {
     return `DESK_LIVE_DIR (${resolveLiveDir(env, homedir)}) is outside your real home folder (${real}), ${tail}`;
@@ -512,14 +550,26 @@ export function launchdRefusal({ env = process.env, cfg = null, homedir = os.hom
 }
 
 /**
- * Wraps a runner so launchctl verbs that change state are refused (code 1, the reason as stderr)
- * whenever refusal() names a reason. Everything else goes through untouched.
+ * Wraps a runner for launchctl (matched by its name, in any case): verbs that only read go through;
+ * any other verb is refused (code 1, the reason as stderr) when refusal() names a reason, and a
+ * bootstrap is refused unless its plist is the real one (~/Library/LaunchAgents of the real home).
+ * Everything that isn't launchctl goes through untouched.
  */
-export function guardLaunchctl(run, refusal) {
+export function guardLaunchctl(run, refusal, { realHome = userHome() } = {}) {
+  const refuse = (why) => Promise.resolve({ code: 1, stdout: '', stderr: why });
   return (cmd, args = [], options) => {
-    if (path.basename(String(cmd)) === 'launchctl' && LAUNCHD_CHANGES.has(args[0])) {
-      const why = refusal();
-      if (why) return Promise.resolve({ code: 1, stdout: '', stderr: why });
+    if (path.basename(String(cmd)).toLowerCase() === 'launchctl') {
+      const verb = String(args[0] ?? '');
+      if (!LAUNCHD_READS.has(verb)) {
+        const why = refusal();
+        if (why) return refuse(why);
+        if (verb === 'bootstrap') {
+          const expected = realHome ? servicePlistPath(realHome) : null;
+          if (!expected || !args[2] || path.resolve(String(args[2])) !== expected) {
+            return refuse(`launchctl bootstrap may only load ${expected ?? 'the real ~/Library/LaunchAgents plist'}, not ${args[2] ?? 'nothing'}, so I won't touch the real launchd service (its name is shared).`);
+          }
+        }
+      }
     }
     return run(cmd, args, options);
   };
@@ -542,10 +592,14 @@ export function guardLaunchctl(run, refusal) {
  *   the real launchd service (see launchdRefusal); injected test deps leave it out
  */
 
-export function realDeps() {
+/**
+ * The real outside world. cfg is the service config the run works on: the launchctl guard checks it
+ * (launchdRefusal({ cfg })), and without one nothing may change launchd's state.
+ */
+export function realDeps(cfg = null) {
   return {
-    run: guardLaunchctl(runCommand, () => launchdRefusal()),
-    launchdRefusal: (cfg) => launchdRefusal({ cfg }),
+    run: guardLaunchctl(runCommand, () => launchdRefusal({ cfg, requireCfg: true })),
+    launchdRefusal: (other) => launchdRefusal({ cfg: other ?? cfg, requireCfg: true }),
     portIsFree,
     probe: (port) => probeDesk(port, { timeoutMs: 2000 }),
     sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
@@ -700,12 +754,16 @@ export function missingPackages(dir, fsImpl = fs, modulesDir = path.join(dir, 'n
 export const LOAD_CHECK_CODE = "const { pathToFileURL } = await import('node:url'); await import(pathToFileURL('server/index.js').href); process.exit(0);";
 
 /**
- * Does the code in dir load, packages and all? Catches what a file check can't: a package another
- * package needs (ajv needs fast-deep-equal), a module that throws on import.
+ * Does the code in dir load, packages and all, the way the service would run it (svc: a
+ * serviceConfig, for its node and its environment)? Catches what a file check can't: a package
+ * another package needs (ajv needs fast-deep-equal), a module that throws on import.
  * @returns {Promise<{ ok: true } | { ok: false, error: string }>}
  */
-export async function loadCheck(dir, nodePath, deps) {
-  const r = await deps.run(nodePath, ['--input-type=module', '-e', LOAD_CHECK_CODE], { cwd: dir, timeoutMs: 30_000 });
+export async function loadCheck(dir, svc, deps) {
+  // What launchd gives the service, not this shell's: NODE_PATH or NODE_OPTIONS here must not make
+  // it pass when the service itself would crash.
+  const env = { ...svc.env, HOME: svc.home };
+  const r = await deps.run(svc.nodePath, ['--input-type=module', '-e', LOAD_CHECK_CODE], { cwd: dir, timeoutMs: 30_000, env });
   if (r.code === 0) return { ok: true };
   const all = String(r.stderr || r.stdout || '').split('\n').map((l) => l.trim()).filter(Boolean);
   const line = all.find((l) => /^[A-Za-z]*Error\b/.test(l)) || all.at(-1) || `exit ${r.code}`;
@@ -752,7 +810,7 @@ export async function liveCopyState(cfg, deps) {
     problems.push(`it has changes of its own (${changed.slice(0, 3).map((l) => oneLine(l, 120)).join(', ')}${changed.length > 3 ? `, and ${changed.length - 3} more` : ''})`);
   }
   if (!problems.length) {
-    const load = await loadCheck(cfg.runDir, cfg.nodePath, deps);
+    const load = await loadCheck(cfg.runDir, cfg, deps);
     if (!load.ok) problems.push(`its server doesn't load: ${load.error}`);
   }
   return problems.length ? { ready: false, there: true, problems } : { ready: true, deployed };
@@ -1003,17 +1061,16 @@ export async function status(cfg, deps) {
 const RUNNERS = { install, uninstall, start, stop, restart, status };
 
 /** The whole CLI, with everything outside injected. Returns the exit code. */
-export async function main(argv, { env = process.env, deps = realDeps(), cfg } = {}) {
+export async function main(argv, { env = process.env, deps: given, cfg } = {}) {
   const args = parseArgs(argv, env);
-  if (args.error) {
-    deps.err(`${args.error}\n\n${USAGE}`);
-    return 2;
-  }
-  if (args.command === 'help') {
-    deps.out(USAGE);
-    return 0;
+  if (args.error || args.command === 'help') {
+    const deps = given || realDeps();
+    if (args.error) deps.err(`${args.error}\n\n${USAGE}`);
+    else deps.out(USAGE);
+    return args.error ? 2 : 0;
   }
   const config = cfg || serviceConfig({ env });
+  const deps = given || realDeps(config); // the guard checks this very config
   // Commands that change launchd state stop here, before anything, when this run's HOME or live copy
   // isn't the real one (the real runner refuses those verbs too). status and dry runs only read.
   if (args.command !== 'status' && !(args.command === 'install' && args.dryRun)) {

@@ -8,7 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, describe, test } from 'node:test';
 import { pathToFileURL } from 'node:url';
-import { REPO_ROOT } from '../server/config.js';
+import { REPO_ROOT, servicePlistPath } from '../server/config.js';
 import { deployedPath, deployedRecord } from '../server/deployed.js';
 import {
   GIT,
@@ -35,6 +35,7 @@ import {
   protectedFolder,
   readLogSince,
   realDeps,
+  runningGroups,
   resolveNodePath,
   serviceConfig,
   shellQuote,
@@ -496,10 +497,36 @@ describe('service:install', () => {
     fs.writeFileSync(path.join(dir, 'node_modules', 'ajv', 'package.json'), '{ "name": "ajv", "main": "index.js" }');
     fs.writeFileSync(path.join(dir, 'node_modules', 'ajv', 'index.js'), "require('fast-deep-equal');\n");
     const deps = { run: runCommand };
-    assert.deepEqual(await loadCheck(dir, process.execPath, deps), { ok: false, error: "Error: Cannot find module 'fast-deep-equal'" });
+    const svc = { nodePath: process.execPath, env: { PATH: process.env.PATH }, home: os.homedir() };
+    assert.deepEqual(await loadCheck(dir, svc, deps), { ok: false, error: "Error: Cannot find module 'fast-deep-equal'" });
     fs.writeFileSync(path.join(dir, 'node_modules', 'ajv', 'index.js'), 'module.exports = {};\n');
-    assert.deepEqual(await loadCheck(dir, process.execPath, deps), { ok: true });
-    assert.deepEqual(await loadCheck(REPO_ROOT, process.execPath, deps), { ok: true }, 'this repo: server/index.js imports without starting');
+    assert.deepEqual(await loadCheck(dir, svc, deps), { ok: true });
+    assert.deepEqual(await loadCheck(REPO_ROOT, svc, deps), { ok: true }, 'this repo: server/index.js imports without starting');
+  });
+
+  test("loadCheck runs with the service's own environment (plus HOME), never this shell's", async () => {
+    const seen = [];
+    const cfg = serviceConfig({ home: '/Users/snow', uid: 501, env: {}, nodePath: HOMEBREW_NODE });
+    await loadCheck('/Users/snow/the-desk-live', cfg, { run: async (cmd, args, options) => (seen.push({ cmd, options }), { code: 0, stdout: '', stderr: '' }) });
+    assert.equal(seen[0].cmd, HOMEBREW_NODE);
+    assert.deepEqual(seen[0].options.env, { ...cfg.env, HOME: '/Users/snow' });
+    assert.equal(seen[0].options.cwd, '/Users/snow/the-desk-live');
+
+    // For real: code that only loads thanks to this shell's NODE_OPTIONS fails, as it would under launchd.
+    const dir = tempDir();
+    fs.mkdirSync(path.join(dir, 'server'));
+    fs.writeFileSync(path.join(dir, 'server', 'index.js'), "if (!globalThis.preloaded) throw new Error('needs a preload the service will not have');\n");
+    const preload = path.join(dir, 'preload.cjs');
+    fs.writeFileSync(preload, 'globalThis.preloaded = true;\n');
+    const saved = process.env.NODE_OPTIONS;
+    process.env.NODE_OPTIONS = `--require ${preload}`;
+    try {
+      const svc = { nodePath: process.execPath, env: { PATH: process.env.PATH }, home: os.homedir() };
+      assert.deepEqual(await loadCheck(dir, svc, { run: runCommand }), { ok: false, error: 'Error: needs a preload the service will not have' });
+    } finally {
+      if (saved === undefined) delete process.env.NODE_OPTIONS;
+      else process.env.NODE_OPTIONS = saved;
+    }
   });
 
   test('missingPackages lists dependencies (not devDependencies) with no package.json in node_modules', () => {
@@ -933,6 +960,71 @@ describe('runCommand (the real runner deploy and the service use)', () => {
     }
   });
 
+  /** Runs a node script that calls runCommand on cmd/args, waits for readyFile, then sends it sig. */
+  async function stopWrapper({ args, readyFile, sig, extra = '' }) {
+    const dir = path.dirname(readyFile);
+    const wrapper = path.join(dir, `wrapper-${Math.random().toString(36).slice(2)}.mjs`);
+    const serviceUrl = pathToFileURL(path.join(REPO_ROOT, 'scripts', 'service.js')).href;
+    fs.writeFileSync(wrapper, `import { runCommand } from ${JSON.stringify(serviceUrl)};\n${extra}\nawait runCommand(${JSON.stringify(args[0])}, ${JSON.stringify(args.slice(1))}, { timeoutMs: 60000 });\n`);
+    const child = spawn(process.execPath, [wrapper], { stdio: 'ignore' });
+    try {
+      for (let i = 0; i < 80 && !fs.existsSync(readyFile); i++) await new Promise((resolve) => setTimeout(resolve, 100));
+      assert.ok(fs.existsSync(readyFile), 'the command started');
+      const started = Date.now();
+      const ended = new Promise((resolve) => child.on('exit', (code, signal) => resolve({ how: signal || code, took: Date.now() - started })));
+      child.kill(sig);
+      return await ended;
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    }
+  }
+
+  test('the signal that arrived is the one passed on: SIGINT stays SIGINT, SIGHUP stays SIGHUP', async () => {
+    for (const sig of ['SIGINT', 'SIGHUP', 'SIGQUIT']) {
+      const dir = tempDir();
+      const got = path.join(dir, 'got');
+      const ready = path.join(dir, 'ready');
+      const script = `for (const s of ['SIGINT','SIGTERM','SIGHUP','SIGQUIT']) process.on(s, () => { require('fs').writeFileSync(${JSON.stringify(got)}, s); process.exit(0); }); require('fs').writeFileSync(${JSON.stringify(ready)}, 'x'); setInterval(() => {}, 1000);`;
+      const { how } = await stopWrapper({ args: [process.execPath, '-e', script], readyFile: ready, sig });
+      assert.equal(how, sig, `the wrapper stops the way ${sig} stops it`);
+      assert.equal(fs.readFileSync(got, 'utf8'), sig, `the command got ${sig}`);
+    }
+  });
+
+  test('a command that ignores the signal is SIGKILLed after about 2 s, before this process stops', async () => {
+    const dir = tempDir();
+    const pidFile = path.join(dir, 'sleep.pid');
+    const { how, took } = await stopWrapper({ args: ['/bin/sh', '-c', `trap '' INT; echo $$ > '${pidFile}'; exec sleep 30`], readyFile: pidFile, sig: 'SIGINT' });
+    assert.equal(how, 'SIGINT');
+    assert.ok(took >= 1500 && took < 8000, `waited for it, then stopped (${took} ms)`);
+    assert.ok(await gone(Number(fs.readFileSync(pidFile, 'utf8'))), 'no orphan left');
+  });
+
+  test('one shared signal handler, however many commands run at once (no MaxListenersExceededWarning)', async () => {
+    const signals = ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT'];
+    const counts = () => Object.fromEntries(signals.map((sig) => [sig, process.listenerCount(sig)]));
+    const start = counts();
+    const before = start.SIGINT;
+    const warnings = [];
+    const onWarning = (w) => warnings.push(w.name);
+    process.on('warning', onWarning);
+    try {
+      const runs = Array.from({ length: 15 }, () => runCommand('/bin/sleep', ['0.3']));
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      assert.equal(runningGroups(), 15);
+      assert.deepEqual(counts(), Object.fromEntries(signals.map((sig) => [sig, start[sig] + 1])), 'one listener per signal, not fifteen');
+      const results = await Promise.all(runs);
+      assert.ok(results.every((r) => r.code === 0));
+      assert.equal(runningGroups(), 0);
+      assert.deepEqual(counts(), start, 'and they go once nothing runs');
+      assert.equal(process.listenerCount('SIGINT'), before);
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.deepEqual(warnings.filter((n) => n === 'MaxListenersExceededWarning'), []);
+    } finally {
+      process.off('warning', onWarning);
+    }
+  });
+
   test('a very long output keeps its start and its end (npm puts its error lines last)', async () => {
     const script = "process.stderr.write('START' + 'x'.repeat(3_000_000) + 'END'); process.exitCode = 1;";
     const r = await runCommand(process.execPath, ['-e', script], { timeoutMs: 10_000 });
@@ -1001,19 +1093,82 @@ describe('the real launchd service is shared: fake HOMEs never change it', () =>
     assert.equal((await open(LAUNCHCTL, ['kickstart', '-k', 'gui/501/local.thedesk.server'])).stdout, 'ran', 'no reason: it goes through');
   });
 
-  test('the real runner is guarded: under a fake HOME a kickstart is refused before anything runs', async () => {
-    const saved = process.env.HOME;
-    process.env.HOME = tempDir(); // os.homedir() follows HOME
-    try {
-      // A launchctl that doesn't exist: even if the guard failed, this could only end in ENOENT.
-      const r = await realDeps().run(path.join(tempDir(), 'no-such-dir', 'launchctl'), ['kickstart', '-k', 'gui/501/local.thedesk.server']);
-      assert.equal(r.code, 1);
-      assert.match(r.stderr, /^HOME \(.*\) is not your real home folder .*, so I won't touch the real launchd service \(its name is shared\)\./);
-      assert.doesNotMatch(r.stderr, /ENOENT/, 'refused, not attempted');
-      assert.match(realDeps().launchdRefusal({ home: process.env.HOME, runDir: path.join(process.env.HOME, 'the-desk-live') }), /is not your real home folder/);
-    } finally {
-      process.env.HOME = saved;
+  test('launchdRefusal: a test run (NODE_TEST_CONTEXT) and a missing config are refused too', () => {
+    assert.match(launchdRefusal({ env: { NODE_TEST_CONTEXT: 'child-v8' }, cfg: cfgAt(REAL), homedir: REAL, realHome: REAL }), /^This is a test run \(NODE_TEST_CONTEXT is set\), so I won't touch the real launchd service/);
+    assert.match(launchdRefusal({ env: {}, homedir: REAL, realHome: REAL, requireCfg: true }), /^No service config was bound to this runner, so I won't touch/);
+    assert.equal(launchdRefusal({ env: {}, cfg: cfgAt(REAL), homedir: REAL, realHome: REAL, requireCfg: true }), null);
+  });
+
+  test('guardLaunchctl lets only reading verbs through when there is a reason; launchctl is matched in any case', async () => {
+    const seen = [];
+    const inner = async (cmd, args) => {
+      seen.push(args[0]);
+      return { code: 0, stdout: 'ran', stderr: '' };
+    };
+    const run = guardLaunchctl(inner, () => 'no', { realHome: REAL });
+    for (const verb of ['asuser', 'bsexec', 'submit', 'setenv', 'start', 'stop', 'remove', 'reboot', 'config', '']) {
+      assert.equal((await run(LAUNCHCTL, verb ? [verb, 'x'] : [])).code, 1, `"${verb}" refused`);
     }
+    assert.equal((await run('/bin/LAUNCHCTL', ['kickstart', 'x'])).code, 1, 'upper case');
+    assert.equal((await run('LaunchCtl', ['bootout', 'x'])).code, 1, 'mixed case');
+    assert.deepEqual(seen, []);
+    for (const verb of ['print', 'print-disabled', 'list', 'blame', 'version', 'help']) {
+      assert.equal((await run(LAUNCHCTL, [verb, 'gui/501/local.thedesk.server'])).stdout, 'ran', verb);
+    }
+  });
+
+  test('guardLaunchctl: a bootstrap must load the real ~/Library/LaunchAgents plist, whatever else says yes', async () => {
+    const inner = async () => ({ code: 0, stdout: 'ran', stderr: '' });
+    const run = guardLaunchctl(inner, () => null, { realHome: REAL });
+    const refused = await run(LAUNCHCTL, ['bootstrap', 'gui/501', '/tmp/fake-home/Library/LaunchAgents/local.thedesk.server.plist']);
+    assert.equal(refused.code, 1);
+    assert.match(refused.stderr, /^launchctl bootstrap may only load \/Users\/snow\/Library\/LaunchAgents\/local\.thedesk\.server\.plist, not \/tmp\/fake-home/);
+    assert.equal((await run(LAUNCHCTL, ['bootstrap', 'gui/501'])).code, 1, 'no plist at all');
+    assert.equal((await run(LAUNCHCTL, ['bootstrap', 'gui/501', servicePlistPath(REAL)])).stdout, 'ran');
+    assert.equal((await run(LAUNCHCTL, ['kickstart', '-k', 'gui/501/local.thedesk.server'])).stdout, 'ran');
+  });
+
+  // These call the real runner, but always with a launchctl path that doesn't exist: if a guard ever
+  // failed, the worst that could happen is ENOENT. The real launchctl is never reached.
+  const missingLaunchctl = () => path.join(tempDir(), 'no-such-dir', 'launchctl');
+  const realCfg = () => serviceConfig({ home: os.userInfo().homedir, uid: 501, env: {}, nodePath: HOMEBREW_NODE });
+  async function withoutTestContext(fn) {
+    const saved = process.env.NODE_TEST_CONTEXT;
+    delete process.env.NODE_TEST_CONTEXT;
+    try {
+      return await fn();
+    } finally {
+      if (saved !== undefined) process.env.NODE_TEST_CONTEXT = saved;
+    }
+  }
+
+  test('the real runner refuses any state change during a test run, even with the real HOME and config', async () => {
+    assert.ok(process.env.NODE_TEST_CONTEXT, 'node --test sets it');
+    const r = await realDeps(realCfg()).run(missingLaunchctl(), ['kickstart', '-k', 'gui/501/local.thedesk.server']);
+    assert.equal(r.code, 1);
+    assert.match(r.stderr, /^This is a test run \(NODE_TEST_CONTEXT is set\)/);
+    assert.match(realDeps(realCfg()).launchdRefusal(), /^This is a test run/);
+  });
+
+  test('the real runner checks the config bound to it: none, another home, or a fake HOME are refused', async () => {
+    await withoutTestContext(async () => {
+      const kick = (deps) => deps.run(missingLaunchctl(), ['kickstart', '-k', 'gui/501/local.thedesk.server']);
+      assert.match((await kick(realDeps())).stderr, /^No service config was bound to this runner/);
+      const temp = serviceConfig({ home: tempDir(), uid: 501, env: {}, nodePath: HOMEBREW_NODE });
+      assert.match((await kick(realDeps(temp))).stderr, /^This run's home folder \(.*\) is not your real one/);
+      const saved = process.env.HOME;
+      process.env.HOME = tempDir(); // os.homedir() follows HOME
+      try {
+        assert.match((await kick(realDeps(realCfg()))).stderr, /^HOME \(.*\) is not your real home folder/);
+      } finally {
+        process.env.HOME = saved;
+      }
+      // Everything in order: the guard lets it through, to a launchctl that isn't there.
+      const through = await kick(realDeps(realCfg()));
+      assert.match(through.stderr, /ENOENT/, 'reached the runner');
+      const bootstrap = await realDeps(realCfg()).run(missingLaunchctl(), ['bootstrap', 'gui/501', path.join(tempDir(), 'x.plist')]);
+      assert.match(bootstrap.stderr, /^launchctl bootstrap may only load/);
+    });
   });
 
   test('install, start, stop, restart and uninstall stop before anything when the deps say so; status and dry runs go on', async () => {

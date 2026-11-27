@@ -330,7 +330,7 @@ export async function deploy(cfg, deps, { dryRun = false } = {}) {
   // Every file can be in place and still not load (ajv without fast-deep-equal): the same load check
   // as the install guard, so deploy repairs what the guard refuses.
   if (!why && exists && !(dryRun && restore)) {
-    const load = await loadCheck(live, cfg.service.nodePath, deps);
+    const load = await loadCheck(live, cfg.service, deps);
     if (!load.ok) why = `its server doesn't load: ${load.error}`;
   }
 
@@ -359,10 +359,18 @@ export async function deploy(cfg, deps, { dryRun = false } = {}) {
     else say(`The live copy is on ${oldSha ? short(oldSha) : 'an unknown commit'} and has no changes of its own. Move it to ${ref}:`);
     if (moves) out(`   ${commandLine(GIT, moveArgs)}`);
     if (why) {
-      say('Swap the new packages in, then remove the staging folder:');
+      say('Swap the new packages in (the old ones wait in the staging folder until the new code loads):');
       if (exists && (restore || lexists(deps.fs, liveModules))) out(`   mv ${shellQuote(liveModules)} ${shellQuote(asideModules)}`);
       out(`   mv ${shellQuote(path.join(staging, 'node_modules'))} ${shellQuote(liveModules)}`);
-      out(`   rm -rf ${shellQuote(staging)}`);
+    }
+    if (moves || why) {
+      say(`Check that the new code loads: ${shellQuote(cfg.service.nodePath)} imports server/index.js in the live copy, with the service's environment.`);
+      out(
+        exists && oldSha
+          ? `   If it doesn't, put ${short(oldSha)} and its packages back and stop without a restart: The Desk keeps running ${short(oldSha)}.`
+          : "   If it doesn't, stop without recording or restarting anything.",
+      );
+      if (why) out(`   Then remove the staging folder: rm -rf ${shellQuote(staging)}`);
     }
   } else {
     // 1. Packages first, in a staging folder beside the live copy, from the new commit's own
@@ -430,7 +438,8 @@ export async function deploy(cfg, deps, { dryRun = false } = {}) {
       }
     }
 
-    // 3. Swap the new packages in with renames (same disk, so each is instant), then tidy up.
+    // 3. Swap the new packages in with renames (same disk, so each is instant). The old ones wait in
+    // the staging folder until the load check below.
     // If the second rename fails, put everything back as it was: the old packages, the old commit.
     if (why) {
       let movedAside = false;
@@ -459,12 +468,45 @@ export async function deploy(cfg, deps, { dryRun = false } = {}) {
           restored ? `The live copy is back on ${oldSha ? short(oldSha) : 'its commit'} with its old packages.` : 'Run npm run deploy again: it repairs the live copy.',
         );
       }
+    }
+
+    // 4. Does the new code load, the way the service will run it? If not, it never goes live: put the
+    // old commit and the old packages (still in the staging folder) back, and leave The Desk running.
+    if (moves || why) {
+      const load = await loadCheck(live, cfg.service, deps);
+      if (!load.ok) {
+        let restored = exists;
+        if (why && exists) {
+          try {
+            if (lexists(deps.fs, liveModules)) deps.fs.renameSync(liveModules, path.join(staging, 'node_modules'));
+            if (lexists(deps.fs, asideModules)) deps.fs.renameSync(asideModules, liveModules);
+          } catch {
+            restored = false;
+          }
+        }
+        if (exists && moves) {
+          if (oldSha) await git(['-C', live, 'checkout', '--quiet', '--detach', oldSha]);
+          if (!oldSha || (await headOf(live)) !== oldSha) restored = false;
+        }
+        if (restored || !exists) removeStaging();
+        return fail(
+          `The new code doesn't load, so it wasn't put live: ${load.error}`,
+          !exists
+            ? 'Nothing was recorded or restarted. Fix main, then run npm run deploy again.'
+            : restored
+              ? `The live copy is back on ${short(oldSha ?? sha)} with its packages, and The Desk keeps running it (no restart). Fix main, then run npm run deploy again.`
+              : 'The Desk was not restarted. Fix main, then run npm run deploy again: it repairs the live copy.',
+        );
+      }
+    }
+    if (why) {
       const left = removeStaging();
       if (left) out(`(Couldn't remove ${staging} (${left.code || left.message}). It's left for the next deploy to tidy.)`);
     }
   }
 
-  // 4. Remember what's deployed. Written last, so it only ever names a commit whose packages are in.
+  // 5. Remember what's deployed. Written last, so it only ever names a commit whose packages are in
+  // and whose code loads.
   // A deploy that changed nothing keeps the record (and its time) as it was.
   const unchanged = !why && !moves && installed !== null && installed.sha === sha;
   const record = unchanged ? installed : deployedRecord({ sha, subject, ref, deployedAt: localTimestamp(new Date(deps.now())) });
@@ -478,7 +520,7 @@ export async function deploy(cfg, deps, { dryRun = false } = {}) {
     writeFileAtomic(deps.fs, cfg.deployedFile, recordText);
   }
 
-  // 5. The service: it must run from the live copy before a restart means anything.
+  // 6. The service: it must run from the live copy before a restart means anything.
   const svc = cfg.service;
   const plist = readInstalledPlist(svc, deps);
   const moved = plist.installed && plist.runDir !== null && path.resolve(plist.runDir) === live;
@@ -521,17 +563,16 @@ export async function deploy(cfg, deps, { dryRun = false } = {}) {
 }
 
 /** The whole CLI, with everything outside injected. Returns the exit code. */
-export async function main(argv, { env = process.env, deps = realDeps(), cfg } = {}) {
+export async function main(argv, { env = process.env, deps: given, cfg } = {}) {
   const args = parseArgs(argv, env);
-  if (args.error) {
-    deps.err(`${args.error}\n\n${USAGE}`);
-    return 2;
+  if (args.error || args.help) {
+    const deps = given || realDeps();
+    if (args.error) deps.err(`${args.error}\n\n${USAGE}`);
+    else deps.out(USAGE);
+    return args.error ? 2 : 0;
   }
-  if (args.help) {
-    deps.out(USAGE);
-    return 0;
-  }
-  return deploy(cfg || deployConfig({ env }), deps, { dryRun: args.dryRun });
+  const config = cfg || deployConfig({ env });
+  return deploy(config, given || realDeps(config.service), { dryRun: args.dryRun }); // the launchctl guard checks this config
 }
 
 function runDirectly() {

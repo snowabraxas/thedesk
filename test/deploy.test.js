@@ -118,7 +118,10 @@ function world({ service = 'moved' } = {}) {
       if (cmd === svc.nodePath) {
         assert.equal(args[0], '--input-type=module', 'the load check');
         assert.equal(options.cwd, live, 'it loads the live copy');
-        return state.loads ? ok() : { code: 1, stdout: '', stderr: "node:internal/modules/cjs/loader:1386\n  throw err;\n  ^\n\nError: Cannot find module 'fast-deep-equal'\nRequire stack:\n- x\n" };
+        assert.deepEqual(options.env, { ...svc.env, HOME: svc.home }, "with the service's own environment");
+        // A commit can carry server/broken.txt to stand for code that doesn't load.
+        const broken = fs.existsSync(path.join(live, 'server', 'broken.txt'));
+        return state.loads && !broken ? ok() : { code: 1, stdout: '', stderr: "node:internal/modules/cjs/loader:1386\n  throw err;\n  ^\n\nError: Cannot find module 'fast-deep-equal'\nRequire stack:\n- x\n" };
       }
       if (cmd === cfg.npm) {
         const read = (f) => (fs.existsSync(path.join(options.cwd, f)) ? fs.readFileSync(path.join(options.cwd, f), 'utf8') : null);
@@ -851,6 +854,69 @@ describe('deploy: updating the live copy', () => {
   });
 });
 
+describe('deploy: the new code must load before it goes live', () => {
+  test("code that doesn't load is never put live: old commit back, no record, no restart", async () => {
+    const w = await deployedWorld();
+    const before = fs.readFileSync(deployedPath(w.live), 'utf8');
+    w.commit('Broken import', { 'server/broken.txt': 'x' });
+    assert.equal(await w.run(), 1);
+    assert.equal(w.liveHead(), w.first, 'back on the last good commit');
+    assert.equal(fs.existsSync(path.join(w.live, 'server', 'broken.txt')), false);
+    assert.equal(fs.readFileSync(deployedPath(w.live), 'utf8'), before);
+    assert.deepEqual(w.launchctl(), [], 'no restart: the running Desk keeps the last good version');
+    assert.equal(gitSync(w.live, 'status', '--porcelain'), '');
+    assert.equal(
+      w.errors(),
+      `The new code doesn't load, so it wasn't put live: Error: Cannot find module 'fast-deep-equal'\nThe live copy is back on ${w.first.slice(0, 7)} with its packages, and The Desk keeps running it (no restart). Fix main, then run npm run deploy again.`,
+    );
+  });
+
+  test('with new packages too, the old packages come back from the staging folder', async () => {
+    const w = await deployedWorld();
+    fs.writeFileSync(path.join(w.live, 'node_modules', 'ajv', 'index.js'), '// old ajv\n');
+    w.commit('New package, broken code', { 'package-lock.json': LOCK_V2, 'server/broken.txt': 'x' });
+    assert.equal(await w.run(), 1);
+    assert.equal(w.commands(w.cfg.npm).length, 1, 'the packages were installed and swapped in first');
+    assert.equal(w.liveHead(), w.first);
+    assert.equal(ajvIn(w.live), '// old ajv\n', 'the old packages are back');
+    assert.equal(fs.existsSync(w.staging), false, 'the new ones went with the staging folder');
+    assert.deepEqual(w.launchctl(), []);
+  });
+
+  test('the load check runs after the checkout and the swap, and before the record and the restart', async () => {
+    const w = await deployedWorld();
+    w.commit('Add a package', { 'package-lock.json': LOCK_V2 });
+    assert.equal(await w.run(), 0, w.errors());
+    const at = (pred) => w.calls.findIndex(pred);
+    const checkout = at((c) => c.cmd === GIT && c.args.includes('checkout'));
+    const loads = w.calls.map((c, i) => (c.cmd === w.svc.nodePath ? i : -1)).filter((i) => i >= 0);
+    const kick = at((c) => c.cmd === LAUNCHCTL && c.args[0] === 'kickstart');
+    assert.ok(loads.some((i) => i > checkout && i < kick), `a load check between the checkout (${checkout}) and the restart (${kick}): ${loads}`);
+  });
+
+  test("a first deploy whose code doesn't load records nothing", async () => {
+    const w = world({ service: 'old' });
+    fs.mkdirSync(path.join(w.repo, 'server'), { recursive: true });
+    w.commit('Broken from the start', { 'server/broken.txt': 'x' });
+    assert.equal(await w.run(), 1);
+    assert.equal(fs.existsSync(deployedPath(w.live)), false);
+    assert.equal(fs.existsSync(w.staging), false);
+    assert.match(w.errors(), /^The new code doesn't load, so it wasn't put live: .*\nNothing was recorded or restarted\./);
+  });
+
+  test('for real: code importing a package the lockfile lacks fails the load check, and the old commit stays', async () => {
+    const w = await deployedWorld();
+    const fakeRun = w.deps.run;
+    w.deps.run = (cmd, args, options) => (cmd === w.svc.nodePath ? runCommand(process.execPath, args, options) : fakeRun(cmd, args, options));
+    w.commit('Uses a package nobody installed', { 'server/index.js': "import 'left-pad-that-is-not-there';\n" });
+    assert.equal(await w.run(), 1);
+    assert.match(w.errors(), /^The new code doesn't load, so it wasn't put live: Error \[ERR_MODULE_NOT_FOUND\]: Cannot find package 'left-pad-that-is-not-there'/);
+    assert.equal(w.liveHead(), w.first);
+    assert.equal(fs.readFileSync(path.join(w.live, 'server', 'index.js'), 'utf8'), '// v1\n');
+    assert.deepEqual(w.launchctl(), []);
+  });
+});
+
 describe('deploy with the real runner', () => {
   test('npm ci runs in the staging folder (not the work folder) and its packages land in the live copy', async () => {
     const w = world();
@@ -906,10 +972,12 @@ describe('deploy --dry-run', () => {
           '   If that fails, deploy removes the staging folder and stops here: the live copy is untouched.',
           "2. There's no live copy yet. Make it, a git worktree of this repo detached at main:",
           `   git -C ${w.repo} worktree add --detach ${w.live} ${w.first}`,
-          '3. Swap the new packages in, then remove the staging folder:',
+          '3. Swap the new packages in (the old ones wait in the staging folder until the new code loads):',
           `   mv ${w.staging}/node_modules ${w.live}/node_modules`,
-          `   rm -rf ${w.staging}`,
-          `4. Write ${w.live}/.deployed.json:`,
+          `4. Check that the new code loads: ${HOMEBREW_NODE} imports server/index.js in the live copy, with the service's environment.`,
+          "   If it doesn't, stop without recording or restarting anything.",
+          `   Then remove the staging folder: rm -rf ${w.staging}`,
+          `5. Write ${w.live}/.deployed.json:`,
           '   {',
           `     "sha": "${w.first}",`,
         ].join('\n'),
@@ -917,7 +985,7 @@ describe('deploy --dry-run', () => {
       text,
     );
     assert.ok(text.includes('"deployedAt": "2026-11-28T09:14:03-05:00"'));
-    assert.ok(text.includes(`5. Check that the service runs from the live copy (WorkingDirectory in ${w.svc.plistPath}).\n   It doesn't yet, so deploy stops here and says:`));
+    assert.ok(text.includes(`6. Check that the service runs from the live copy (WorkingDirectory in ${w.svc.plistPath}).\n   It doesn't yet, so deploy stops here and says:`));
     assert.ok(text.includes('Run npm run service:install once to move the service to the live copy.'));
   });
 
@@ -933,11 +1001,12 @@ describe('deploy --dry-run', () => {
     const text = w.text();
     assert.ok(text.includes(`1. Install the packages first, outside the live copy (package-lock.json changed):\n   mkdir ${w.staging}`), text);
     assert.ok(text.includes(`2. The live copy is on ${w.first.slice(0, 7)} and has no changes of its own. Move it to main:\n   git -C ${w.live} checkout --quiet --detach ${second}`));
-    assert.ok(text.includes(`3. Swap the new packages in, then remove the staging folder:\n   mv ${w.live}/node_modules ${w.staging}/node_modules.old\n   mv ${w.staging}/node_modules ${w.live}/node_modules\n   rm -rf ${w.staging}`));
-    assert.ok(text.includes(`4. Write ${w.live}/.deployed.json:`));
+    const old = w.first.slice(0, 7);
+    assert.ok(text.includes(`3. Swap the new packages in (the old ones wait in the staging folder until the new code loads):\n   mv ${w.live}/node_modules ${w.staging}/node_modules.old\n   mv ${w.staging}/node_modules ${w.live}/node_modules\n4. Check that the new code loads:`), text);
+    assert.ok(text.includes(`   If it doesn't, put ${old} and its packages back and stop without a restart: The Desk keeps running ${old}.\n   Then remove the staging folder: rm -rf ${w.staging}\n5. Write ${w.live}/.deployed.json:`));
     assert.ok(text.includes('   It does.'));
-    assert.ok(text.includes('6. Restart it and wait up to 15 s for http://127.0.0.1:4321/api/feed to answer:\n   /bin/launchctl kickstart -k gui/501/local.thedesk.server'));
-    assert.ok(text.endsWith(`7. Say: The Desk is live at http://localhost:4321 on main @ ${second.slice(0, 7)} "Add a package"`));
+    assert.ok(text.includes('7. Restart it and wait up to 15 s for http://127.0.0.1:4321/api/feed to answer:\n   /bin/launchctl kickstart -k gui/501/local.thedesk.server'));
+    assert.ok(text.endsWith(`8. Say: The Desk is live at http://localhost:4321 on main @ ${second.slice(0, 7)} "Add a package"`));
   });
 
   test('same lockfile and node_modules there: no npm ci, no swap', async () => {
