@@ -12,7 +12,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { checkNewsDeskFile } from '../server/news-schema.js';
-import { MAX_ERRORS } from '../server/schema-common.js';
+import { MAX_ERRORS, plain } from '../server/schema-common.js';
 import { breakingPath, newsPath, resolveDeskHome } from '../server/config.js';
 
 const MAX_SHOWN = 20;
@@ -51,12 +51,13 @@ let failed = false;
 for (const file of files) {
   const { ok, errors, kind } = await checkNewsDeskFile(file);
   if (ok) {
-    console.log(named ? `valid: ${file}` : 'valid');
+    console.log(named ? `valid: ${plain(file, Infinity)}` : 'valid');
     continue;
   }
   failed = true;
   // File-level problems start with the path; the header already names it.
-  const lines = [`invalid: ${file}${kind === 'breaking' ? ' (checked as a breaking story)' : ''}`];
+  // The path is printed through plain(), so a file name can't carry control or bidi characters to the terminal.
+  const lines = [`invalid: ${plain(file, Infinity)}${kind === 'breaking' ? ' (checked as a breaking story)' : ''}`];
   for (const e of errors.slice(0, MAX_SHOWN)) lines.push(`  - ${e.startsWith(`${file}: `) ? e.slice(file.length + 2) : e}`);
   // The validator lists at most MAX_ERRORS problems; a full list means there may be more.
   if (errors.length > MAX_SHOWN) lines.push(`  …and ${errors.length >= MAX_ERRORS ? 'at least ' : ''}${errors.length - MAX_SHOWN} more`);

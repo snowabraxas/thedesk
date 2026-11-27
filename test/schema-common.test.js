@@ -4,7 +4,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { describe, test } from 'node:test';
 import { REPO_ROOT } from '../server/config.js';
-import { hasUserInfo, hideUserInfo, isDateTime, linkKey, linkProblem, plain, readablePath, show, withoutSample } from '../server/schema-common.js';
+import { hasUserInfo, hideUserInfo, isBlank, isDateTime, linkKey, linkProblem, plain, readablePath, show, withoutSample } from '../server/schema-common.js';
+
+/** How a message writes a hidden character: \u00ad, or \u{e0041} beyond the BMP. */
+const escaped = (...points) => points.map((p) => (p > 0xffff ? `\\u{${p.toString(16)}}` : `\\u${p.toString(16).padStart(4, '0')}`)).join('');
 
 describe('schema-common', () => {
   test('isDateTime wants a real moment with a timezone', () => {
@@ -29,21 +32,30 @@ describe('schema-common', () => {
     assert.equal(hasUserInfo('http://user@example.com/'), true, 'any scheme');
   });
 
-  test('hideUserInfo hides everything before the site\'s last @, for any scheme, and leaves other links alone', () => {
+  // N2 review: hidden anywhere in the value, split only at / ? #, never stopping at a backslash.
+  test('hideUserInfo hides everything before the last @ in each piece between / ? and #, anywhere in the value', () => {
     const cases = {
       'https://user:pw@example.com/a': 'https://***@example.com/a',
       'https:///user:pw@example.com': 'https:///***@example.com',
-      'https:\\\\user:pw@example.com': 'https:\\\\***@example.com',
-      'https:user:pw@example.com': 'https:***@example.com',
+      'https:\\\\user:pw@example.com': '***@example.com',
+      'https:user:pw@example.com': '***@example.com',
       'HTTP://u:pw@example.com': 'HTTP://***@example.com',
       'javascript://u:pw@x/': 'javascript://***@x/',
+      'ssh://git:hunt\\er2@example.com/': 'ssh://***@example.com/',
       '  https://u:pw@example.com': '  https://***@example.com',
       'https://us\ner:p\tw@example.com/': 'https://***@example.com/',
-      'https://a@b:pw@example.com/x?y=@z': 'https://***@example.com/x?y=@z',
+      'https://user:p w@example.com/': 'https://***@example.com/',
+      'https://a@b:pw@example.com/x?y=@z': 'https://***@example.com/x?***@z',
+      'Source: https://u:pw@x.example and https://v:pw@y.example/': 'Source: https://***@x.example and https://***@y.example/',
+      'see u:pw@x.example': '***@x.example',
       'https://example.com/@snow': 'https://example.com/@snow',
-      'https://example.com?by=a@b': 'https://example.com?by=a@b',
+      'https://@example.com/': 'https://@example.com/',
+      'https://example.com?by=a@b': 'https://example.com?***@b',
+      'no at sign here': 'no at sign here',
     };
     for (const [link, hidden] of Object.entries(cases)) assert.equal(hideUserInfo(link), hidden, JSON.stringify(link));
+    const zw = String.fromCodePoint(0x200b);
+    assert.equal(hideUserInfo(`${zw}https://admin:pw@example.com/`), `${zw}https://***@example.com/`, 'not only at the start');
     assert.equal(hideUserInfo(42), 42);
   });
 
@@ -56,17 +68,46 @@ describe('schema-common', () => {
   });
 
   test('show and plain escape C0 and C1 controls, DEL, bidi and zero-width characters', () => {
-    const nasty = 'a\u001b[31m\u007f\u0085\u009b\u061c\u200b\u200e\u202a\u202e\u2028\u2066\u2069\ufeffz';
-    const quoted = show(nasty, 500);
-    assert.doesNotMatch(quoted, /[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/);
-    assert.equal(quoted, '"a\\u001b[31m\\u007f\\u0085\\u009b\\u061c\\u200b\\u200e\\u202a\\u202e\\u2028\\u2066\\u2069\\ufeffz"');
-    assert.doesNotMatch(plain(nasty), /[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/);
-    assert.equal(show('caf\u00e9 \u2215'), '"caf\u00e9 \u2215"', 'ordinary non-ASCII text stays readable');
+    const points = [0x1b, 0x7f, 0x85, 0x9b, 0x61c, 0x200b, 0x200e, 0x202a, 0x202e, 0x2028, 0x2066, 0x2069, 0xfeff];
+    const nasty = `a${String.fromCodePoint(...points)}z`;
+    assert.equal(show(nasty, 500), `"a${escaped(...points)}z"`);
+    assert.equal(plain(nasty), `a${escaped(...points)}z`);
+    assert.equal(show(`caf${String.fromCodePoint(0xe9)} ${String.fromCodePoint(0x2215)}`), `"caf${String.fromCodePoint(0xe9)} ${String.fromCodePoint(0x2215)}"`, 'ordinary non-ASCII text stays readable');
   });
 
-  test('linkKey is the page a link opens, without its #fragment', () => {
+  // N2 review: by Unicode property, so tag characters, the soft hyphen, invisible operators,
+  // variation selectors and Hangul fillers are caught too; astral ones are escaped as \u{...}.
+  test('show escapes every control, format or default-ignorable character, by code point', () => {
+    const points = [0xad, 0x34f, 0x115f, 0x180e, 0x2061, 0x2064, 0x3164, 0xfe0f, 0xffa0, 0x1d173, 0xe0001, 0xe0041, 0xe007f];
+    const quoted = show(String.fromCodePoint(...points), 500);
+    assert.equal(quoted, `"${escaped(...points)}"`);
+    assert.match(escaped(0xe0041), /^\\u\{e0041\}$/);
+    assert.equal(isBlank(String.fromCodePoint(...points)), true);
+    assert.equal(isBlank(` ${String.fromCodePoint(0xa0)}\t`), true);
+    assert.equal(isBlank('a'), false);
+  });
+
+  test('show cuts by code points, never leaving half of a surrogate pair', () => {
+    const leaves = String.fromCodePoint(0x1f33f).repeat(100);
+    const quoted = show(leaves, 10);
+    assert.equal(Array.from(quoted).length, 10);
+    assert.ok(quoted.endsWith('…'));
+    assert.doesNotMatch(quoted, /\p{Cs}/u, 'no lone surrogates');
+    assert.equal(show(String.fromCodePoint(0x1f33f).repeat(3), 10), `"${String.fromCodePoint(0x1f33f).repeat(3)}"`, 'short values are left whole');
+  });
+
+  test('plain keeps a long path whole when asked, and escapes it', () => {
+    const long = `/tmp/${'a'.repeat(300)}${String.fromCodePoint(0x202e)}.json`;
+    assert.equal(plain(long, Infinity), `/tmp/${'a'.repeat(300)}${escaped(0x202e)}.json`);
+  });
+
+  test('linkKey is the page a link opens: no plain #fragment, no utm_*, no empty ?, no trailing dot', () => {
     assert.equal(linkKey('https://EXAMPLE.com:443/a#top'), 'https://example.com/a');
     assert.equal(linkKey('https://example.com'), 'https://example.com/');
+    assert.equal(linkKey('https://example.com./a?'), 'https://example.com/a');
+    assert.equal(linkKey('https://example.com/a?utm_source=x&b=2&utm_medium=y&a=1'), 'https://example.com/a?b=2&a=1');
+    assert.equal(linkKey('https://example.com/#/route/1'), 'https://example.com/#/route/1');
+    assert.equal(linkKey('https://example.com/#!/route/1'), 'https://example.com/#!/route/1');
     assert.notEqual(linkKey('https://example.com/a?x=1'), linkKey('https://example.com/a?x=2'));
   });
 
@@ -76,7 +117,8 @@ describe('schema-common', () => {
     assert.equal(linkProblem(undefined), null);
     assert.equal(linkProblem('https://example.com/ok'), null);
     assert.match(linkProblem('https:// evil'), /^must be a whole link/);
-    assert.match(linkProblem('https://0x7f.1/'), /^must name its site in plain letters/);
+    assert.match(linkProblem('https://0x7f.1/'), /^must name a public site like example\.com/);
+    assert.match(linkProblem('https://example.com/a\\b'), /^must not contain a backslash or hidden characters/);
     assert.match(linkProblem('https://user:pw@exa mple.com'), /^must not have a user name or password/, 'user info is checked first');
     assert.equal(linkProblem('https://me:hunter2@example.com/a?b=c'), 'must not have a user name or password before the site name (got "https://***@example.com/a?b=c")');
   });

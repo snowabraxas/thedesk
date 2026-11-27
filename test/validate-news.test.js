@@ -133,7 +133,7 @@ describe('npm run validate-news', () => {
     const r = run([file]);
     assert.ok(performance.now() - started < 3000, 'a separate process, so allow for start-up');
     assert.equal(r.status, 1);
-    assert.equal(r.stderr, `invalid: ${file}\n  - more: far too long (100000 stories); at most 7 allowed, so nothing else was checked\n`);
+    assert.equal(r.stderr, `invalid: ${file}\n  - more: far too long (100000 stories); at most 7 allowed (leave the weakest out), so nothing else was checked\n`);
   });
 
   test('when the validator stops at 100 problems, it says "at least"', () => {
@@ -223,6 +223,25 @@ describe('npm run validate-news', () => {
     assert.equal(r.stdout, '');
     assert.match(r.stderr, /^Usage: npm run validate-news /);
     assert.match(r.stderr, /Unknown option: "--fix"/);
+  });
+
+  // N2 review: a file name is untrusted too; and V8's JSON errors quote the file, so the quote is dropped.
+  test('prints file names through plain(): a bidi or control character in a path is escaped', () => {
+    const rlo = String.fromCodePoint(0x202e);
+    const good = write(`good${rlo}nosj.json`, edition());
+    const bad = write(`bad${String.fromCodePoint(0x1b)}[31m.json`, { desk: 'news', stories: [] });
+    const r = run([good, bad]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stdout, `valid: ${good.replace(rlo, '\\u202e')}\n`);
+    assert.ok(r.stderr.startsWith(`invalid: ${bad.replace(String.fromCodePoint(0x1b), '\\u001b')}\n`), r.stderr);
+    assert.doesNotMatch(r.stdout + r.stderr, /[^\P{Cc}\n]|\p{Cf}/u, 'nothing raw besides newlines');
+  });
+
+  test('a JSON syntax error next to a link with a password never prints the password', () => {
+    const file = write('broken-secret.json', '{"desk": "news", "stories": [{"sources": [{"url": https://admin:SECRET@example.com/}]}]}');
+    const r = run([file]);
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr, `invalid: ${file}\n  - not valid JSON (Unexpected token 'h')\n`);
   });
 
   test('quotes untrusted text safely: nothing from the file reaches the terminal raw', () => {

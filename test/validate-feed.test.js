@@ -62,6 +62,17 @@ describe('npm run validate-feed', () => {
     assert.equal(r.stderr, `invalid: ${file}\n  - file not found\n`);
   });
 
+  // N2 review: the path in the header goes through plain(), so a file name can't drive the terminal.
+  test('prints the file name through plain(): a bidi or control character in it is escaped', () => {
+    const file = path.join(dir, `feed${String.fromCodePoint(0x202e)}nosj${String.fromCodePoint(0x1b)}.json`);
+    fs.writeFileSync(file, '{}');
+    const r = run([file]);
+    assert.equal(r.status, 1);
+    const shown = file.replace(String.fromCodePoint(0x202e), '\\u202e').replace(String.fromCodePoint(0x1b), '\\u001b');
+    assert.ok(r.stderr.startsWith(`invalid: ${shown}\n`), r.stderr);
+    assert.doesNotMatch(r.stderr, /[\p{Cf}]|[^\P{Cc}\n]/u);
+  });
+
   test('exits 1 for broken JSON', () => {
     const file = path.join(dir, 'broken.json');
     fs.writeFileSync(file, 'not json');

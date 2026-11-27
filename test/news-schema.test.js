@@ -23,6 +23,12 @@ const edition = () => JSON.parse(fs.readFileSync(NEWS_FIXTURE, 'utf8'));
 const breaking = () => JSON.parse(fs.readFileSync(BREAKING_FIXTURE, 'utf8'));
 const VALID = { ok: true, errors: [] };
 
+/** How a message writes a hidden character: \u00ad, or \u{e0041} beyond the BMP. */
+const escaped = (...points) => points.map((p) => (p > 0xffff ? `\\u{${p.toString(16)}}` : `\\u${p.toString(16).padStart(4, '0')}`)).join('');
+
+const SITE_WORDS =
+  'must name a public site like example.com in plain letters, digits, dots, dashes or underscores (xn-- for other alphabets), not localhost or an IP address';
+
 /** A story for padding lists, with its own id and rank. */
 const extraStory = (id, rank) => ({ ...edition().more[0], id, rank });
 
@@ -154,8 +160,17 @@ describe('validateNews: the rules', () => {
 
   test('8 stories on the shelf are too many', () => {
     const news = edition();
-    news.more = Array.from({ length: 8 }, (_, i) => extraStory(`m${i + 1}`, i + 4));
+    news.stories = [];
+    news.note = 'Test: everything went on the shelf.';
+    news.more = Array.from({ length: 8 }, (_, i) => extraStory(`m${i + 1}`, i + 1));
     assert.deepEqual(validateNews(news).errors, ['more: can have at most 7 stories (has 8); leave the weakest out']);
+  });
+
+  // N2 review: the brief says rank 1 to 10 across stories and more, and the schema now agrees.
+  test('a rank above 10 is refused', () => {
+    const news = edition();
+    news.more[1].rank = 11;
+    assert.deepEqual(validateNews(news).errors, ['more[1].rank: must be <= 10']);
   });
 
   test('a story with 1 source is refused, in stories and in more', () => {
@@ -244,7 +259,7 @@ describe('validateNews: the rules', () => {
       news.stories[0].sources[0].url = url;
       const { errors } = validateNews(news);
       assert.equal(errors.length, 1, url);
-      assert.match(errors[0], /^stories\[0\]\.sources\[0\]\.url: must not have a user name or password before the site name \(got "https:\/\/\*\*\*@example\.com\//, url);
+      assert.match(errors[0], /^stories\[0\]\.sources\[0\]\.url: must not have a user name or password before the site name \(got "https:\/\/(\*\*\*)?@example\.com\//, url);
       assert.ok(!errors[0].includes('secret') && !errors[0].includes('user@'));
     }
   });
@@ -641,6 +656,37 @@ describe('N2 review: links, quoting and runaway files', () => {
     }
   });
 
+  // N2 review: tracking parameters, an empty "?" and a trailing dot don't make a new page; a route fragment does.
+  test('utm_* parameters, an empty ? and a trailing dot on the site do not make a link a different source', () => {
+    const variants = [
+      ['https://example.com/a?id=7', 'https://example.com/a?utm_source=x&id=7&UTM_Medium=y'],
+      ['https://example.com/a', 'https://example.com/a?utm_campaign=z'],
+      ['https://example.com/a', 'https://example.com/a?'],
+      ['https://example.com/a', 'https://example.com./a'],
+      ['https://example.com/a', 'https://example.com/a#'],
+    ];
+    for (const [first, second] of variants) {
+      const news = edition();
+      news.stories[1].sources = [
+        { name: 'Example News', url: first },
+        { name: 'Example Wire', url: second },
+      ];
+      assert.deepEqual(validateNews(news).errors, ['stories[1].sources[1].url: same link as sources[0]; a story needs 2 different sources'], second);
+    }
+  });
+
+  test('hash routes are different pages, and other parameters keep their order', () => {
+    const news = edition();
+    news.stories[1].sources = [
+      { name: 'Example App', url: 'https://app.example.com/#/story/1' },
+      { name: 'Example App', url: 'https://app.example.com/#/story/2' },
+      { name: 'Example App', url: 'https://app.example.com/#!/story/3' },
+      { name: 'Example News', url: 'https://example.com/a?x=1&y=2' },
+      { name: 'Example News', url: 'https://example.com/a?y=2&x=1' },
+    ];
+    assert.deepEqual(validateNews(news), VALID);
+  });
+
   test('different pages on one site, or different queries, are different sources', () => {
     const news = edition();
     news.stories[1].sources = [
@@ -686,42 +732,96 @@ describe('N2 review: links, quoting and runaway files', () => {
     assert.match(line, /at least 2 and at most 8 \(if you used more, keep the 8 strongest\)/);
   });
 
+  test('the brief says what id, rank and note hold, and rank 1 to 10 matches the schema', () => {
+    const schema = JSON.parse(fs.readFileSync(NEWS_SCHEMA_PATH, 'utf8'));
+    assert.equal(schema.$defs.story.properties.rank.minimum, 1);
+    assert.equal(schema.$defs.story.properties.rank.maximum, 10);
+    const brief = fs.readFileSync(path.join(REPO_ROOT, 'agents', 'news', 'AGENTS.md'), 'utf8');
+    assert.ok(brief.includes("`id`: short and unique in the edition; `rank`: 1 to 10 across stories and more. Leave `note` empty when there's nothing to add."));
+  });
+
   test('a password never shows, whatever else is wrong with the link', () => {
     const cases = [
       ['https://user:secret@exa mple.com/', 'must not have a user name or password before the site name (got "https://***@exa mple.com/")'],
       ['https:///user:secret@evil.example', 'must not have a user name or password before the site name (got "https:///***@evil.example")'],
-      ['https:///@evil.example', 'must not have a user name or password before the site name (got "https:///***@evil.example")'],
+      ['https:///@evil.example', 'must not have a user name or password before the site name (got "https:///@evil.example")'],
       ['http://user:secret@example.com/', 'must start with https:// (got "http://***@example.com/")'],
       ['HTTPS://user:secret@example.com/', 'must start with https:// (got "HTTPS://***@example.com/")'],
-      ['https:\\\\user:secret@evil.example', 'must start with https:// (got "https:\\\\\\\\***@evil.example")'],
+      ['https:\\\\user:secret@evil.example', 'must start with https:// (got "***@evil.example")'],
+      ['ssh://git:hunt\\er2secret@example.com/', 'must start with https:// (got "ssh://***@example.com/")'],
+      ['Source: https://admin:secret@example.com/', 'must start with https:// (got "Source: https://***@example.com/")'],
+      [`${String.fromCodePoint(0xfeff)}https://admin:secret@example.com/`, `must start with https:// (got "${escaped(0xfeff)}https://***@example.com/")`],
+      [`${String.fromCodePoint(0x202e)}https://admin:secret@example.com/`, `must start with https:// (got "${escaped(0x202e)}https://***@example.com/")`],
     ];
     for (const [url, words] of cases) {
       const news = edition();
       news.stories[1].sources[0].url = url;
       const { errors } = validateNews(news);
       assert.deepEqual(errors, [`stories[1].sources[0].url: ${words}`], url);
-      assert.ok(!errors[0].includes('secret'));
+      assert.ok(!errors[0].includes('secret') && !errors[0].includes('hunt'));
     }
   });
 
-  test('a lookalike or numeric site name is refused', () => {
-    for (const url of ['https://evil.example∕good.example/', 'https://еxample.com/', 'https://0x7f.1/', 'https://127.0.0.1/']) {
+  test('user info is hidden in any quoted value, not only in links', () => {
+    const news = edition();
+    news.stories[0].region = 'https://admin:secret@example.com/';
+    assert.deepEqual(validateNews(news).errors, ['stories[0].region: must be one of "us", "china", "eu", "global", "other" (got "https://***@example.com/")']);
+  });
+
+  test('a lookalike, numeric, local or one-word site name is refused', () => {
+    const urls = [
+      `https://evil.example${String.fromCodePoint(0x2215)}good.example/`,
+      `https://${String.fromCodePoint(0x0435)}xample.com/`,
+      'https://0x7f.1/',
+      'https://127.0.0.1/',
+      'https://localhost/',
+      'https://wire.localhost/x',
+      'https://newsroom/x',
+    ];
+    for (const url of urls) {
       const news = edition();
       news.stories[0].sources[0].url = url;
-      const { errors } = validateNews(news);
-      assert.equal(errors.length, 1, url);
-      assert.match(errors[0], /^stories\[0\]\.sources\[0\]\.url: must name its site in plain letters, digits, dots and dashes \(xn-- for other alphabets\), not as an IP address/, url);
+      assert.deepEqual(validateNews(news).errors, [`stories[0].sources[0].url: ${SITE_WORDS} (got ${JSON.stringify(url)})`], url);
     }
   });
 
-  test('bidi and zero-width characters are refused in links and escaped in messages', () => {
+  test('underscores and an empty port are fine in a site name', () => {
     const news = edition();
-    news.stories[0].sources[0].url = 'https://example.com/\u202egnp.exe';
-    news.stories[0].region = 'us\u200b\u009b';
+    news.stories[0].sources[0].url = 'https://my_bucket.s3.amazonaws.com/report.pdf';
+    news.stories[0].sources[1].url = 'https://example.org:/wire/test-story-one';
+    assert.deepEqual(validateNews(news), VALID);
+  });
+
+  test('a backslash, bidi or zero-width character in a link has its own message, and is escaped', () => {
+    const news = edition();
+    news.stories[0].sources[0].url = `https://example.com/${String.fromCodePoint(0x202e)}gnp.exe`;
+    news.stories[0].sources[1].url = 'https://example.org/a\\b';
+    news.stories[0].region = `us${String.fromCodePoint(0x200b, 0x9b)}`;
     assert.deepEqual(validateNews(news).errors, [
-      'stories[0].region: must be one of "us", "china", "eu", "global", "other" (got "us\\u200b\\u009b")',
-      'stories[0].sources[0].url: must be a whole link that starts with https://, with a site name and no spaces (got "https://example.com/\\u202egnp.exe")',
+      `stories[0].region: must be one of "us", "china", "eu", "global", "other" (got "us${escaped(0x200b, 0x9b)}")`,
+      `stories[0].sources[0].url: must not contain a backslash or hidden characters (got "https://example.com/${escaped(0x202e)}gnp.exe")`,
+      'stories[0].sources[1].url: must not contain a backslash or hidden characters (got "https://example.org/a\\\\b")',
     ]);
+  });
+
+  // N2 review: invisible characters beyond the old hand-made list (tag characters, soft hyphen,
+  // invisible operators, Hangul fillers) go by Unicode property now.
+  test('a text field of only invisible characters counts as empty, and they are escaped by code point', () => {
+    for (const points of [[0x200b], [0xad], [0x2061, 0x2064], [0xe0041, 0xe0042], [0x3164], [0x200d, 0xfe0f]]) {
+      const news = edition();
+      news.stories[0].skeptic = String.fromCodePoint(...points);
+      assert.deepEqual(validateNews(news).errors, [`stories[0].skeptic: must not be empty or only spaces (got "${escaped(...points)}")`], escaped(...points));
+    }
+    const news = edition();
+    news.stories[0].skeptic = `${String.fromCodePoint(0x200b)}A fair critique.`;
+    assert.deepEqual(validateNews(news), VALID, 'one visible character is enough');
+  });
+
+  test('a note of only invisible characters does not explain fewer than 3 stories', () => {
+    const news = edition();
+    news.stories.pop();
+    news.note = String.fromCodePoint(0x200b, 0xfeff);
+    assert.deepEqual(validateNews(news).errors, ['note: must say why there are fewer than 3 stories (stories has 2)']);
   });
 
   test('more with 100,000 empty objects fails in well under a second', () => {
@@ -731,22 +831,22 @@ describe('N2 review: links, quoting and runaway files', () => {
     const { ok, errors } = validateNews(news);
     assert.ok(performance.now() - started < 1000, 'well under a second');
     assert.equal(ok, false);
-    assert.deepEqual(errors, ['more: far too long (100000 stories); at most 7 allowed, so nothing else was checked']);
+    assert.deepEqual(errors, ['more: far too long (100000 stories); at most 7 allowed (leave the weakest out), so nothing else was checked']);
   });
 
   test('far too long stories, sources, or breaking sources fail at once too', () => {
     const started = performance.now();
     const stories = edition();
     stories.stories = Array.from({ length: 100_000 }, () => ({}));
-    assert.deepEqual(validateNews(stories).errors, ['stories: far too long (100000 stories); at most 3 allowed, so nothing else was checked']);
+    assert.deepEqual(validateNews(stories).errors, ['stories: far too long (100000 stories); at most 3 allowed (the top 3 go in stories, up to 7 more in more), so nothing else was checked']);
 
     const sources = edition();
     sources.more[1].sources = Array.from({ length: 100_000 }, () => ({}));
-    assert.deepEqual(validateNews(sources).errors, ['more[1].sources: far too long (100000 sources); at most 8 allowed, so nothing else was checked']);
+    assert.deepEqual(validateNews(sources).errors, ['more[1].sources: far too long (100000 sources); at most 8 allowed (keep the 8 strongest), so nothing else was checked']);
 
     const story = breaking();
     story.sources = Array.from({ length: 100_000 }, () => ({}));
-    assert.deepEqual(validateBreaking(story).errors, ['sources: far too long (100000 sources); at most 8 allowed, so nothing else was checked']);
+    assert.deepEqual(validateBreaking(story).errors, ['sources: far too long (100000 sources); at most 8 allowed (keep the 8 strongest), so nothing else was checked']);
     assert.ok(performance.now() - started < 1000, 'well under a second for all three');
   });
 

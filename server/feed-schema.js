@@ -2,7 +2,8 @@
 // plus the rules the schema's patterns don't cover: dates are real calendar days (no 2026-02-30),
 // article links are whole https:// links that open the site they show, with no user name or password,
 // article and theme ids are unique, and every theme an article uses must be in the edition's themes list.
-// A far too long articles or themes list is refused before ajv runs, so a runaway file is cheap to check.
+// A far too long articles, themes or article themes list is refused before ajv runs, so a runaway
+// file is cheap to check.
 // Used by `npm run validate-feed` (the agent runs it) and by the server before it serves an edition.
 // The shared pieces (ajv setup, error wording, date and link checks) live in schema-common.js.
 import fs from 'node:fs';
@@ -27,6 +28,7 @@ export const MAX_FEED_BYTES = MAX_FILE_BYTES;
 
 const schema = JSON.parse(fs.readFileSync(SCHEMA_PATH, 'utf8'));
 const checkSchema = createAjv().compile(schema);
+const ARTICLE_THEMES_MAX = schema.properties.articles.items.properties.themes.maxItems;
 
 const WORDS = {
   root: 'feed',
@@ -103,6 +105,14 @@ export function validateFeed(feed) {
     tooLongError(feed.articles, 'articles', schema.properties.articles.maxItems, 'articles'),
     tooLongError(feed.themes, 'themes', schema.properties.themes.maxItems, 'themes'),
   ].filter(Boolean);
+  // Only once articles is short enough to walk: each article's own themes list (the theme map
+  // draws a line for every pair, so a huge list would freeze the page).
+  if (!guarded.length && Array.isArray(feed.articles)) {
+    feed.articles.forEach((article, i) => {
+      const line = article && typeof article === 'object' && tooLongError(article.themes, `articles[${i}].themes`, ARTICLE_THEMES_MAX, 'themes');
+      if (line) guarded.push(line);
+    });
+  }
   if (guarded.length) return { ok: false, errors: guarded };
   const errors = capErrors([
     ...schemaErrors(checkSchema, feed, WORDS),

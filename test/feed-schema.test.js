@@ -8,6 +8,12 @@ import { checkFeedFile, isCalendarDate, isHttpsLink, validateFeed } from '../ser
 
 const sample = () => JSON.parse(fs.readFileSync(SAMPLE_FEED_PATH, 'utf8'));
 
+/** How a message writes a hidden character: \u00ad, or \u{e0041} beyond the BMP. */
+const escaped = (...points) => points.map((p) => (p > 0xffff ? `\\u{${p.toString(16)}}` : `\\u${p.toString(16).padStart(4, '0')}`)).join('');
+
+const SITE_WORDS =
+  'must name a public site like example.com in plain letters, digits, dots, dashes or underscores (xn-- for other alphabets), not localhost or an IP address';
+
 describe('validateFeed', () => {
   test('accepts prototype/feed.json', () => {
     const result = validateFeed(sample());
@@ -42,20 +48,16 @@ describe('validateFeed', () => {
     }
   });
 
-  test('rejects https:// links that are not whole links: no site, spaces, a backslash or hidden characters', () => {
+  test('rejects https:// links that are not whole links: no site, or spaces', () => {
     const bad = {
       'https://': 'https://',
       'https:// evil': 'https:// evil',
       'https://exa mple.com/post': 'https://exa mple.com/post',
       'https://example.com/a b': 'https://example.com/a b',
       'https://example.com/a\tb': 'https://example.com/a\\tb',
-      'https://example.com/ ': 'https://example.com/ ',
-      'https://example.com/\u0000x': 'https://example.com/\\u0000x',
+      'https://example.com/ ': 'https://example.com/ ',
       'https://:443/': 'https://:443/',
       'https:///example.com': 'https:///example.com',
-      'https://example.com\\@evil.example/': 'https://example.com\\\\@evil.example/',
-      'https://example.com/\u202ex': 'https://example.com/\\u202ex',
-      'https://exa\u200bmple.com/': 'https://exa\\u200bmple.com/',
     };
     for (const [url, shown] of Object.entries(bad)) {
       const feed = sample();
@@ -68,33 +70,65 @@ describe('validateFeed', () => {
     }
   });
 
-  test('accepts whole https:// links, including query, fragment, port, capitals, a trailing dot and punycode site names', () => {
-    for (const url of ['https://example.com', 'https://example.com/p?q=1&r=a%20b#part', 'https://example.com:8443/x', 'https://xn--bcher-kva.de/', 'https://localhost/x', 'https://Example.COM/x', 'https://example.com./x']) {
+  // N2 review: a backslash or hidden character gets its own message, and "hidden" goes by Unicode
+  // property (controls, format characters, default-ignorables), not a hand-made list.
+  test('rejects a backslash or hidden characters in a link, with its own message', () => {
+    const cases = [
+      // Quoting over-hides here: everything before the last @ in the piece becomes ***.
+      ['https://example.com\\@evil.example/', 'https://***@evil.example/'],
+      ...[0x0000, 0x0085, 0x00ad, 0x061c, 0x200b, 0x202e, 0x2061, 0x2066, 0xfe0f, 0xe0041].map((point) => [
+        `https://example.com/a${String.fromCodePoint(point)}b`,
+        `https://example.com/a${escaped(point)}b`,
+      ]),
+    ];
+    for (const [url, shown] of cases) {
+      const feed = sample();
+      feed.articles[2].url = url;
+      assert.deepEqual(validateFeed(feed).errors, [`articles[2].url: must not contain a backslash or hidden characters (got "${shown}")`], shown);
+    }
+  });
+
+  test('accepts whole https:// links, including query, fragment, port, capitals, a trailing dot, underscores and punycode site names', () => {
+    const good = [
+      'https://example.com',
+      'https://example.com/p?q=1&r=a%20b#part',
+      'https://example.com:8443/x',
+      'https://example.com:/x',
+      'https://xn--bcher-kva.de/',
+      'https://Example.COM/x',
+      'https://example.com./x',
+      'https://my_bucket.s3.amazonaws.com/report.pdf',
+    ];
+    for (const url of good) {
       const feed = sample();
       feed.articles[0].url = url;
       assert.deepEqual(validateFeed(feed), { ok: true, errors: [] }, url);
     }
   });
 
-  // N2 review: the site the browser opens must be the site as written.
-  test('rejects lookalike, non-ASCII, percent-encoded and numeric site names, and IP addresses', () => {
-    const words = 'must name its site in plain letters, digits, dots and dashes (xn-- for other alphabets), not as an IP address';
-    const cases = {
-      'https://evil.example∕good.example/': 'https://evil.example∕good.example/',
-      'https://evil.example⁄good.example/': 'https://evil.example⁄good.example/',
-      'https://ｅxample.com/': 'https://ｅxample.com/',
-      'https://еxample.com/': 'https://еxample.com/',
-      'https://bücher.de/': 'https://bücher.de/',
-      'https://ex%61mple.com/': 'https://ex%61mple.com/',
-      'https://0x7f.1/': 'https://0x7f.1/',
-      'https://2130706433/': 'https://2130706433/',
-      'https://127.0.0.1/': 'https://127.0.0.1/',
-      'https://[::1]/': 'https://[::1]/',
-    };
-    for (const [url, shown] of Object.entries(cases)) {
+  // N2 review: the site the browser opens must be the site as written, and a public one.
+  test('rejects lookalike, non-ASCII, percent-encoded and numeric site names, IP addresses, localhost and one-word names', () => {
+    const cases = [
+      `https://evil.example${String.fromCodePoint(0x2215)}good.example/`,
+      `https://evil.example${String.fromCodePoint(0x2044)}good.example/`,
+      `https://${String.fromCodePoint(0xff45)}xample.com/`,
+      `https://${String.fromCodePoint(0x0435)}xample.com/`,
+      `https://b${String.fromCodePoint(0xfc)}cher.de/`,
+      'https://ex%61mple.com/',
+      'https://0x7f.1/',
+      'https://2130706433/',
+      'https://127.0.0.1/',
+      'https://[::1]/',
+      'https://localhost/x',
+      'https://localhost./x',
+      'https://news.localhost/x',
+      'https://intranet/x',
+      'https://intranet./x',
+    ];
+    for (const url of cases) {
       const feed = sample();
       feed.articles[0].url = url;
-      assert.deepEqual(validateFeed(feed).errors, [`articles[0].url: ${words} (got "${shown}")`], url);
+      assert.deepEqual(validateFeed(feed).errors, [`articles[0].url: ${SITE_WORDS} (got ${JSON.stringify(url)})`], url);
     }
   });
 
@@ -104,15 +138,16 @@ describe('validateFeed', () => {
       'https://user@example.com/post': 'https://***@example.com/post',
       'https://user:secret@example.com/post': 'https://***@example.com/post',
       'https://:secret@example.com/': 'https://***@example.com/',
-      'https://@example.com/': 'https://***@example.com/',
-      'https://@/': 'https://***@/',
       'https://a@b@example.com/': 'https://***@example.com/',
       'https://user%40x@example.com/': 'https://***@example.com/',
-      // N2 review: the parser skips any run of / and \ after "https:", and drops tabs and newlines.
+      // An empty user info has nothing to hide, but is still refused.
+      'https://@example.com/': 'https://@example.com/',
+      'https://@/': 'https://@/',
+      'https:///@evil.example': 'https:///@evil.example',
+      // The parser skips any run of / and \ after "https:", and drops tabs and newlines.
       'https:///user:secret@evil.example': 'https:///***@evil.example',
-      'https:///@evil.example': 'https:///***@evil.example',
-      'https://us\ner:secret@evil.example/': 'https://***@evil.example/',
-      // N2 review: user info is checked first, so a link that is also broken still hides it.
+      'https://us\ner:sec\tret@evil.example/': 'https://***@evil.example/',
+      // User info is checked first, so a link that is also broken still hides it.
       'https://user:secret@exa mple.com/': 'https://***@exa mple.com/',
       'https://user:secret@example.com:99999/': 'https://***@example.com:99999/',
       'https://user:secret@0x7f.1/': 'https://***@0x7f.1/',
@@ -127,19 +162,26 @@ describe('validateFeed', () => {
     }
   });
 
-  test('a link that fails the https:// pattern still never prints a password', () => {
+  // N2 review: user info is hidden anywhere in a value, not only at its start.
+  test('a link that fails the https:// pattern still never prints a password, wherever it sits in the value', () => {
     const cases = {
       'http://user:secret@example.com/': 'http://***@example.com/',
       'HTTPS://user:secret@example.com/': 'HTTPS://***@example.com/',
-      'https:\\\\user:secret@evil.example': 'https:\\\\\\\\***@evil.example',
+      'https:\\\\user:secret@evil.example': '***@evil.example',
       'javascript://user:secret@x/': 'javascript://***@x/',
+      'ssh://git:hunt\\er2secret@example.com/': 'ssh://***@example.com/',
+      'Source: https://admin:secret@example.com/': 'Source: https://***@example.com/',
+      [`${String.fromCodePoint(0x200b)}https://admin:secret@example.com/`]: `${escaped(0x200b)}https://***@example.com/`,
+      [`${String.fromCodePoint(0xa0)}https://admin:secret@example.com/`]: `${String.fromCodePoint(0xa0)}https://***@example.com/`,
+      [`${String.fromCodePoint(0x85)}https://admin:secret@example.com/`]: `${escaped(0x85)}https://***@example.com/`,
+      'see https://a.example/ or https://u:secret@b.example/': 'see https://a.example/ or https://***@b.example/',
     };
     for (const [url, shown] of Object.entries(cases)) {
       const feed = sample();
       feed.articles[1].url = url;
       const { errors } = validateFeed(feed);
       assert.deepEqual(errors, [`articles[1].url: must start with https:// (got "${shown}")`], url);
-      assert.ok(!errors[0].includes('secret'));
+      assert.ok(!errors[0].includes('secret') && !errors[0].includes('hunt'), errors[0]);
     }
   });
 
@@ -305,6 +347,29 @@ describe('validateFeed', () => {
     assert.ok(performance.now() - started < 1000, 'well under a second');
   });
 
+  // N2 review: the theme map draws a line for every pair of an article's themes.
+  test('an article can list at most 10 themes, each once', () => {
+    const feed = sample();
+    feed.themes.push(...Array.from({ length: 11 }, (_, i) => ({ id: `t${i}`, name: `Theme ${i}` })));
+    feed.articles[0].themes = Array.from({ length: 11 }, (_, i) => `t${i}`);
+    feed.articles[1].themes = [feed.themes[0].id, 't1', feed.themes[0].id];
+    assert.deepEqual(validateFeed(feed).errors, [
+      'articles[0].themes: must have at most 10 items (it has 11)',
+      `articles[1].themes: lists "${feed.themes[0].id}" twice (items 0 and 2)`,
+    ]);
+    feed.articles[0].themes = feed.articles[0].themes.slice(0, 10);
+    feed.articles[1].themes = [feed.themes[0].id, 't1'];
+    assert.deepEqual(validateFeed(feed), { ok: true, errors: [] });
+  });
+
+  test('an article with 250,000 themes is refused at once, before the schema runs', () => {
+    const feed = sample();
+    feed.articles[3].themes = Array.from({ length: 250_000 }, (_, i) => `t${i}`);
+    const started = performance.now();
+    assert.deepEqual(validateFeed(feed).errors, ['articles[3].themes: far too long (250000 themes); at most 10 allowed, so nothing else was checked']);
+    assert.ok(performance.now() - started < 100, 'instant');
+  });
+
   test('lists at most 100 problems', () => {
     const feed = sample();
     feed.articles = Array.from({ length: 12 }, (_, i) => ({ id: `a${i}`, url: 'http://example.com', title: '', source: '', themes: [], summary: '', why: '', minutes: 0, date: 'x' }));
@@ -400,6 +465,19 @@ describe('checkFeedFile', () => {
     assert.match(errors[0], /not valid JSON/);
     assert.doesNotMatch(errors[0], /[\u0000-\u001f\u007f-\u009f]/);
     assert.ok(errors[0].includes('\\u001b'));
+  });
+
+  // N2 review: V8 quotes a few characters of the file around a JSON error; that could be a password.
+  test('a JSON error never quotes the file, so an unquoted link with a password stays hidden', async () => {
+    const file = path.join(dir, 'secret.json');
+    fs.writeFileSync(file, '{"articles": [{"url": https://admin:SECRET@example.com/}]}');
+    const { ok, errors } = await checkFeedFile(file);
+    assert.equal(ok, false);
+    assert.equal(errors[0], `${file}: not valid JSON (Unexpected token 'h')`);
+    fs.writeFileSync(file, `{"articles": [], "note": "${'x'.repeat(40)}"} https://admin:SECRET@example.com/`);
+    const second = await checkFeedFile(file);
+    assert.match(second.errors[0], /^.*: not valid JSON \(Unexpected non-whitespace character after JSON at position \d+ \(line 1 column \d+\)\)$/);
+    assert.ok(!second.errors[0].includes('SECRET'));
   });
 
   test('refuses a file over the size limit without reading it', async () => {

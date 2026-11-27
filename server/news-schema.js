@@ -19,9 +19,11 @@ import {
   DATE_PARTS,
   DATE_TIME_PARTS,
   MAX_FILE_BYTES,
+  VISIBLE_CHAR_PATTERN,
   capErrors,
   createAjv,
   isCalendarDate,
+  isBlank,
   isDateTime,
   isHttpsLink,
   linkKey,
@@ -59,7 +61,7 @@ const PATTERNS = {
   '^\\d{4}-\\d{2}-\\d{2}$': 'must be a date like YYYY-MM-DD',
   '^(\\d{4}-\\d{2}-\\d{2})?$': 'must be a date like YYYY-MM-DD, or empty',
   '^[A-Za-z0-9_-]{1,40}$': 'must be 1 to 40 letters, digits, dashes or underscores',
-  '\\S': 'must not be empty or only spaces',
+  [VISIBLE_CHAR_PATTERN]: 'must not be empty or only spaces',
   [DATE_TIME_PARTS.source]: 'must be a date and time with a timezone, like 2026-12-07T12:04:00-05:00 or 2026-12-07T17:04:00Z',
 };
 
@@ -125,11 +127,12 @@ function duplicates(placed, field, isKey) {
   return errors;
 }
 
-// An edition has 3 stories unless the note says why not. A note that isn't text already has its line.
+// An edition has 3 stories unless the note says why not (a note of only spaces or invisible
+// characters doesn't count). A note that isn't text already has its line.
 function noteErrors(news) {
   if (!Array.isArray(news.stories) || news.stories.length >= TOP_STORIES) return [];
   if (news.note !== undefined && typeof news.note !== 'string') return [];
-  if ((news.note ?? '').trim() !== '') return [];
+  if (!isBlank(news.note ?? '')) return [];
   return [`note: must say why there are fewer than ${TOP_STORIES} stories (stories has ${news.stories.length})`];
 }
 
@@ -150,12 +153,17 @@ function foundAtErrors(at) {
 // Far too long lists, found before ajv runs: the story lists first, then (only when those are
 // short enough to walk) each story's sources.
 function tooLongLists(news) {
-  const lists = [tooLongError(news.stories, 'stories', MAX_STORIES, 'stories'), tooLongError(news.more, 'more', MAX_MORE, 'stories')].filter(Boolean);
+  const lists = [
+    tooLongError(news.stories, 'stories', MAX_STORIES, 'stories', NOUNS.stories.overflow),
+    tooLongError(news.more, 'more', MAX_MORE, 'stories', NOUNS.more.overflow),
+  ].filter(Boolean);
   if (lists.length) return lists;
   return placedStories(news)
-    .map(({ story, where }) => isObject(story) && tooLongError(story.sources, `${where}.sources`, MAX_SOURCES, 'sources'))
+    .map(({ story, where }) => isObject(story) && tooLongSources(story.sources, `${where}.sources`))
     .filter(Boolean);
 }
+
+const tooLongSources = (sources, where) => tooLongError(sources, where, MAX_SOURCES, 'sources', NOUNS.sources.overflow);
 
 /**
  * Checks a parsed morning edition (news.json). Never throws.
@@ -183,7 +191,7 @@ export function validateNews(news) {
  */
 export function validateBreaking(story) {
   if (!isObject(story)) return { ok: false, errors: ['breaking: must be a JSON object'] };
-  const tooLong = tooLongError(story.sources, 'sources', MAX_SOURCES, 'sources');
+  const tooLong = tooLongSources(story.sources, 'sources');
   if (tooLong) return { ok: false, errors: [tooLong] };
   const errors = capErrors([...schemaErrors(checkBreakingSchema, story, BREAKING_WORDS), ...foundAtErrors(story.at), ...storyErrors(story, '')]);
   return { ok: errors.length === 0, errors };

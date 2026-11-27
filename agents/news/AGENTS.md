@@ -20,6 +20,7 @@ An AI-focused product manager in Toronto. She wants balanced news, not hype: sev
    - `why`: one line on why it matters.
    - `skeptic`: one or two sentences with the strongest fair critique or open question. Quote or link a real critic where one exists; never invent one.
    - `region`, `kind` and `date` (leave `date` empty if unclear).
+   - `id`: short and unique in the edition; `rank`: 1 to 10 across stories and more. Leave `note` empty when there's nothing to add.
    - `sources`: the pages you used, each `https://` and each a different page: at least 2 and at most 8 (if you used more, keep the 8 strongest).
 8. Write the edition to `~/agent-house/desks/news/news.json` following `data/schema/news.schema.json` in the-desk repo, and save a copy as `editions/YYYY-MM-DD.json`.
 9. From the-desk repo, run `npm run validate-news -- ~/agent-house/desks/news/news.json` and fix what it lists until it prints `valid`. Each problem names the place, for example `stories[1].sources: needs at least 2 sources (has 1)`. Validate the copy in `editions/` the same way.

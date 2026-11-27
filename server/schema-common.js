@@ -41,22 +41,47 @@ const TYPE_WORDS = {
 
 export const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
 
-// Characters that can drive or disguise terminal and log output: C0 and C1 controls, DEL, and the
-// invisible or direction-changing ones (Arabic letter mark, zero-width characters and bidi marks,
-// line and paragraph separators, bidi embeddings, overrides and isolates, word joiners, BOM).
-const UNSAFE_TEXT = /[\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/g;
-const escapeUnsafe = (s) => s.replace(UNSAFE_TEXT, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
-const cut = (s, max) => (s.length > max ? `${s.slice(0, max - 1)}…` : s);
+// Characters that can drive or disguise terminal and log output, by Unicode property: controls
+// (C0, DEL, C1), format characters (bidi marks, embeddings, overrides and isolates, zero-width
+// characters, soft hyphen, tag characters, BOM), lone surrogates, line and paragraph separators,
+// and every default-ignorable code point (variation selectors, Hangul fillers and the like).
+const UNSAFE_CLASS = String.raw`\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}`;
+const UNSAFE_TEXT = new RegExp(`[${UNSAFE_CLASS}]`, 'gu');
 
-// Untrusted values are quoted with JSON.stringify, every unsafe character becomes a \u escape,
-// and the result is cut short.
+/**
+ * A schema pattern for "has at least one character you can see": not a space and not one of the
+ * unsafe characters above. A text field made only of spaces or invisible characters counts as empty.
+ */
+export const VISIBLE_CHAR_PATTERN = `[^\\s${UNSAFE_CLASS}]`;
+const VISIBLE_CHAR = new RegExp(VISIBLE_CHAR_PATTERN, 'u');
+
+/** True for text with nothing you can see in it: empty, spaces, or invisible characters only. */
+export const isBlank = (text) => !VISIBLE_CHAR.test(text);
+
+// Each unsafe character becomes an escape by code point: \u00ad, or \u{e0041} beyond the BMP.
+const escapeUnsafe = (s) =>
+  s.replace(UNSAFE_TEXT, (c) => {
+    const point = c.codePointAt(0);
+    return point > 0xffff ? `\\u{${point.toString(16)}}` : `\\u${point.toString(16).padStart(4, '0')}`;
+  });
+
+// Cuts to at most `max` code points (never half of a surrogate pair), ending with "…" when cut.
+function cut(s, max) {
+  if (s.length <= max) return s;
+  const points = Array.from(s.length > 2 * max ? s.slice(0, 2 * max) : s);
+  if (s.length <= 2 * max && points.length <= max) return s;
+  return `${points.slice(0, max - 1).join('')}…`;
+}
+
+// Untrusted values are quoted with JSON.stringify, with the user info of anything link-like
+// hidden (see hideUserInfo), every unsafe character escaped, and the result cut short.
 export function show(value, max = 60) {
-  const s = JSON.stringify(value);
+  const s = typeof value === 'string' ? JSON.stringify(hideUserInfo(value)) : hideUserInfo(JSON.stringify(value));
   return cut(escapeUnsafe(s === undefined ? String(value) : s), max);
 }
 
-// For text that may quote the file (a JSON.parse message does): unsafe characters become
-// \u escapes, and it's cut short.
+// For text that isn't a quoted value (a path, a JSON.parse message): unsafe characters escaped,
+// cut short. Pass max = Infinity to keep it whole.
 export function plain(text, max = 160) {
   return cut(escapeUnsafe(String(text)), max);
 }
@@ -91,11 +116,11 @@ const SCHEME = /[A-Za-z][A-Za-z0-9+.-]*:/y;
 const SLASHES = /[/\\]*/y;
 const SITE_ENDS = new Set(['/', '\\', '?', '#']);
 
+// For deciding whether a link has user info (hideUserInfo is the broader one for quoting).
 // Finds a link's user info the way a browser's URL parser does: tabs and newlines are dropped,
 // then past leading spaces and the scheme it skips any run of / and \ (so "https:///u:p@x" and
 // "https:\\u:p@x" count), the site part runs to the next / \ ? or #, and everything before the
-// last @ in it is a user name and password, even when empty. Works for any scheme, or none, so a
-// refused http:// or HTTPS:// link can still be quoted safely. Linear time, no regex backtracking.
+// last @ in it is a user name and password, even when empty. Linear time, no regex backtracking.
 // Returns the cleaned text, where the user info starts and where its @ is; or null.
 function findUserInfo(raw) {
   const text = raw.replace(TAB_OR_NEWLINE, '');
@@ -112,11 +137,22 @@ function findUserInfo(raw) {
   return at >= start ? { text, start, at } : null;
 }
 
-/** A link with whatever comes before the site's "@" replaced by ***, so a password is never printed. Anything else comes back as it was. */
+/**
+ * Hides user info anywhere in a value, for quoting it in a message: the value is split at / ? and #
+ * (never at \, which can be part of a user name, as in ssh://git:hunt\er2@host), and in each piece
+ * everything before its last "@" becomes ***. So it works mid-text ("Source: https://u:p@x.com"),
+ * after invisible or unusual characters, for a second link, and for any scheme. It over-hides
+ * (an "@" in a query is hidden too), which is fine in an error message. Linear time.
+ */
 export function hideUserInfo(value) {
-  if (typeof value !== 'string') return value;
-  const found = findUserInfo(value);
-  return found ? `${found.text.slice(0, found.start)}***${found.text.slice(found.at)}` : value;
+  if (typeof value !== 'string' || !value.includes('@')) return value;
+  return value
+    .split(/([/?#])/)
+    .map((piece) => {
+      const at = piece.lastIndexOf('@');
+      return at > 0 ? `***${piece.slice(at)}` : piece;
+    })
+    .join('');
 }
 
 /**
@@ -136,28 +172,27 @@ export function hasUserInfo(value) {
   }
 }
 
-/** Quotes a link for a message: user info hidden, unsafe characters escaped, cut short. */
-export const showLink = (value) => show(hideUserInfo(value));
+// In a link, a backslash (a browser reads it as /, so the link opens somewhere other than it reads)
+// or any of the unsafe characters above.
+const LINK_HIDDEN = new RegExp(`[\\\\${UNSAFE_CLASS}]`, 'u');
 
-// Never allowed in a link: spaces, controls, a backslash (a browser reads it as /, so the link
-// opens somewhere other than it reads), and invisible or direction-changing characters.
-const LINK_UNSAFE = /[\s\\\u0000-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/;
-
-// The site as written: plain ASCII letters, digits, dots and dashes (xn-- punycode covers other
-// alphabets), with an optional port.
-const PLAIN_SITE = /^([A-Za-z0-9.-]+)(?::\d{1,5})?$/;
+// The site as written: plain ASCII letters, digits, dots, dashes and underscores (xn-- punycode
+// covers other alphabets), with an optional port, which may be empty ("example.com:/x").
+const PLAIN_SITE = /^([A-Za-z0-9._-]+)(?::\d{0,5})?$/;
 
 /**
  * What's wrong with a link, as a word: "scheme" (doesn't start with https://, which the schema's
- * pattern reports), "userinfo", "whole" (doesn't parse, no site, spaces or hidden characters) or
- * "site" (the site the browser would open isn't the site as written: lookalike characters that
- * IDNA maps, like U+2215 for "/", a non-ASCII or percent-encoded name, or a numeric form like
- * 0x7f.1 or 2130706433; or it's an IP address). null when it's fine.
+ * pattern reports), "userinfo", "whole" (spaces, doesn't parse, no site), "hidden" (a backslash or
+ * an invisible or control character) or "site": the site the browser would open isn't the site as
+ * written (lookalike characters that IDNA maps, like U+2215 for "/", a non-ASCII or percent-encoded
+ * name, or a numeric form like 0x7f.1 or 2130706433), or it's an IP address, localhost or a
+ * one-word name with no dot. null when it's fine.
  */
 function linkIssue(text) {
   if (typeof text !== 'string' || !text.startsWith('https://')) return 'scheme';
   if (hasUserInfo(text)) return 'userinfo';
-  if (LINK_UNSAFE.test(text)) return 'whole';
+  if (/\s/.test(text)) return 'whole';
+  if (LINK_HIDDEN.test(text)) return 'hidden';
   let url;
   try {
     url = new URL(text);
@@ -170,13 +205,16 @@ function linkIssue(text) {
   if (url.protocol !== 'https:' || url.hostname === '' || written === '') return 'whole';
   const site = PLAIN_SITE.exec(written);
   if (!site || site[1].toLowerCase() !== url.hostname || isIP(url.hostname) !== 0) return 'site';
+  const host = url.hostname.replace(/\.$/, '');
+  if (!host.includes('.') || host === 'localhost' || host.endsWith('.localhost')) return 'site';
   return null;
 }
 
 const LINK_WORDS = {
   userinfo: 'must not have a user name or password before the site name',
   whole: 'must be a whole link that starts with https://, with a site name and no spaces',
-  site: 'must name its site in plain letters, digits, dots and dashes (xn-- for other alphabets), not as an IP address',
+  hidden: 'must not contain a backslash or hidden characters',
+  site: 'must name a public site like example.com in plain letters, digits, dots, dashes or underscores (xn-- for other alphabets), not localhost or an IP address',
 };
 
 /** True for a link The Desk will show: https://, whole, no user info, and it opens the site it shows. */
@@ -193,20 +231,28 @@ export function isHttpsLink(text) {
 export function linkProblem(url) {
   const issue = linkIssue(url);
   if (issue === null || issue === 'scheme') return null;
-  return `${LINK_WORDS[issue]} (got ${showLink(url)})`;
+  return `${LINK_WORDS[issue]} (got ${show(url)})`;
 }
 
-/** The page a link opens, for spotting the same source twice: the parsed link without its #fragment. Only for links isHttpsLink accepts. */
+/**
+ * The page a link opens, for spotting the same source twice. Only for links isHttpsLink accepts.
+ * Drops what doesn't change the page: a #fragment (unless it's a route, #/... or #!..., which
+ * hash-routed sites use for different pages), utm_* tracking parameters, an empty "?", and a
+ * trailing dot on the site name. Other parameters are kept as they are, in their order.
+ */
 export function linkKey(url) {
   const parsed = new URL(url);
-  parsed.hash = '';
+  if (!/^#[/!]/.test(parsed.hash)) parsed.hash = '';
+  parsed.search = parsed.search
+    .slice(1)
+    .split('&')
+    .filter((pair) => !/^utm_/i.test(pair))
+    .join('&');
+  parsed.hostname = parsed.hostname.replace(/\.$/, '');
   return parsed.href;
 }
 
 // ---- Errors ------------------------------------------------------------------------------
-
-// Fields that hold links: their values are quoted with any user name and password hidden.
-const LINK_FIELDS = new Set(['url']);
 
 /**
  * One ajv error as a plain line.
@@ -220,10 +266,7 @@ const LINK_FIELDS = new Set(['url']);
 export function describeError(error, data, { root, patterns = {}, nouns = {} }) {
   const where = readablePath(error.instancePath, root);
   const p = error.params || {};
-  const got = () => {
-    const value = valueAt(data, error.instancePath);
-    return LINK_FIELDS.has(lastSegment(error.instancePath)) ? showLink(value) : show(value);
-  };
+  const got = () => show(valueAt(data, error.instancePath));
   switch (error.keyword) {
     case 'required':
       return `${where}: missing required field "${p.missingProperty}"`;
@@ -259,6 +302,11 @@ export function describeError(error, data, { root, patterns = {}, nouns = {} }) 
       if (error.keyword === 'minItems' && p.limit === 1) return `${where}: must not be empty`;
       return `${where}: must have at ${error.keyword === 'minItems' ? 'least' : 'most'} ${plural(p.limit, 'item')}${has}`;
     }
+    case 'uniqueItems': {
+      const value = valueAt(data, error.instancePath);
+      const [first, second] = [Math.min(p.i, p.j), Math.max(p.i, p.j)];
+      return `${where}: lists ${Array.isArray(value) ? `${show(value[second])} ` : ''}twice (items ${first} and ${second})`;
+    }
     default:
       return `${where}: ${String(error.message || 'is not allowed').replace(/must NOT/g, 'must not')}`;
   }
@@ -278,10 +326,11 @@ export function schemaErrors(check, data, words) {
 /**
  * One line when a list is far too long to be worth checking item by item (over GUARD_ITEMS), else
  * null. The validators run this before ajv and stop there, so such a file costs almost nothing.
+ * hint, when given, says what to do ("keep the 8 strongest").
  */
-export function tooLongError(list, where, max, noun) {
+export function tooLongError(list, where, max, noun, hint) {
   if (!Array.isArray(list) || list.length <= GUARD_ITEMS) return null;
-  return `${where}: far too long (${list.length} ${noun}); at most ${max} allowed, so nothing else was checked`;
+  return `${where}: far too long (${list.length} ${noun}); at most ${max} allowed${hint ? ` (${hint})` : ''}, so nothing else was checked`;
 }
 
 /** The final list of problems for a file: at most MAX_ERRORS lines. */
@@ -321,6 +370,12 @@ export function withoutSample(value) {
   return rest;
 }
 
+// V8 quotes a few characters of the file around some JSON syntax errors
+// (Unexpected token 'h', "{"url": https://ad"... is not valid JSON). A link with a password can
+// sit right there, so the quoted part is dropped; hideUserInfo covers anything else.
+const JSON_SNIPPET = /,?\s*(?:\.\.\.)?"[\s\S]*"(?:\.\.\.)?\s*is not valid JSON$/;
+const withoutSnippet = (message) => String(message).replace(JSON_SNIPPET, '');
+
 /**
  * Reads and parses a JSON file. Never throws.
  * @param {string} filePath
@@ -342,8 +397,8 @@ export async function readJsonFile(filePath, { maxBytes = MAX_FILE_BYTES, fsp = 
     return { ok: false, errors: [`${filePath}: ${reason}`] };
   }
   try {
-    return { ok: true, value: JSON.parse(text.replace(/^\ufeff/, '')) };
+    return { ok: true, value: JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text) };
   } catch (err) {
-    return { ok: false, errors: [`${filePath}: not valid JSON (${plain(err.message)})`] };
+    return { ok: false, errors: [`${filePath}: not valid JSON (${plain(hideUserInfo(withoutSnippet(err.message)))})`] };
   }
 }
