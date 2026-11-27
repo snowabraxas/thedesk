@@ -51,7 +51,7 @@ data/schema/    feed.schema.json (the agent <-> Desk contract)
   - After keyboard Undo of a note delete, focus stays on the faded toast button; move it to `#noteText` (drawer open) or back to where it was.
   - Undo of a note delete after the drawer closed leaves "Notes (n)" and the My notes count stale until the next render; call `renderFeed()` when the drawer is hidden.
   - Still open from Sprint 1: phone-room hotspots and Wila's orb under 44 px with overlapping labels; article title links 25 px tall.
-- "Last good" edition lives only in memory; after a restart with a bad `feed.json` and no `editions/`, the sample shows. Fine once S5 archives editions; could persist to disk.
+- "Last good" edition lives only in memory; after a restart with a bad `feed.json` and no `editions/`, the sample shows. Fine once S5 archives editions; could persist to disk. **Done in Sprint 2 (N3):** kept on disk as `desks/product-feed/last-good.json` (see sprint-2-build notes).
 - Validator accepts `https://user@host/` links; consider rejecting userinfo.
 - Un-marking and re-marking an article read grants XP again (inherited from the prototype).
 - Design list from the S2 baseline (needs Snow's OK before any change): hotspot labels clipped and overlapping at 390 px, tap targets under 44 px (hotspots, Wila orb at 390, Preview chip, card buttons), a few texts under 4.5:1 contrast, "Save ▾" sits 8 px high, folder input cut off at 1440, shelves scroll sideways at 390 with no hint, empty space under Wila at 390.

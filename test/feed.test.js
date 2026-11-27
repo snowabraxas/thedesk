@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { after, describe, test } from 'node:test';
-import { SAMPLE_FEED_PATH, feedPath, productFeedDir } from '../server/config.js';
+import { SAMPLE_FEED_PATH, feedPath, lastGoodPath, productFeedDir } from '../server/config.js';
 import { createFeedLoader } from '../server/feed.js';
 import { MAX_FEED_BYTES } from '../server/feed-schema.js';
 
@@ -43,6 +43,12 @@ function deskHome() {
     },
     writeEdition(name, value) {
       fs.writeFileSync(path.join(editions, name), text(value));
+    },
+    writeLastGood(value) {
+      fs.writeFileSync(lastGoodPath(home, 'product-feed'), text(value));
+    },
+    readLastGood() {
+      return JSON.parse(fs.readFileSync(lastGoodPath(home, 'product-feed'), 'utf8'));
     },
   };
 }
@@ -296,6 +302,62 @@ describe('createFeedLoader', () => {
     const { source } = await createFeedLoader(h.home, { log: { error: (m) => errors.push(m) } }).load();
     assert.equal(source, 'live');
     assert.deepEqual(errors, []);
+  });
+
+  test('a valid feed.json is kept on disk as last-good.json byte for byte; a "sample" key is still never served', async () => {
+    const h = deskHome();
+    h.writeFeed(edition('2026-11-27', { sample: true }));
+    assert.equal((await createFeedLoader(h.home, recorder()).load()).source, 'live');
+    assert.ok(fs.readFileSync(lastGoodPath(h.home, 'product-feed')).equals(fs.readFileSync(feedPath(h.home))));
+    assert.deepEqual(fs.readdirSync(productFeedDir(h.home)).sort(), ['editions', 'feed.json', 'last-good.json'], 'no temp file left');
+
+    h.writeFeed(httpUrl('2026-11-28'));
+    const { feed, source } = await createFeedLoader(h.home, recorder()).load(); // a fresh server
+    assert.equal(source, 'last-good');
+    assert.deepEqual(feed, edition('2026-11-27'));
+    assert.equal('sample' in feed, false);
+  });
+
+  // The Sprint 1 follow-up: a restart with a bad feed.json and no editions/ used to show the sample.
+  test('after a restart with a bad feed.json and no editions/, the last good edition still shows', async () => {
+    const h = deskHome();
+    h.writeFeed(edition('2026-11-27'));
+    assert.equal((await createFeedLoader(h.home, recorder()).load()).source, 'live');
+
+    h.writeFeed(httpUrl('2026-11-28'));
+    const r = recorder();
+    const { feed, source } = await createFeedLoader(h.home, r).load(); // a fresh server
+    assert.equal(source, 'last-good');
+    assert.deepEqual(feed, edition('2026-11-27'));
+    assert.equal(r.errors.length, 1);
+    assert.match(r.errors[0], /feed\.json isn't a valid edition, so it keeps showing the last good edition \(2026-11-27\):/);
+  });
+
+  test('after a restart, a newer valid edition in editions/ wins over an older last-good.json; the same date does not', async () => {
+    const h = deskHome();
+    h.writeFeed(edition('2026-11-27'));
+    assert.equal((await createFeedLoader(h.home, recorder()).load()).source, 'live');
+    h.writeFeed(httpUrl('2026-11-29'));
+    h.writeEdition('2026-11-27.json', edition('2026-11-27'));
+    assert.equal((await createFeedLoader(h.home, recorder()).load()).source, 'last-good', 'the same date');
+    h.writeEdition('2026-11-28.json', edition('2026-11-28'));
+    const r = recorder();
+    const { feed, source } = await createFeedLoader(h.home, r).load();
+    assert.equal(source, 'edition:2026-11-28.json');
+    assert.equal(feed.edition, '2026-11-28');
+    assert.match(r.errors[0], /keeps showing 2026-11-28\.json from editions\//);
+  });
+
+  test('a damaged last-good.json is skipped, logged once, and editions/ comes next', async () => {
+    const h = deskHome();
+    h.writeFeed(httpUrl('2026-11-28'));
+    h.writeLastGood(httpUrl('2026-11-27'));
+    h.writeEdition('2026-11-26.json', edition('2026-11-26'));
+    const r = recorder();
+    const feeds = createFeedLoader(h.home, r);
+    for (let i = 0; i < 3; i++) assert.equal((await feeds.load()).source, 'edition:2026-11-26.json');
+    assert.equal(r.errors.length, 2);
+    assert.match(r.errors[0], /skipping .*product-feed\/last-good\.json, it isn't a valid edition:\n {2}- articles\[0\]\.url/);
   });
 
   test('throws when even the sample is missing (the server answers 500)', async () => {

@@ -9,6 +9,10 @@ export const SCHEMA_PATH = path.join(REPO_ROOT, 'data', 'schema', 'feed.schema.j
 export const NEWS_SCHEMA_PATH = path.join(REPO_ROOT, 'data', 'schema', 'news.schema.json');
 export const BREAKING_SCHEMA_PATH = path.join(REPO_ROOT, 'data', 'schema', 'breaking.schema.json');
 export const SAMPLE_FEED_PATH = path.join(REPO_ROOT, 'prototype', 'feed.json');
+/** The News edition shown before the agent has written a valid one (marked "sample": true by the server). */
+export const SAMPLE_NEWS_PATH = path.join(REPO_ROOT, 'data', 'samples', 'news.sample.json');
+/** A breaking story for screenshots and tests only. The server never serves it as breaking news. */
+export const SAMPLE_BREAKING_PATH = path.join(REPO_ROOT, 'data', 'samples', 'breaking.sample.json');
 
 export const DEFAULT_PORT = 4321;
 export const HOST = '127.0.0.1';
@@ -51,20 +55,36 @@ export function resolvePort(env = process.env) {
   return port;
 }
 
+/** A desk's folder under DESK_HOME: desks/product-feed, desks/news. */
+export function deskDir(deskHome, desk) {
+  return path.join(deskHome, 'desks', desk);
+}
+
 export function productFeedDir(deskHome) {
-  return path.join(deskHome, 'desks', 'product-feed');
+  return deskDir(deskHome, 'product-feed');
 }
 
 export function feedPath(deskHome) {
   return path.join(productFeedDir(deskHome), 'feed.json');
 }
 
-export function statePath(deskHome) {
-  return path.join(productFeedDir(deskHome), 'state.json');
+/** Snow's saved state for a desk (Product Feed unless another desk is named). */
+export function statePath(deskHome, desk = 'product-feed') {
+  return path.join(deskDir(deskHome, desk), 'state.json');
+}
+
+/** The last valid edition The Desk served for a desk, kept so a restart doesn't lose it. */
+export function lastGoodPath(deskHome, desk) {
+  return path.join(deskDir(deskHome, desk), 'last-good.json');
+}
+
+/** The dated copies of a desk's editions: editions/YYYY-MM-DD.json. */
+export function editionsDir(deskHome, desk) {
+  return path.join(deskDir(deskHome, desk), 'editions');
 }
 
 export function newsDir(deskHome) {
-  return path.join(deskHome, 'desks', 'news');
+  return deskDir(deskHome, 'news');
 }
 
 /** The News agent's morning edition. */

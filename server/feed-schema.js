@@ -130,11 +130,12 @@ export function validateFeed(feed) {
  * Reads, parses and checks a feed file. Never throws.
  * @param {string} filePath
  * @param {{ maxBytes?: number, fsp?: typeof fs.promises }} [options] fsp lets tests count reads
- * @returns {Promise<{ ok: boolean, errors: string[], feed?: object }>}
+ * @returns {Promise<{ ok: boolean, errors: string[], feed?: object, bytes?: Buffer }>} bytes is the
+ *   file exactly as read (the server keeps a copy of a valid one).
  */
 export async function checkFeedFile(filePath, { maxBytes = MAX_FEED_BYTES, fsp = fs.promises } = {}) {
   const read = await readJsonFile(filePath, { maxBytes, fsp });
   if (!read.ok) return read;
   const result = validateFeed(read.value);
-  return result.ok ? { ...result, feed: read.value } : result;
+  return result.ok ? { ...result, feed: read.value, bytes: read.bytes } : result;
 }

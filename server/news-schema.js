@@ -221,16 +221,20 @@ function checkValue(value, kind) {
 
 const readNewsFile = (filePath, options) => readJsonFile(filePath, { maxBytes: MAX_NEWS_BYTES, ...options });
 
+// A valid file also comes back with its bytes exactly as read (the server keeps a copy of them).
 async function checkFile(filePath, kind, options) {
   const read = await readNewsFile(filePath, options);
-  return read.ok ? checkValue(read.value, kind) : read;
+  if (!read.ok) return read;
+  const result = checkValue(read.value, kind);
+  return result.ok ? { ...result, bytes: read.bytes } : result;
 }
 
 /**
  * Reads, parses and checks a morning edition file. Never throws.
  * @param {string} filePath
  * @param {{ maxBytes?: number, fsp?: typeof fs.promises }} [options]
- * @returns {Promise<{ ok: boolean, errors: string[], news?: object }>} news has any "sample" key removed.
+ * @returns {Promise<{ ok: boolean, errors: string[], news?: object, bytes?: Buffer }>} news has any "sample" key
+ *   removed; bytes is the file exactly as read.
  */
 export function checkNewsFile(filePath, options = {}) {
   return checkFile(filePath, 'news', options);
@@ -238,7 +242,8 @@ export function checkNewsFile(filePath, options = {}) {
 
 /**
  * Reads, parses and checks a breaking story file. Never throws.
- * @returns {Promise<{ ok: boolean, errors: string[], breaking?: object }>} breaking has any "sample" key removed.
+ * @returns {Promise<{ ok: boolean, errors: string[], breaking?: object, bytes?: Buffer }>} breaking has any
+ *   "sample" key removed; bytes is the file exactly as read.
  */
 export function checkBreakingFile(filePath, options = {}) {
   return checkFile(filePath, 'breaking', options);
