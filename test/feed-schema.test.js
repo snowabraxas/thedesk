@@ -73,6 +73,34 @@ describe('validateFeed', () => {
     }
   });
 
+  // Sprint 1 follow-up, done in N2: a link may not carry a user name or password before the site name.
+  test('rejects links with a user name or password in them, and never prints the password', () => {
+    const cases = {
+      'https://user@example.com/post': 'https://***@example.com/post',
+      'https://user:secret@example.com/post': 'https://***@example.com/post',
+      'https://:secret@example.com/': 'https://***@example.com/',
+      'https://@example.com/': 'https://***@example.com/',
+      'https://a@b@example.com/': 'https://***@example.com/',
+      'https://user%40x@example.com/': 'https://***@example.com/',
+    };
+    for (const [url, shown] of Object.entries(cases)) {
+      const feed = sample();
+      feed.articles[1].url = url;
+      const { ok, errors } = validateFeed(feed);
+      assert.equal(ok, false, url);
+      assert.deepEqual(errors, [`articles[1].url: must not have a user name or password before the site name (got "${shown}")`], url);
+      assert.ok(!errors[0].includes('secret'), 'the password is hidden');
+    }
+  });
+
+  test('an @ after the site name is fine: profile pages and queries', () => {
+    for (const url of ['https://example.com/@snow', 'https://example.com/p?by=a@b.com', 'https://example.com/#@top']) {
+      const feed = sample();
+      feed.articles[0].url = url;
+      assert.deepEqual(validateFeed(feed), { ok: true, errors: [] }, url);
+    }
+  });
+
   test('an http:// link gets one line, not two', () => {
     const feed = sample();
     feed.articles[0].url = 'http:// evil';
@@ -240,6 +268,13 @@ describe('isCalendarDate and isHttpsLink', () => {
     assert.equal(isHttpsLink('https://example.com/\n'), false);
     assert.equal(isHttpsLink(' https://example.com'), false);
     assert.equal(isHttpsLink(null), false);
+  });
+
+  test('isHttpsLink refuses a user name or password, and allows an @ in the path', () => {
+    assert.equal(isHttpsLink('https://user@example.com/'), false);
+    assert.equal(isHttpsLink('https://user:pw@example.com/'), false);
+    assert.equal(isHttpsLink('https://@example.com/'), false);
+    assert.equal(isHttpsLink('https://example.com/@snow'), true);
   });
 });
 

@@ -1,130 +1,40 @@
 // The feed contract: checks a Product Feed edition against data/schema/feed.schema.json,
 // plus the rules the schema's patterns don't cover: dates are real calendar days (no 2026-02-30),
-// article links are whole https:// links with a site name and no spaces, article and theme ids
-// are unique, and every theme an article uses must be in the edition's themes list.
+// article links are whole https:// links with a site name, no spaces and no user name or password,
+// article and theme ids are unique, and every theme an article uses must be in the edition's themes list.
 // Used by `npm run validate-feed` (the agent runs it) and by the server before it serves an edition.
+// The shared pieces (ajv setup, error wording, date and link checks) live in schema-common.js.
 import fs from 'node:fs';
-import Ajv2020Module from 'ajv/dist/2020.js';
 import { SCHEMA_PATH } from './config.js';
+import {
+  DATE_PARTS,
+  MAX_FILE_BYTES,
+  createAjv,
+  isCalendarDate,
+  isHttpsLink,
+  linkProblem,
+  readJsonFile,
+  schemaErrors,
+  show,
+} from './schema-common.js';
 
-const Ajv2020 = Ajv2020Module.default ?? Ajv2020Module;
+export { isCalendarDate, isHttpsLink };
 
-export const MAX_FEED_BYTES = 1024 * 1024;
+export const MAX_FEED_BYTES = MAX_FILE_BYTES;
 
 const schema = JSON.parse(fs.readFileSync(SCHEMA_PATH, 'utf8'));
-const ajv = new Ajv2020({ allErrors: true, strict: true });
-const checkSchema = ajv.compile(schema);
+const checkSchema = createAjv().compile(schema);
 
-const TYPE_WORDS = {
-  string: 'text',
-  integer: 'a whole number',
-  number: 'a number',
-  array: 'a list',
-  object: 'an object',
-  boolean: 'true or false',
+const WORDS = {
+  root: 'feed',
+  patterns: {
+    '^https://': 'must start with https://',
+    '^\\d{4}-\\d{2}-\\d{2}$': 'must be a date like YYYY-MM-DD',
+    '^(\\d{4}-\\d{2}-\\d{2})?$': 'must be a date like YYYY-MM-DD, or empty',
+    '^[a-z0-9-]{1,40}$': 'must be 1 to 40 lowercase letters, digits or dashes',
+    '^[A-Za-z0-9_-]{1,64}$': 'must be 1 to 64 letters, digits, dashes or underscores',
+  },
 };
-
-const PATTERN_WORDS = {
-  '^https://': 'must start with https://',
-  '^\\d{4}-\\d{2}-\\d{2}$': 'must be a date like YYYY-MM-DD',
-  '^(\\d{4}-\\d{2}-\\d{2})?$': 'must be a date like YYYY-MM-DD, or empty',
-  '^[a-z0-9-]{1,40}$': 'must be 1 to 40 lowercase letters, digits or dashes',
-  '^[A-Za-z0-9_-]{1,64}$': 'must be 1 to 64 letters, digits, dashes or underscores',
-};
-
-const plural = (n, word) => `${n} ${word}${n === 1 ? '' : 's'}`;
-
-// Untrusted values are quoted with JSON.stringify (which escapes control characters,
-// so nothing from the file can drive the terminal) and cut short.
-function show(value, max = 60) {
-  let s = JSON.stringify(value);
-  if (s === undefined) s = String(value);
-  return s.length > max ? `${s.slice(0, max - 1)}…` : s;
-}
-
-// For text that may quote the file (a JSON.parse message does): control characters become
-// \u escapes, so nothing from the file can drive the terminal, and it's cut short.
-function plain(text, max = 160) {
-  const s = String(text).replace(/[\u0000-\u001f\u007f-\u009f]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`);
-  return s.length > max ? `${s.slice(0, max - 1)}…` : s;
-}
-
-// "/articles/2/url" -> "articles[2].url"
-function readablePath(instancePath) {
-  if (!instancePath) return 'feed';
-  return instancePath
-    .split('/')
-    .slice(1)
-    .map((part) => part.replace(/~1/g, '/').replace(/~0/g, '~'))
-    .reduce((out, part) => (/^\d+$/.test(part) ? `${out}[${part}]` : out ? `${out}.${part}` : part), '');
-}
-
-function valueAt(root, instancePath) {
-  if (!instancePath) return root;
-  let node = root;
-  for (const raw of instancePath.split('/').slice(1)) {
-    if (node == null) return undefined;
-    node = node[raw.replace(/~1/g, '/').replace(/~0/g, '~')];
-  }
-  return node;
-}
-
-function describe(error, feed) {
-  const where = readablePath(error.instancePath);
-  const p = error.params || {};
-  switch (error.keyword) {
-    case 'required':
-      return `${where}: missing required field "${p.missingProperty}"`;
-    case 'type':
-      return `${where}: must be ${TYPE_WORDS[p.type] || p.type}`;
-    case 'const':
-      return `${where}: must be ${show(p.allowedValue)}`;
-    case 'pattern': {
-      const words = PATTERN_WORDS[p.pattern] || `must match the pattern ${p.pattern}`;
-      return `${where}: ${words} (got ${show(valueAt(feed, error.instancePath))})`;
-    }
-    // Say how long it is now, so the fix is obvious.
-    case 'minLength':
-    case 'maxLength': {
-      const value = valueAt(feed, error.instancePath);
-      const has = typeof value === 'string' ? ` (it has ${[...value].length})` : '';
-      if (error.keyword === 'minLength' && p.limit === 1) return `${where}: must not be empty`;
-      return `${where}: must be at ${error.keyword === 'minLength' ? 'least' : 'most'} ${plural(p.limit, 'character')}${has}`;
-    }
-    case 'minItems':
-    case 'maxItems': {
-      const value = valueAt(feed, error.instancePath);
-      const has = Array.isArray(value) ? ` (it has ${value.length})` : '';
-      if (error.keyword === 'minItems' && p.limit === 1) return `${where}: must not be empty`;
-      return `${where}: must have at ${error.keyword === 'minItems' ? 'least' : 'most'} ${plural(p.limit, 'item')}${has}`;
-    }
-    default:
-      return `${where}: ${String(error.message || 'is not allowed').replace(/must NOT/g, 'must not')}`;
-  }
-}
-
-const DATE_PARTS = /^(\d{4})-(\d{2})-(\d{2})$/;
-
-/** True for a YYYY-MM-DD that is a day on the calendar: "2028-02-29" yes, "2026-02-30" and "2026-13-45" no. */
-export function isCalendarDate(text) {
-  const m = typeof text === 'string' && DATE_PARTS.exec(text);
-  if (!m) return false;
-  const [year, month, day] = [Number(m[1]), Number(m[2]), Number(m[3])];
-  if (month < 1 || month > 12 || day < 1) return false;
-  const leap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
-  return day <= [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1];
-}
-
-/** True for a whole https:// link: it parses, names a site, and has no spaces or control characters. */
-export function isHttpsLink(text) {
-  if (typeof text !== 'string' || !text.startsWith('https://') || /[\s\u0000-\u001f\u007f]/.test(text)) return false;
-  try {
-    const url = new URL(text);
-    return url.protocol === 'https:' && url.hostname !== '';
-  } catch {
-    return false;
-  }
-}
 
 // Only values that already passed the schema's pattern are checked here, so a value is never
 // reported twice (a "27 Nov" edition or an http:// link already has its line).
@@ -140,9 +50,8 @@ function calendarAndLinkErrors(feed) {
     if (typeof date === 'string' && DATE_PARTS.test(date) && !isCalendarDate(date)) {
       errors.push(`articles[${i}].date: must be a real calendar date like YYYY-MM-DD, or empty (got ${show(date)})`);
     }
-    if (typeof url === 'string' && url.startsWith('https://') && !isHttpsLink(url)) {
-      errors.push(`articles[${i}].url: must be a whole link that starts with https://, with a site name and no spaces (got ${show(url)})`);
-    }
+    const problem = linkProblem(url);
+    if (problem) errors.push(`articles[${i}].url: ${problem}`);
   });
   return errors;
 }
@@ -187,19 +96,13 @@ export function validateFeed(feed) {
   if (feed === null || typeof feed !== 'object' || Array.isArray(feed)) {
     return { ok: false, errors: ['feed: must be a JSON object'] };
   }
-  const errors = [];
-  if (!checkSchema(feed)) {
-    for (const e of checkSchema.errors) {
-      const line = describe(e, feed);
-      if (!errors.includes(line)) errors.push(line);
-    }
-  }
-  errors.push(
+  const errors = [
+    ...schemaErrors(checkSchema, feed, WORDS),
     ...calendarAndLinkErrors(feed),
     ...duplicateIds(feed.themes, 'themes'),
     ...duplicateIds(feed.articles, 'articles'),
     ...unknownThemeErrors(feed),
-  );
+  ];
   return { ok: errors.length === 0, errors };
 }
 
@@ -210,24 +113,8 @@ export function validateFeed(feed) {
  * @returns {Promise<{ ok: boolean, errors: string[], feed?: object }>}
  */
 export async function checkFeedFile(filePath, { maxBytes = MAX_FEED_BYTES, fsp = fs.promises } = {}) {
-  let text;
-  try {
-    const stat = await fsp.stat(filePath);
-    if (!stat.isFile()) return { ok: false, errors: [`${filePath}: not a file`] };
-    if (stat.size > maxBytes) {
-      return { ok: false, errors: [`${filePath}: too big (${stat.size} bytes, limit is ${maxBytes})`] };
-    }
-    text = await fsp.readFile(filePath, 'utf8');
-  } catch (err) {
-    const reason = err.code === 'ENOENT' ? 'file not found' : `can't read it (${err.code || err.message})`;
-    return { ok: false, errors: [`${filePath}: ${reason}`] };
-  }
-  let feed;
-  try {
-    feed = JSON.parse(text.replace(/^﻿/, ''));
-  } catch (err) {
-    return { ok: false, errors: [`${filePath}: not valid JSON (${plain(err.message)})`] };
-  }
-  const result = validateFeed(feed);
-  return result.ok ? { ...result, feed } : result;
+  const read = await readJsonFile(filePath, { maxBytes, fsp });
+  if (!read.ok) return read;
+  const result = validateFeed(read.value);
+  return result.ok ? { ...result, feed: read.value } : result;
 }
