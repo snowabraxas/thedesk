@@ -1,5 +1,6 @@
 // The always-on service (scripts/service.js). launchctl is never called: every command goes through
-// a fake that keeps launchd's state in memory. Files go to a temp home folder.
+// a fake that keeps launchd's state in memory. Files go to a temp home folder, and the live copy the
+// service runs from is a stand-in folder at <temp home>/the-desk-live.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
@@ -7,6 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, describe, test } from 'node:test';
 import { REPO_ROOT } from '../server/config.js';
+import { deployedPath, deployedRecord } from '../server/deployed.js';
 import {
   HOMEBREW_NODE,
   LAUNCHCTL,
@@ -19,6 +21,7 @@ import {
   main,
   parseArgs,
   parseLaunchctlPrint,
+  plistWorkingDirectory,
   protectedFolder,
   readLogSince,
   resolveNodePath,
@@ -56,14 +59,25 @@ function printText(s) {
   ].join('\n');
 }
 
+/** Every file and folder under dir, as relative paths, sorted. */
+const tree = (dir) => fs.readdirSync(dir, { recursive: true }).map(String).sort();
+
+const SHA = 'c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00';
+
 /**
  * A fake Mac: launchd's state for our label, who holds the port, whether The Desk answers, a clock.
  * onStart(state, world) runs when launchd would start the server (bootstrap or kickstart).
+ * The live copy is <home>/the-desk-live with a server/index.js (liveCopy: false leaves it out;
+ * inDocuments: true puts it in ~/Documents instead, where macOS privacy applies).
  */
-function fakeMac({ loaded = false, pid = null, portHolder = null, deskUp = false, disabled = false, platform = 'darwin', lint = 0, bootstrapCode = 0, onStart } = {}) {
+function fakeMac({ loaded = false, pid = null, portHolder = null, deskUp = false, disabled = false, platform = 'darwin', lint = 0, bootstrapCode = 0, onStart, liveCopy = true, inDocuments = false } = {}) {
   const home = tempDir();
-  const repoRoot = path.join(home, 'Documents', 'Projects', 'the-desk');
-  const cfg = serviceConfig({ home, uid: 501, repoRoot, nodePath: HOMEBREW_NODE });
+  const runDir = inDocuments ? path.join(home, 'Documents', 'Projects', 'the-desk') : path.join(home, 'the-desk-live');
+  const cfg = serviceConfig({ home, uid: 501, runDir, nodePath: HOMEBREW_NODE });
+  if (liveCopy) {
+    fs.mkdirSync(path.join(runDir, 'server'), { recursive: true });
+    fs.writeFileSync(cfg.serverPath, '// stand-in\n');
+  }
   const state = { loaded, pid, portHolder, deskUp, disabled, runs: loaded ? 1 : 0, lastExit: '(never exited)', clock: 0, nextPid: 4242 };
   const calls = [];
   const out = [];
@@ -174,13 +188,15 @@ describe('service config and plist', () => {
     assert.equal(resolveNodePath({ exists: () => false, execPath: '/usr/local/bin/node' }), '/usr/local/bin/node');
   });
 
-  test('derives every path from the home folder, the user id and the repo', () => {
-    const cfg = serviceConfig({ home: '/Users/snow', uid: 501, repoRoot: '/Users/snow/Documents/Projects/the-desk', nodePath: '/opt/homebrew/bin/node' });
+  test('derives every path from the home folder and the user id; it runs the live copy, not this checkout', () => {
+    const cfg = serviceConfig({ home: '/Users/snow', uid: 501, env: {}, nodePath: '/opt/homebrew/bin/node' });
     assert.equal(cfg.label, 'local.thedesk.server');
     assert.equal(cfg.domain, 'gui/501');
     assert.equal(cfg.target, 'gui/501/local.thedesk.server');
     assert.equal(cfg.plistPath, '/Users/snow/Library/LaunchAgents/local.thedesk.server.plist');
-    assert.equal(cfg.serverPath, '/Users/snow/Documents/Projects/the-desk/server/index.js');
+    assert.equal(cfg.runDir, '/Users/snow/the-desk-live');
+    assert.equal(cfg.serverPath, '/Users/snow/the-desk-live/server/index.js');
+    assert.notEqual(cfg.runDir, REPO_ROOT);
     assert.equal(cfg.logPath, '/Users/snow/agent-house/logs/the-desk.log');
     assert.equal(cfg.port, 4321);
     assert.deepEqual(cfg.env, {
@@ -192,13 +208,19 @@ describe('service config and plist', () => {
     });
   });
 
-  test('the plist runs node on server/index.js from the repo, at login, and again whenever it stops', () => {
-    const cfg = serviceConfig({ home: '/Users/snow', uid: 501, repoRoot: '/Users/snow/Documents/Projects/the-desk', nodePath: '/opt/homebrew/bin/node' });
+  test('DESK_LIVE_DIR (or runDir) moves the live copy it runs', () => {
+    assert.equal(serviceConfig({ home: '/Users/snow', uid: 501, env: { DESK_LIVE_DIR: '/tmp/live' }, nodePath: 'n' }).serverPath, '/tmp/live/server/index.js');
+    assert.equal(serviceConfig({ home: '/Users/snow', uid: 501, runDir: '/srv/desk', nodePath: 'n' }).runDir, '/srv/desk');
+  });
+
+  test('the plist runs node on server/index.js in the live copy, at login, and again whenever it stops', () => {
+    const cfg = serviceConfig({ home: '/Users/snow', uid: 501, env: {}, nodePath: '/opt/homebrew/bin/node' });
     const plist = buildPlist(cfg);
     assert.match(plist, /^<\?xml version="1.0" encoding="UTF-8"\?>\n<!DOCTYPE plist/);
     assert.match(plist, /<key>Label<\/key>\n\t<string>local\.thedesk\.server<\/string>/);
-    assert.match(plist, /<key>ProgramArguments<\/key>\n\t<array>\n\t\t<string>\/opt\/homebrew\/bin\/node<\/string>\n\t\t<string>\/Users\/snow\/Documents\/Projects\/the-desk\/server\/index\.js<\/string>\n\t<\/array>/);
-    assert.match(plist, /<key>WorkingDirectory<\/key>\n\t<string>\/Users\/snow\/Documents\/Projects\/the-desk<\/string>/);
+    assert.match(plist, /<key>ProgramArguments<\/key>\n\t<array>\n\t\t<string>\/opt\/homebrew\/bin\/node<\/string>\n\t\t<string>\/Users\/snow\/the-desk-live\/server\/index\.js<\/string>\n\t<\/array>/);
+    assert.match(plist, /<key>WorkingDirectory<\/key>\n\t<string>\/Users\/snow\/the-desk-live<\/string>/);
+    assert.equal(plistWorkingDirectory(plist), '/Users/snow/the-desk-live');
     assert.match(plist, /<key>RunAtLoad<\/key>\n\t<true\/>/);
     assert.match(plist, /<key>KeepAlive<\/key>\n\t<true\/>/, 'KeepAlive true: restarted after a crash and after a clean exit (SIGTERM exits 0)');
     assert.match(plist, /<key>ThrottleInterval<\/key>\n\t<integer>10<\/integer>/);
@@ -211,7 +233,7 @@ describe('service config and plist', () => {
 
   test('every value is XML-escaped: &, <, >, quotes and spaces in paths', () => {
     const odd = `/Users/s & o/Projects <dev>/"the" desk's`;
-    const cfg = serviceConfig({ home: '/Users/s & o', uid: 501, repoRoot: odd, nodePath: '/opt/node <1> & "2"' });
+    const cfg = serviceConfig({ home: '/Users/s & o', uid: 501, runDir: odd, nodePath: '/opt/node <1> & "2"' });
     const plist = buildPlist(cfg);
     assert.ok(plist.includes(`<string>/Users/s &amp; o/Projects &lt;dev&gt;/&quot;the&quot; desk&apos;s</string>`));
     assert.ok(plist.includes('<string>/opt/node &lt;1&gt; &amp; &quot;2&quot;</string>'));
@@ -219,11 +241,18 @@ describe('service config and plist', () => {
     const text = plist.replace(/<\?xml[^>]*\?>|<!DOCTYPE[^>]*>/g, '');
     const values = text.replace(/<\/?(plist|dict|key|string|array|true|integer)( version="1\.0")?\/?>/g, '');
     assert.doesNotMatch(values, /[<>"']|&(?!amp;|lt;|gt;|quot;|apos;)/, 'no raw <, >, quotes or & left in any value');
+    assert.equal(plistWorkingDirectory(plist), odd, 'and reads back the same');
+  });
+
+  test('plistWorkingDirectory reads the folder an installed plist runs in', () => {
+    assert.equal(plistWorkingDirectory('<key>WorkingDirectory</key>\n\t<string>/a/&#38;b &#x3c;c&#x3E;</string>'), '/a/&b <c>');
+    assert.equal(plistWorkingDirectory('<plist><dict></dict></plist>'), null);
+    assert.equal(plistWorkingDirectory(''), null);
   });
 
   test('plutil reads the escaped values back exactly (macOS only)', { skip: !fs.existsSync(PLUTIL) && 'no plutil here' }, () => {
     const odd = `/tmp/a & b/<c> "d" 'e'/the desk`;
-    const cfg = serviceConfig({ home: '/Users/s & o', uid: 501, repoRoot: odd, nodePath: '/opt/homebrew/bin/node' });
+    const cfg = serviceConfig({ home: '/Users/s & o', uid: 501, runDir: odd, nodePath: '/opt/homebrew/bin/node' });
     const file = path.join(tempDir(), 'odd.plist');
     fs.writeFileSync(file, buildPlist(cfg));
     const lint = spawnSync(PLUTIL, ['-lint', file], { encoding: 'utf8' });
@@ -304,17 +333,52 @@ describe('reading launchctl and the log', () => {
 describe('service:install', () => {
   test('--dry-run prints the plist and the exact commands, and changes nothing', async () => {
     const mac = fakeMac();
+    fs.writeFileSync(deployedPath(mac.cfg.runDir), JSON.stringify(deployedRecord({ sha: SHA, subject: 'N1: live copy', deployedAt: '2026-11-28T09:14:03-05:00' })));
+    const before = tree(mac.home);
     assert.equal(await mac.run('install', '--dry-run'), 0);
     assert.deepEqual(mac.calls, [], 'no command was run');
-    assert.deepEqual(fs.readdirSync(mac.home), [], 'no file or folder was written');
+    assert.deepEqual(tree(mac.home), before, 'no file or folder was written');
     const text = mac.text();
     assert.ok(text.startsWith('Dry run: nothing is changed.'));
+    assert.ok(text.includes(`The service will run The Desk from the live copy: ${mac.cfg.runDir}, main @ c0ffee0 "N1: live copy", deployed 2026-11-28T09:14:03-05:00`));
     assert.ok(text.includes(buildPlist(mac.cfg)), 'the whole plist');
-    assert.ok(text.includes(`7. Load and start it: /bin/launchctl bootstrap gui/501 ${mac.cfg.plistPath}`));
+    assert.ok(text.includes(`<key>WorkingDirectory</key>\n\t<string>${mac.cfg.runDir}</string>`));
+    assert.ok(text.includes(`8. Load and start it: /bin/launchctl bootstrap gui/501 ${mac.cfg.plistPath}`));
     assert.ok(text.includes('/bin/launchctl bootout gui/501/local.thedesk.server'));
     assert.ok(text.includes('/bin/launchctl kickstart -k gui/501/local.thedesk.server'));
     assert.ok(text.includes(`/usr/bin/plutil -lint ${mac.cfg.plistPath}`));
-    assert.equal(text, dryRunText(mac.cfg));
+  });
+
+  test('--dry-run says so when the live copy is not there yet', async () => {
+    const mac = fakeMac({ liveCopy: false });
+    assert.equal(await mac.run('install', '--dry-run'), 0);
+    assert.deepEqual(mac.calls, []);
+    assert.deepEqual(tree(mac.home), []);
+    assert.ok(mac.text().includes(`The service will run The Desk from the live copy: not there yet: ${mac.cfg.runDir} (make it with npm run deploy)`));
+    assert.equal(mac.text(), dryRunText(mac.cfg, { liveCopy: `not there yet: ${mac.cfg.runDir} (make it with npm run deploy)` }));
+  });
+
+  test('refuses, changing nothing, when the live copy is not there yet: run npm run deploy first', async () => {
+    const mac = fakeMac({ liveCopy: false });
+    assert.equal(await mac.run('install'), 1);
+    assert.match(mac.errors(), new RegExp(`The live copy isn't there yet \\(${mac.cfg.runDir}\\), so nothing was changed\\.\\nRun npm run deploy first`));
+    assert.deepEqual(mac.calls, [], 'not even launchctl print');
+    assert.deepEqual(tree(mac.home), []);
+  });
+
+  test('moves a service that ran from the work folder over to the live copy', async () => {
+    const mac = fakeMac({ loaded: true, pid: 4100, portHolder: 4100, deskUp: true });
+    const old = buildPlist({ ...mac.cfg, runDir: path.join(mac.home, 'Documents', 'Projects', 'the-desk'), serverPath: path.join(mac.home, 'Documents', 'Projects', 'the-desk', 'server', 'index.js') });
+    fs.mkdirSync(path.dirname(mac.cfg.plistPath), { recursive: true });
+    fs.writeFileSync(mac.cfg.plistPath, old);
+    assert.equal(await mac.run('install'), 0, mac.errors());
+    const plist = fs.readFileSync(mac.cfg.plistPath, 'utf8');
+    assert.equal(plistWorkingDirectory(plist), mac.cfg.runDir);
+    assert.ok(plist.includes(`<string>${mac.cfg.runDir}/server/index.js</string>`));
+    assert.ok(!plist.includes('Documents'));
+    const calls = mac.launchctl();
+    assert.ok(calls.indexOf('bootout gui/501/local.thedesk.server') < calls.indexOf(`bootstrap gui/501 ${mac.cfg.plistPath}`), 'the old one stops first');
+    assert.match(mac.text(), new RegExp(`running The Desk from ${mac.cfg.runDir}`));
   });
 
   test('a --dry-run that npm swallowed is still a dry run', async () => {
@@ -333,6 +397,13 @@ describe('service:install', () => {
     assert.ok(mac.calls.includes(`${PLUTIL} -lint ${mac.cfg.plistPath}`));
     assert.deepEqual(mac.launchctl(), ['print gui/501/local.thedesk.server', 'print-disabled gui/501', `bootstrap gui/501 ${mac.cfg.plistPath}`, 'print gui/501/local.thedesk.server']);
     assert.match(mac.text(), /OK: The Desk is running at http:\/\/localhost:4321 \(process 4242\)\. It starts by itself when you log in/);
+    assert.match(mac.text(), new RegExp(`Installed ${mac.cfg.plistPath}, running The Desk from ${mac.cfg.runDir}`));
+    assert.doesNotMatch(mac.text(), /Documents|click Allow/, 'the live copy is outside Documents: macOS has nothing to ask');
+  });
+
+  test('if the live copy is ever put inside Documents, it says macOS may ask', async () => {
+    const mac = fakeMac({ inDocuments: true });
+    assert.equal(await mac.run('install'), 0, mac.errors());
     assert.match(mac.text(), /inside Documents\. If macOS asks whether "node" may access it, click Allow/);
   });
 
@@ -378,6 +449,7 @@ describe('service:install', () => {
 
   test('when macOS privacy blocks node, says how to allow it, without waiting the full 15 s', async () => {
     const mac = fakeMac({
+      inDocuments: true,
       onStart: (s, { appendLog }) => {
         appendLog(`node:internal/modules/run_main:123\nError: EPERM: operation not permitted, open '${mac.cfg.serverPath}'\n`);
         s.lastExit = '1';
@@ -396,6 +468,7 @@ describe('service:install', () => {
 
   test('when it never answers, prints the last 20 new log lines and a hint after 15 s', async () => {
     const mac = fakeMac({
+      inDocuments: true,
       onStart: (s, { appendLog }) => {
         appendLog(Array.from({ length: 30 }, (_, i) => `line ${i + 1}`).join('\n') + '\n');
         s.lastExit = '1';
@@ -493,7 +566,7 @@ describe('service:start, stop, restart, uninstall', () => {
     assert.equal(await mac.run('restart'), 0, mac.errors());
     assert.ok(mac.launchctl().includes('kickstart -k gui/501/local.thedesk.server'));
     assert.equal(mac.state.pid, 4242);
-    assert.match(mac.text(), /Restarted with the code in this folder/);
+    assert.match(mac.text(), new RegExp(`Restarted with the code in ${mac.cfg.runDir}\\.`));
   });
 
   test('restart starts it when it was stopped', async () => {
@@ -532,18 +605,47 @@ describe('service:status', () => {
     return mac;
   };
 
-  test('running and answering', async () => {
+  test('running and answering, from the live copy, on the deployed commit', async () => {
     const mac = installed({ loaded: true, pid: 4100, portHolder: 4100, deskUp: true });
+    fs.writeFileSync(deployedPath(mac.cfg.runDir), JSON.stringify(deployedRecord({ sha: SHA, subject: 'N1: live copy', deployedAt: '2026-11-28T09:14:03-05:00' })));
     mac.appendLog('hello\n');
     assert.equal(await mac.run('status'), 0);
     const text = mac.text();
     assert.match(text, /Installed: {2}yes/);
+    assert.ok(text.includes(`\n  Runs from:  ${mac.cfg.runDir}\n  Deployed:   main @ c0ffee0 "N1: live copy", deployed 2026-11-28T09:14:03-05:00\n`));
     assert.match(text, /Loaded: {5}yes, launchd keeps it running/);
     assert.match(text, /Running: {4}yes, process 4100/);
     assert.match(text, /Last exit: {2}\(never exited\)/);
     assert.match(text, /Answers: {4}yes, http:\/\/localhost:4321 \(served by the service; edition: sample\)/);
     assert.match(text, /Log: {8}.*the-desk\.log \(1 KB\)/);
+    assert.doesNotMatch(text, /differs|still runs from/);
+  });
+
+  test('a live copy with no deploy recorded says so', async () => {
+    const mac = installed({ loaded: true, pid: 4100, portHolder: 4100, deskUp: true });
+    await mac.run('status');
+    assert.match(mac.text(), /Deployed: {3}not recorded \(this folder isn't a live copy made by npm run deploy\)/);
+  });
+
+  test('a service still running from the work folder: says to move it with service:install', async () => {
+    const mac = installed({ loaded: true, pid: 4100, portHolder: 4100, deskUp: true });
+    const work = path.join(mac.home, 'Documents', 'Projects', 'the-desk');
+    fs.mkdirSync(work, { recursive: true });
+    fs.writeFileSync(mac.cfg.plistPath, buildPlist({ ...mac.cfg, runDir: work, serverPath: path.join(work, 'server', 'index.js') }));
+    await mac.run('status');
+    const text = mac.text();
+    assert.ok(text.includes(`\n  Runs from:  ${work}\n  Deployed:   not recorded`));
+    assert.ok(text.includes(`The service still runs from ${work}, not from the live copy ${mac.cfg.runDir}.\nRun npm run service:install once to move it to the live copy.`));
     assert.doesNotMatch(text, /differs/);
+  });
+
+  test('a service still running from the work folder, and no live copy yet: deploy first', async () => {
+    const mac = installed({ liveCopy: false });
+    const work = path.join(mac.home, 'Documents', 'Projects', 'the-desk');
+    fs.writeFileSync(mac.cfg.plistPath, buildPlist({ ...mac.cfg, runDir: work, serverPath: path.join(work, 'server', 'index.js') }));
+    await mac.run('status');
+    assert.match(mac.text(), new RegExp(`Deployed: {3}nothing: ${work} doesn't exist`));
+    assert.match(mac.text(), /Run npm run deploy to make the live copy, then npm run service:install once to move the service to it\./);
   });
 
   test('stopped, with someone else answering on the port', async () => {
@@ -558,7 +660,7 @@ describe('service:status', () => {
   test('not installed', async () => {
     const mac = fakeMac();
     assert.equal(await mac.run('status'), 0);
-    assert.match(mac.text(), /Installed: {2}no \(npm run service:install\)\n {2}Loaded: {5}no\n {2}Running: {4}no\n/);
+    assert.match(mac.text(), /Installed: {2}no \(npm run service:install\)\n {2}Live copy: {2}.*the-desk-live\n {2}Deployed: {3}not recorded.*\n {2}Loaded: {5}no\n {2}Running: {4}no\n/);
     assert.match(mac.text(), /Answers: {4}no/);
   });
 
@@ -566,11 +668,11 @@ describe('service:status', () => {
     const mac = installed({ loaded: true, pid: 4100, portHolder: 4100, deskUp: true });
     fs.writeFileSync(mac.cfg.plistPath, buildPlist({ ...mac.cfg, nodePath: '/old/node' }));
     await mac.run('status');
-    assert.match(mac.text(), /differs from what this folder would install now[\s\S]*npm run service:install/);
+    assert.match(mac.text(), /differs from what service:install would write now[\s\S]*npm run service:install/);
   });
 
   test('loaded but failing: shows the log, and the privacy steps when that is the cause', async () => {
-    const mac = installed({ loaded: true, pid: null });
+    const mac = installed({ loaded: true, pid: null, inDocuments: true });
     mac.state.lastExit = '1';
     mac.appendLog("Error: EPERM: operation not permitted, uv_cwd\n");
     await mac.run('status');
