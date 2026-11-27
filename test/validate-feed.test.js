@@ -73,6 +73,13 @@ describe('npm run validate-feed', () => {
     assert.doesNotMatch(r.stderr, /[\p{Cf}]|[^\P{Cc}\n]/u);
   });
 
+  // N2 review: running the Product Feed command on a News file says which command to use.
+  test('on a News file, says to run npm run validate-news', () => {
+    const r = run([path.join(REPO_ROOT, 'test', 'fixtures', 'news', 'news.json')]);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /\n {2}- this looks like a News file: run npm run validate-news\n/);
+  });
+
   test('exits 1 for broken JSON', () => {
     const file = path.join(dir, 'broken.json');
     fs.writeFileSync(file, 'not json');

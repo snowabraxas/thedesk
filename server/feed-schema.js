@@ -115,6 +115,8 @@ export function validateFeed(feed) {
   }
   if (guarded.length) return { ok: false, errors: guarded };
   const errors = capErrors([
+    // A News edition checked here by mistake: say which command to run instead.
+    ...(feed.desk === 'news' ? ['this looks like a News file: run npm run validate-news'] : []),
     ...schemaErrors(checkSchema, feed, WORDS),
     ...calendarAndLinkErrors(feed),
     ...duplicateIds(feed.themes, 'themes'),

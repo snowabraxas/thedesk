@@ -372,7 +372,11 @@ describe('validateNews: the rules', () => {
     const news = edition();
     news.desk = 'product-feed';
     delete news.stories;
-    assert.deepEqual(validateNews(news).errors, ['news: missing required field "stories"', 'desk: must be "news"']);
+    assert.deepEqual(validateNews(news).errors, [
+      'this looks like a Product Feed file: run npm run validate-feed',
+      'news: missing required field "stories"',
+      'desk: must be "news"',
+    ]);
   });
 
   test('lists every problem in one go', () => {
@@ -743,8 +747,11 @@ describe('N2 review: links, quoting and runaway files', () => {
   test('a password never shows, whatever else is wrong with the link', () => {
     const cases = [
       ['https://user:secret@exa mple.com/', 'must not have a user name or password before the site name (got "https://***@exa mple.com/")'],
-      ['https:///user:secret@evil.example', 'must not have a user name or password before the site name (got "https:///***@evil.example")'],
-      ['https:///@evil.example', 'must not have a user name or password before the site name (got "https:///@evil.example")'],
+      ['https:///user:secret@evil.example', 'must not have a user name or password before the site name (got "https://***@evil.example")'],
+      ['https:///@evil.example', 'must not have a user name or password before the site name (got "https://***@evil.example")'],
+      // Not user info to the URL parser (a raw / ends the site part), so it fails as a broken link; still hidden.
+      ['https://AKIAIOSFODNN7EXAMPLE:wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY@bucket.example.com/report', 'must be a whole link that starts with https://, with a site name and no spaces (got "https://***@bucket.example.com/report")'],
+      ['http://user:pa#secret@example.com/', 'must start with https:// (got "http://***@example.com/")'],
       ['http://user:secret@example.com/', 'must start with https:// (got "http://***@example.com/")'],
       ['HTTPS://user:secret@example.com/', 'must start with https:// (got "HTTPS://***@example.com/")'],
       ['https:\\\\user:secret@evil.example', 'must start with https:// (got "***@evil.example")'],
@@ -758,14 +765,18 @@ describe('N2 review: links, quoting and runaway files', () => {
       news.stories[1].sources[0].url = url;
       const { errors } = validateNews(news);
       assert.deepEqual(errors, [`stories[1].sources[0].url: ${words}`], url);
-      assert.ok(!errors[0].includes('secret') && !errors[0].includes('hunt'));
+      assert.ok(!/secret|hunt|K7MDENG|EXAMPLEKEY|AKIA/.test(errors[0]), errors[0]);
     }
   });
 
   test('user info is hidden in any quoted value, not only in links', () => {
     const news = edition();
     news.stories[0].region = 'https://admin:secret@example.com/';
-    assert.deepEqual(validateNews(news).errors, ['stories[0].region: must be one of "us", "china", "eu", "global", "other" (got "https://***@example.com/")']);
+    news.stories[1].region = 'admin:p/w@corp';
+    assert.deepEqual(validateNews(news).errors, [
+      'stories[0].region: must be one of "us", "china", "eu", "global", "other" (got "https://***@example.com/")',
+      'stories[1].region: must be one of "us", "china", "eu", "global", "other" (got "***@corp")',
+    ]);
   });
 
   test('a lookalike, numeric, local or one-word site name is refused', () => {
@@ -799,8 +810,8 @@ describe('N2 review: links, quoting and runaway files', () => {
     news.stories[0].region = `us${String.fromCodePoint(0x200b, 0x9b)}`;
     assert.deepEqual(validateNews(news).errors, [
       `stories[0].region: must be one of "us", "china", "eu", "global", "other" (got "us${escaped(0x200b, 0x9b)}")`,
-      `stories[0].sources[0].url: must not contain a backslash or hidden characters (got "https://example.com/${escaped(0x202e)}gnp.exe")`,
-      'stories[0].sources[1].url: must not contain a backslash or hidden characters (got "https://example.org/a\\\\b")',
+      `stories[0].sources[0].url: must not contain a backslash or hidden characters (percent-encode them, e.g. %E2%80%8C) (got "https://example.com/${escaped(0x202e)}gnp.exe")`,
+      'stories[0].sources[1].url: must not contain a backslash or hidden characters (percent-encode them, e.g. %E2%80%8C) (got "https://example.org/a\\\\b")',
     ]);
   });
 
@@ -815,6 +826,30 @@ describe('N2 review: links, quoting and runaway files', () => {
     const news = edition();
     news.stories[0].skeptic = `${String.fromCodePoint(0x200b)}A fair critique.`;
     assert.deepEqual(validateNews(news), VALID, 'one visible character is enough');
+  });
+
+  // N2 review: text can look blank without being invisible: braille blank, combining marks alone,
+  // a null notehead, private-use characters, a Khitan filler.
+  test('a text field that only looks blank counts as empty too', () => {
+    const raw = (...points) => String.fromCodePoint(...points);
+    const cases = [
+      [[0x2800], raw(0x2800)],
+      [[0x300, 0x301], raw(0x300, 0x301)],
+      [[0x1d159], raw(0x1d159)],
+      [[0xe000], raw(0xe000)],
+      [[0x16fe4], raw(0x16fe4)],
+      [[0x20, 0x2800, 0x300], raw(0x20, 0x2800, 0x300)],
+      [[0xffa0, 0x115f, 0x1160], escaped(0xffa0, 0x115f, 0x1160)], // default-ignorable, so escaped when quoted
+    ];
+    for (const [points, shown] of cases) {
+      const news = edition();
+      news.stories[0].why = String.fromCodePoint(...points);
+      assert.deepEqual(validateNews(news).errors, [`stories[0].why: must not be empty or only spaces (got "${shown}")`], escaped(...points));
+    }
+    const news = edition();
+    news.stories[0].why = `Caf${String.fromCodePoint(0x65, 0x301)} chains matter.`;
+    news.stories[0].headline = `${String.fromCodePoint(0x2800)}A real headline`;
+    assert.deepEqual(validateNews(news), VALID, 'marks on letters and one visible character are fine');
   });
 
   test('a note of only invisible characters does not explain fewer than 3 stories', () => {

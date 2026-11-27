@@ -84,7 +84,7 @@ describe('validateFeed', () => {
     for (const [url, shown] of cases) {
       const feed = sample();
       feed.articles[2].url = url;
-      assert.deepEqual(validateFeed(feed).errors, [`articles[2].url: must not contain a backslash or hidden characters (got "${shown}")`], shown);
+      assert.deepEqual(validateFeed(feed).errors, [`articles[2].url: must not contain a backslash or hidden characters (percent-encode them, e.g. %E2%80%8C) (got "${shown}")`], shown);
     }
   });
 
@@ -143,9 +143,9 @@ describe('validateFeed', () => {
       // An empty user info has nothing to hide, but is still refused.
       'https://@example.com/': 'https://@example.com/',
       'https://@/': 'https://@/',
-      'https:///@evil.example': 'https:///@evil.example',
+      'https:///@evil.example': 'https://***@evil.example',
       // The parser skips any run of / and \ after "https:", and drops tabs and newlines.
-      'https:///user:secret@evil.example': 'https:///***@evil.example',
+      'https:///user:secret@evil.example': 'https://***@evil.example',
       'https://us\ner:sec\tret@evil.example/': 'https://***@evil.example/',
       // User info is checked first, so a link that is also broken still hides it.
       'https://user:secret@exa mple.com/': 'https://***@exa mple.com/',
@@ -158,7 +158,26 @@ describe('validateFeed', () => {
       const { ok, errors } = validateFeed(feed);
       assert.equal(ok, false, url);
       assert.deepEqual(errors, [`articles[1].url: must not have a user name or password before the site name (got "${shown}")`], url);
-      assert.ok(!errors[0].includes('secret'), 'the password is hidden');
+      assert.ok(!/secret|K7MDENG|EXAMPLEKEY|AKIA/.test(errors[0]), 'the password is hidden');
+    }
+  });
+
+  // N2 review: a raw / ? or # ends the site part for the URL parser, so these aren't user info to a
+  // browser (they fail as broken links), but the quoted value still hides everything back to the "//".
+  test('a password with a raw / ? or # in it is never printed, whatever the message', () => {
+    const cases = {
+      'https://AKIAIOSFODNN7EXAMPLE:wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY@bucket.example.com/report': 'https://***@bucket.example.com/report',
+      'https://user:pa?secret@example.com/': 'https://***@example.com/',
+      'https://user:pa#secret@example.com/': 'https://***@example.com/',
+    };
+    for (const [url, shown] of Object.entries(cases)) {
+      const feed = sample();
+      feed.articles[1].url = url;
+      const { ok, errors } = validateFeed(feed);
+      assert.equal(ok, false, url);
+      assert.equal(errors.length, 1, url);
+      assert.ok(errors[0].endsWith(`(got "${shown}")`), errors[0]);
+      assert.ok(!/secret|K7MDENG|EXAMPLEKEY|AKIA|wJal/.test(errors[0]), errors[0]);
     }
   });
 
@@ -174,7 +193,8 @@ describe('validateFeed', () => {
       [`${String.fromCodePoint(0x200b)}https://admin:secret@example.com/`]: `${escaped(0x200b)}https://***@example.com/`,
       [`${String.fromCodePoint(0xa0)}https://admin:secret@example.com/`]: `${String.fromCodePoint(0xa0)}https://***@example.com/`,
       [`${String.fromCodePoint(0x85)}https://admin:secret@example.com/`]: `${escaped(0x85)}https://***@example.com/`,
-      'see https://a.example/ or https://u:secret@b.example/': 'see https://a.example/ or https://***@b.example/',
+      'see https://a.example/ or https://u:secret@b.example/': 'see https://***@b.example/',
+      'user:pa?secret@example.com': '***@example.com',
     };
     for (const [url, shown] of Object.entries(cases)) {
       const feed = sample();
@@ -368,6 +388,23 @@ describe('validateFeed', () => {
     const started = performance.now();
     assert.deepEqual(validateFeed(feed).errors, ['articles[3].themes: far too long (250000 themes); at most 10 allowed, so nothing else was checked']);
     assert.ok(performance.now() - started < 100, 'instant');
+  });
+
+  // N2 review: any quoted value hides user info, even in a field that isn't a link.
+  test('a theme id holding a token with a raw / never prints it', () => {
+    const feed = sample();
+    feed.themes.push({ id: 'gh_token:ghp_SECRET/abc@x', name: 'Oops' });
+    const { errors } = validateFeed(feed);
+    assert.deepEqual(errors, [`themes[${feed.themes.length - 1}].id: must be 1 to 40 lowercase letters, digits or dashes (got "***@x")`]);
+  });
+
+  // N2 review: a News edition checked with the Product Feed command says which command to run.
+  test('a News file gets a first line pointing at npm run validate-news', () => {
+    const news = JSON.parse(fs.readFileSync(path.join(path.dirname(SAMPLE_FEED_PATH), '..', 'test', 'fixtures', 'news', 'news.json'), 'utf8'));
+    const { errors } = validateFeed(news);
+    assert.equal(errors[0], 'this looks like a News file: run npm run validate-news');
+    assert.ok(errors.includes('desk: must be "product-feed"'));
+    assert.ok(!validateFeed(sample()).errors.length, 'a Product Feed file gets no such line');
   });
 
   test('lists at most 100 problems', () => {

@@ -49,13 +49,15 @@ const UNSAFE_CLASS = String.raw`\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}\p{Default_Ignorab
 const UNSAFE_TEXT = new RegExp(`[${UNSAFE_CLASS}]`, 'gu');
 
 /**
- * A schema pattern for "has at least one character you can see": not a space and not one of the
- * unsafe characters above. A text field made only of spaces or invisible characters counts as empty.
+ * A schema pattern for "has at least one character you can see": not a space, not one of the
+ * unsafe characters above, not a combining mark (\p{M}) or private-use character (\p{Co}), and not
+ * one of the blank-looking symbols: U+2800 braille blank, U+3164, U+FFA0, U+115F and U+1160
+ * Hangul fillers, U+1D159 null notehead. A text field with none of those counts as empty.
  */
-export const VISIBLE_CHAR_PATTERN = `[^\\s${UNSAFE_CLASS}]`;
+export const VISIBLE_CHAR_PATTERN = String.raw`[^\s` + UNSAFE_CLASS + String.raw`\p{M}\p{Co}\u{2800}\u{3164}\u{ffa0}\u{115f}\u{1160}\u{1d159}]`;
 const VISIBLE_CHAR = new RegExp(VISIBLE_CHAR_PATTERN, 'u');
 
-/** True for text with nothing you can see in it: empty, spaces, or invisible characters only. */
+/** True for text with nothing you can see in it: empty, spaces, invisible characters, marks or blank-looking symbols only. */
 export const isBlank = (text) => !VISIBLE_CHAR.test(text);
 
 // Each unsafe character becomes an escape by code point: \u00ad, or \u{e0041} beyond the BMP.
@@ -138,21 +140,21 @@ function findUserInfo(raw) {
 }
 
 /**
- * Hides user info anywhere in a value, for quoting it in a message: the value is split at / ? and #
- * (never at \, which can be part of a user name, as in ssh://git:hunt\er2@host), and in each piece
- * everything before its last "@" becomes ***. So it works mid-text ("Source: https://u:p@x.com"),
- * after invisible or unusual characters, for a second link, and for any scheme. It over-hides
- * (an "@" in a query is hidden too), which is fine in an error message. Linear time.
+ * Hides user info anywhere in a value, for quoting it in a message: everything from just after
+ * the first "//" (or from the start, when no "//" comes before it) up to the last "@" becomes ***.
+ * So a password with a raw / ? or # in it (https://id:a/b/c@host), one after invisible
+ * characters, in mid-text ("Source: https://u:p@x.com") or in a second link is never printed,
+ * whatever the scheme, and a backslash never stops it. It over-hides on purpose (a path or query
+ * with an "@", or a first link before a second one, is hidden too), which is fine in an error
+ * message. Linear time.
  */
 export function hideUserInfo(value) {
-  if (typeof value !== 'string' || !value.includes('@')) return value;
-  return value
-    .split(/([/?#])/)
-    .map((piece) => {
-      const at = piece.lastIndexOf('@');
-      return at > 0 ? `***${piece.slice(at)}` : piece;
-    })
-    .join('');
+  if (typeof value !== 'string') return value;
+  const at = value.lastIndexOf('@');
+  if (at === -1) return value;
+  const slashes = value.indexOf('//');
+  const start = slashes !== -1 && slashes < at ? slashes + 2 : 0;
+  return start === at ? value : `${value.slice(0, start)}***${value.slice(at)}`;
 }
 
 /**
@@ -213,7 +215,7 @@ function linkIssue(text) {
 const LINK_WORDS = {
   userinfo: 'must not have a user name or password before the site name',
   whole: 'must be a whole link that starts with https://, with a site name and no spaces',
-  hidden: 'must not contain a backslash or hidden characters',
+  hidden: 'must not contain a backslash or hidden characters (percent-encode them, e.g. %E2%80%8C)',
   site: 'must name a public site like example.com in plain letters, digits, dots, dashes or underscores (xn-- for other alphabets), not localhost or an IP address',
 };
 
@@ -374,7 +376,9 @@ export function withoutSample(value) {
 // (Unexpected token 'h', "{"url": https://ad"... is not valid JSON). A link with a password can
 // sit right there, so the quoted part is dropped; hideUserInfo covers anything else.
 const JSON_SNIPPET = /,?\s*(?:\.\.\.)?"[\s\S]*"(?:\.\.\.)?\s*is not valid JSON$/;
-const withoutSnippet = (message) => String(message).replace(JSON_SNIPPET, '');
+
+/** A JSON.parse error as safe text: no quoted snippet of the file, user info hidden, unsafe characters escaped. */
+export const jsonErrorText = (err) => plain(hideUserInfo(String(err?.message ?? err).replace(JSON_SNIPPET, '')));
 
 /**
  * Reads and parses a JSON file. Never throws.
@@ -399,6 +403,6 @@ export async function readJsonFile(filePath, { maxBytes = MAX_FILE_BYTES, fsp = 
   try {
     return { ok: true, value: JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text) };
   } catch (err) {
-    return { ok: false, errors: [`${filePath}: not valid JSON (${plain(hideUserInfo(withoutSnippet(err.message)))})`] };
+    return { ok: false, errors: [`${filePath}: not valid JSON (${jsonErrorText(err)})`] };
   }
 }

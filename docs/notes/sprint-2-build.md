@@ -47,8 +47,16 @@ Technical notes for the team. Snow doesn't need to read this.
 9. A News text field (headline, summary, why, skeptic, source name) made only of invisible characters counts as empty: the schema pattern is now `VISIBLE_CHAR_PATTERN` from `schema-common.js`, and a test keeps them identical. A note made only of invisible characters doesn't explain fewer than 3 stories.
 10. Brief step 7 says what `id`, `rank` (1 to 10) and `note` hold; the schema now caps `rank` at 10 to match.
 
+**Review fixes, round 3 (closing check).** Each has tests.
+1. A password with a raw `/`, `?` or `#` is hidden too: `hideUserInfo` now hides everything from just after the first `//` (or from the start, when no `//` comes before it) to the last `@` in the value. So `https://AKIA...:wJal.../K7MD.../bPx...@bucket.example.com/report` prints as `https://***@bucket.example.com/report`, and `admin:p/w@corp` as `***@corp`. That replaces round 2's split-into-pieces rule. It over-hides more (`https://example.com/@snow` shows as `https://***@snow`), which is fine in a message, and it's linear. Detection is unchanged: to the URL parser such a link isn't user info (a raw `/` ends the site part), so it fails as a broken link, still with the password hidden.
+2. Blank-looking text counts as empty: `VISIBLE_CHAR_PATTERN` (identical in the schema and the code) also excludes `\p{M}` (combining marks alone, U+16FE4), `\p{Co}` (private use), U+2800 braille blank, U+1D159 null notehead and the Hangul fillers U+3164, U+FFA0, U+115F, U+1160.
+3. `state-store.js` builds its "not valid JSON" message with `jsonErrorText` (shared with `readJsonFile`: no quoted snippet, user info hidden, escaped), so a corrupt `state.json` can't put control bytes or a password in `the-desk.log`. The raw BOM in its regex is now an escape.
+4. `validate-news` prints an unknown option through `plain()`.
+5. The hidden-character link message ends `(percent-encode them, e.g. %E2%80%8C)`.
+6. `validateFeed` on a file whose `desk` is `"news"` starts with `this looks like a News file: run npm run validate-news`, and, the other way round, `validateNews` on a `"product-feed"` file starts with `this looks like a Product Feed file: run npm run validate-feed`.
+
 **Worth knowing (for S5).** These review rounds tightened the Product Feed contract too, so the Product Feed agent's brief should say:
-- Article links: no user name or password; the site written in plain ASCII (other alphabets as `xn--` punycode); no IP addresses, `localhost` or one-word sites; no backslashes, spaces or hidden characters.
+- Article links: no user name or password; the site written in plain ASCII (other alphabets as `xn--` punycode); no IP addresses, `localhost` or one-word sites; no backslashes, spaces or hidden characters (percent-encode them).
 - `themes` at most 50; each article's `themes` at most 10, each listed once.
 - The sample feed (`prototype/feed.json`) passes all of these.
 

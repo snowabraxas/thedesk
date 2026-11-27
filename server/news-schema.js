@@ -175,6 +175,8 @@ export function validateNews(news) {
   if (tooLong.length) return { ok: false, errors: tooLong };
   const placed = placedStories(news);
   const errors = capErrors([
+    // A Product Feed edition checked here by mistake: say which command to run instead.
+    ...(news.desk === 'product-feed' ? ['this looks like a Product Feed file: run npm run validate-feed'] : []),
     ...schemaErrors(checkNewsSchema, news, NEWS_WORDS),
     ...editionDateErrors(news.edition),
     ...noteErrors(news),

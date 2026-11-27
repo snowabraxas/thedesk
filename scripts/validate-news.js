@@ -28,7 +28,7 @@ if (args.includes('-h') || args.includes('--help')) {
 }
 const unknown = args.find((a) => a.startsWith('-'));
 if (unknown) {
-  console.error(`${USAGE}\nUnknown option: ${JSON.stringify(unknown)}`);
+  console.error(`${USAGE}\nUnknown option: ${plain(unknown)}`);
   process.exit(1);
 }
 

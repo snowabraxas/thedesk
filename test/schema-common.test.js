@@ -32,11 +32,16 @@ describe('schema-common', () => {
     assert.equal(hasUserInfo('http://user@example.com/'), true, 'any scheme');
   });
 
-  // N2 review: hidden anywhere in the value, split only at / ? #, never stopping at a backslash.
-  test('hideUserInfo hides everything before the last @ in each piece between / ? and #, anywhere in the value', () => {
+  // N2 review: from just after the first "//" (or the start) to the last "@", so a raw / ? # or \
+  // in a password is hidden too.
+  test('hideUserInfo hides everything from the first // (or the start) to the last @', () => {
     const cases = {
       'https://user:pw@example.com/a': 'https://***@example.com/a',
-      'https:///user:pw@example.com': 'https:///***@example.com',
+      'https://AKIAIOSFODNN7EXAMPLE:wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY@bucket.example.com/report': 'https://***@bucket.example.com/report',
+      'https://user:pa?ss@example.com/': 'https://***@example.com/',
+      'https://user:pa#ss@example.com/': 'https://***@example.com/',
+      'https://u:pa//ss@example.com/': 'https://***@example.com/',
+      'https:///user:pw@example.com': 'https://***@example.com',
       'https:\\\\user:pw@example.com': '***@example.com',
       'https:user:pw@example.com': '***@example.com',
       'HTTP://u:pw@example.com': 'HTTP://***@example.com',
@@ -45,12 +50,13 @@ describe('schema-common', () => {
       '  https://u:pw@example.com': '  https://***@example.com',
       'https://us\ner:p\tw@example.com/': 'https://***@example.com/',
       'https://user:p w@example.com/': 'https://***@example.com/',
-      'https://a@b:pw@example.com/x?y=@z': 'https://***@example.com/x?***@z',
-      'Source: https://u:pw@x.example and https://v:pw@y.example/': 'Source: https://***@x.example and https://***@y.example/',
-      'see u:pw@x.example': '***@x.example',
-      'https://example.com/@snow': 'https://example.com/@snow',
+      'Source: https://u:pw@x.example and https://v:pw@y.example/': 'Source: https://***@y.example/',
+      'admin:p/w@corp': '***@corp',
+      'gh_token:ghp_SECRET/abc@x': '***@x',
+      'see u:pw@x.example then https://ok.example/': '***@x.example then https://ok.example/',
+      'https://example.com/@snow': 'https://***@snow',
+      'https://example.com?by=a@b': 'https://***@b',
       'https://@example.com/': 'https://@example.com/',
-      'https://example.com?by=a@b': 'https://example.com?***@b',
       'no at sign here': 'no at sign here',
     };
     for (const [link, hidden] of Object.entries(cases)) assert.equal(hideUserInfo(link), hidden, JSON.stringify(link));
@@ -85,6 +91,8 @@ describe('schema-common', () => {
     assert.equal(isBlank(String.fromCodePoint(...points)), true);
     assert.equal(isBlank(` ${String.fromCodePoint(0xa0)}\t`), true);
     assert.equal(isBlank('a'), false);
+    for (const point of [0x2800, 0x300, 0x1d159, 0xe000, 0x16fe4]) assert.equal(isBlank(String.fromCodePoint(point)), true, point.toString(16));
+    assert.equal(isBlank(String.fromCodePoint(0x300, 0x61)), false);
   });
 
   test('show cuts by code points, never leaving half of a surrogate pair', () => {

@@ -222,7 +222,11 @@ describe('npm run validate-news', () => {
     assert.equal(r.status, 1);
     assert.equal(r.stdout, '');
     assert.match(r.stderr, /^Usage: npm run validate-news /);
-    assert.match(r.stderr, /Unknown option: "--fix"/);
+    assert.match(r.stderr, /Unknown option: --fix$/m);
+
+    const sneaky = run([`--x${String.fromCodePoint(0x1b)}[2J${String.fromCodePoint(0x202e)}`]);
+    assert.equal(sneaky.status, 1);
+    assert.ok(sneaky.stderr.includes('Unknown option: --x\\u001b[2J\\u202e'), sneaky.stderr);
   });
 
   // N2 review: a file name is untrusted too; and V8's JSON errors quote the file, so the quote is dropped.
