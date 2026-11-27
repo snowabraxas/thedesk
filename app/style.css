@@ -143,6 +143,20 @@ svg.ic{width:22px;height:22px;flex:none;fill:none;stroke:currentColor;stroke-wid
 .hs .badge{position:absolute;right:-6px;top:-6px;min-width:24px;height:24px;padding:0 6px;border-radius:12px;background:var(--rosy-brown);color:var(--dark-green);font:600 13px/24px var(--font-display);text-align:center;box-shadow:0 0 0 2px rgba(252,251,243,.85),0 2px 6px rgba(6,30,24,.3);animation:hop 1.6s ease-in-out infinite}
 @keyframes breathe{0%,100%{opacity:.25}50%{opacity:.75}}
 @keyframes hop{0%,100%{transform:translateY(0)}50%{transform:translateY(-4px)}}
+/* The TV (News). While today's top stories are unread its screen is on: a soft rosy light with faint
+   scan lines, laid over the painted glass with a screen blend so the glass still shows through, and a
+   little light spilling onto the wall. Its one ambient motion is a slow hum of that light (off under
+   reduced motion, where it simply stays on). A breaking story Snow hasn't dismissed puts a small
+   rosy "on air" mark on its corner, still. The tag says both in words, so neither relies on colour. */
+.hs.tv .screen{position:absolute;left:6.6%;top:11.8%;width:43.8%;height:69%;border-radius:26%/22%;pointer-events:none;opacity:0;transition:opacity .6s ease;mix-blend-mode:screen;background:repeating-linear-gradient(180deg,rgba(135,67,56,0) 0 2px,rgba(135,67,56,.16) 2px 3px),radial-gradient(ellipse 85% 80% at 44% 40%,rgba(var(--tv-glow),.72),rgba(211,150,140,.7) 55%,rgba(190,118,108,.58));box-shadow:0 0 12px 4px rgba(211,150,140,.55),0 0 60px 26px rgba(211,150,140,.42)}
+.hs.tv.tv-on .screen{opacity:1;animation:tvhum 5.6s ease-in-out infinite}
+@keyframes tvhum{0%,100%{opacity:1}50%{opacity:.74}}
+.hs.tv .bmark{position:absolute;left:66%;top:4%;translate:-50% -50%;width:clamp(16px,1.7vw,24px);aspect-ratio:1;border-radius:50%;display:grid;place-items:center;background:var(--rosy-brown);color:var(--dark-green);box-shadow:0 0 0 2px rgba(252,251,243,.9),0 2px 6px rgba(6,30,24,.3);pointer-events:none;opacity:0;transform:scale(.6);transition:opacity .35s ease,transform .35s ease}
+.hs.tv.tv-breaking .bmark{opacity:1;transform:none}
+.hs.tv .bmark svg.ic{width:78%;height:78%;stroke-width:2.2}
+.hs.tv .bmark circle{fill:currentColor}
+/* When the TV has something to say, its tag sits over its neighbours' (on a phone every tag shows). */
+.hs.tv.tv-on .tag,.hs.tv.tv-breaking .tag{z-index:1}
 
 .wila{position:absolute;left:62.2%;top:30.5%;width:3.4%;aspect-ratio:1;border:0;padding:0;border-radius:50%;background:none;animation:float 5s ease-in-out infinite}
 .wila .core{position:absolute;inset:0;border-radius:50%;background:var(--orb);box-shadow:var(--orb-glow),0 0 60px 18px rgba(211,150,140,.28)}

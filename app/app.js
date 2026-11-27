@@ -7,6 +7,7 @@ import {
   streak as streakOf, themeScores as scoresFor, uid, wilaLine,
 } from './lib.js';
 import { createNewsPage } from './news.js';
+import { readSignals, tvLook } from './tv-lib.js';
 
 /* ================= constants ================= */
 const FEED_URL = '/api/feed';
@@ -36,6 +37,8 @@ const ICON = {
   pencil: icon('<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="M13.5 6.5l4 4"/>'),
   trash: icon('<path d="M4 7h16"/><path d="M9.5 7V4.5h5V7"/><path d="M6.5 7l1 13h9l1-13"/>'),
   star: icon('<path d="M12 3l2.6 5.5 6 .8-4.4 4.2 1.1 6L12 16.6 6.7 19.5l1.1-6L3.4 9.3l6-.8z"/>'),
+  // On air: the TV's breaking mark.
+  onAir: icon('<circle cx="12" cy="12" r="1.6"/><path d="M8.6 8.6a4.8 4.8 0 0 0 0 6.8M15.4 8.6a4.8 4.8 0 0 1 0 6.8M5.8 5.8a8.8 8.8 0 0 0 0 12.4M18.2 5.8a8.8 8.8 0 0 1 0 12.4"/>'),
 };
 const reducedMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
 // Re-rendering a list replaces its buttons; put the keyboard focus back where it was.
@@ -97,10 +100,12 @@ let preview = null;
 const phase = () => preview || autoPhase();
 
 /* ================= the room ================= */
+// The TV (News) also has a screen that can glow and a corner for the breaking mark (N5).
+const TV_PARTS = `<span class="screen" aria-hidden="true"></span><span class="bmark" aria-hidden="true">${ICON.onAir}</span>`;
 function buildHotspots() {
   $('#hotspots').innerHTML = OBJECTS.map(o =>
-    `<button class="hs" data-id="${o.id}" style="left:${o.l}%;top:${o.t}%;width:${o.w}%;height:${o.h}%" aria-label="${esc(o.name)}">
-      <span class="glow"></span><span class="tag" ${o.tagIn ? 'style="bottom:auto;top:6%"' : ''}></span></button>`).join('');
+    `<button class="hs${o.id === 'news' ? ' tv' : ''}" data-id="${o.id}" style="left:${o.l}%;top:${o.t}%;width:${o.w}%;height:${o.h}%" aria-label="${esc(o.name)}">
+      <span class="glow"></span>${o.id === 'news' ? TV_PARTS : ''}<span class="tag" ${o.tagIn ? 'style="bottom:auto;top:6%"' : ''}></span></button>`).join('');
   $('#hotspots').addEventListener('click', e => {
     const b = e.target.closest('.hs'); if (!b) return;
     const o = OBJECTS.find(x => x.id === b.dataset.id);
@@ -127,15 +132,22 @@ function renderRoom() {
   const p = renderScene();
   if (!ready) return;
   const unread = feed.articles.filter(a => !S.read[a.id]).length;
-  // The TV's own glow and breaking mark come with N5 (news.signals() has what it needs).
+  // The TV: its screen glows while today's top stories are unread; a rosy mark while a breaking story waits.
+  const tv = tvLook(readSignals(news.signals));
   OBJECTS.forEach(o => {
     const b = document.querySelector(`.hs[data-id="${o.id}"]`); if (!b) return;
     const tag = b.querySelector('.tag');
     const locked = o.lock && level() < o.lock;
     const isFeed = o.go === 'feed';
+    const isTv = o.id === 'news';
     b.classList.toggle('locked', !!locked);
     b.classList.toggle('new', isFeed && unread > 0);
-    tag.textContent = isFeed ? (unread ? `${o.name} · ${unread} new` : o.name) : locked ? `${o.name} · level ${o.lock}` : o.name;
+    b.classList.toggle('tv-on', isTv && tv.on);
+    b.classList.toggle('tv-breaking', isTv && tv.breaking);
+    // The tag is also the button's name, so what it says (3 new, breaking story) reaches screen readers.
+    const label = isFeed ? (unread ? `${o.name} · ${unread} new` : o.name) : isTv ? tv.tag : locked ? `${o.name} · level ${o.lock}` : o.name;
+    tag.textContent = label;
+    b.setAttribute('aria-label', label);
     let badge = b.querySelector('.badge');
     if (isFeed && unread) { if (!badge) { badge = document.createElement('span'); badge.className = 'badge'; b.appendChild(badge); } badge.textContent = unread; }
     else if (badge) badge.remove();
@@ -160,8 +172,13 @@ function route() {
   if (view !== 'feed') { $('#drawer').hidden = true; $('#scrim').hidden = true; setBehindDrawer(false); }
   if (view === 'feed') { renderScene(); if (ready) renderFeed(); window.scrollTo(0, 0); }
   else if (view === 'news') { renderScene(); news.render(); news.refresh(); window.scrollTo(0, 0); }
-  else { requestAnimationFrame(() => requestAnimationFrame(() => $('#frame').classList.remove('zoom'))); renderRoom(); }
+  else { requestAnimationFrame(() => requestAnimationFrame(() => $('#frame').classList.remove('zoom'))); renderRoom(); refreshTv(); }
 }
+// Back in the room (or back to the tab): what was read or dismissed shows at once, then the edition and
+// breaking story are fetched again (a new morning edition, a new breaking story) and the TV redraws.
+// A failed fetch keeps what was there; the room redraws either way.
+function refreshTv() { news.refresh().then(renderRoom, renderRoom); }
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && !$('#room').hidden) refreshTv(); });
 
 /* ================= the feed ================= */
 let shelf = 'all', editing = null, confirming = null, openArticle = null;
