@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, test } from 'node:test';
 import { REPO_ROOT } from '../server/config.js';
-import { createServer, isAllowedHost, portInUseMessage } from '../server/index.js';
+import { createServer, isAllowedHost, portInUseMessage, startedLines } from '../server/index.js';
 
 // Raw http.request so tests can send any Host header (fetch won't let us).
 function request(port, { method = 'GET', path: urlPath = '/', host = `localhost:${port}`, setHost = true } = {}) {
@@ -164,7 +164,10 @@ describe('running server/index.js', () => {
     assert.equal(r.stdout.trim(), 'imported');
   });
 
-  test('npm start serves the real app/ on PORT and stops cleanly on SIGTERM', async () => {
+  const STAMP = '\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\d[+-]\\d\\d:\\d\\d';
+
+  /** Starts server/index.js on a free port with a temp DESK_HOME; resolves once it says it's running. */
+  async function startServer() {
     const freePort = await new Promise((resolve) => {
       const probe = net.createServer().listen(0, '127.0.0.1', () => {
         const { port } = probe.address();
@@ -177,32 +180,70 @@ describe('running server/index.js', () => {
       env: { ...process.env, PORT: String(freePort), DESK_HOME: deskHome },
       stdio: ['ignore', 'pipe', 'pipe'],
     });
+    const output = { stdout: '' };
+    child.stdout.on('data', (d) => (output.stdout += d));
+    const cleanup = () => {
+      if (child.exitCode === null) child.kill('SIGKILL');
+      fs.rmSync(deskHome, { recursive: true, force: true });
+    };
     try {
-      const line = await new Promise((resolve, reject) => {
-        let out = '';
-        const timer = setTimeout(() => reject(new Error(`server did not start: ${out}`)), 10_000);
-        child.stdout.on('data', (d) => {
-          out += d;
-          if (out.includes('running at')) {
+      await new Promise((resolve, reject) => {
+        const timer = setTimeout(() => reject(new Error(`server did not start: ${output.stdout}`)), 10_000);
+        child.stdout.on('data', () => {
+          if (output.stdout.includes('running at')) {
             clearTimeout(timer);
-            resolve(out);
+            resolve();
           }
         });
-        child.on('exit', (code) => reject(new Error(`server exited early (${code}): ${out}`)));
+        child.on('exit', (code) => reject(new Error(`server exited early (${code}): ${output.stdout}`)));
       });
-      assert.match(line, new RegExp(`http://localhost:${freePort}`));
+    } catch (err) {
+      cleanup();
+      throw err;
+    }
+    const exited = new Promise((resolve) => child.on('exit', (code) => resolve(code)));
+    return { child, port: freePort, output, exited, cleanup };
+  }
 
-      const res = await request(freePort);
+  test('npm start serves the real app/ on PORT and stops cleanly on SIGTERM, saying so', async () => {
+    const s = await startServer();
+    try {
+      assert.match(s.output.stdout, new RegExp(`^${STAMP} The Desk is running at http://localhost:${s.port} \\(data: `));
+
+      const res = await request(s.port);
       assert.equal(res.status, 200);
       assert.match(res.body, /<title>The Desk<\/title>/);
 
-      const exited = new Promise((resolve) => child.on('exit', (code) => resolve(code)));
-      child.kill('SIGTERM');
-      assert.equal(await exited, 0);
+      s.child.kill('SIGTERM');
+      assert.equal(await s.exited, 0);
+      assert.match(s.output.stdout, new RegExp(`\\n${STAMP} The Desk is stopping \\(SIGTERM\\)\\n$`));
+      for (const line of s.output.stdout.trimEnd().split('\n')) assert.match(line, new RegExp(`^${STAMP} `), 'every line has a timestamp');
     } finally {
-      if (child.exitCode === null) child.kill('SIGKILL');
-      fs.rmSync(deskHome, { recursive: true, force: true });
+      s.cleanup();
     }
+  });
+
+  test('Ctrl+C (SIGINT) stops it the same way, exit 0', async () => {
+    const s = await startServer();
+    try {
+      s.child.kill('SIGINT');
+      assert.equal(await s.exited, 0);
+      assert.match(s.output.stdout, new RegExp(`\\n${STAMP} The Desk is stopping \\(SIGINT\\)\\n$`));
+    } finally {
+      s.cleanup();
+    }
+  });
+
+  test('at start it names the deployed commit when there is a .deployed.json next to server/', () => {
+    assert.deepEqual(startedLines({ port: 4321, deskHome: '/Users/snow/agent-house' }), [
+      'The Desk is running at http://localhost:4321 (data: /Users/snow/agent-house)',
+    ]);
+    const deployed = { sha: 'a'.repeat(40), shortSha: 'aaaaaaa', subject: 'News: routes', ref: 'main', deployedAt: '2026-11-28T09:14:03-05:00' };
+    assert.deepEqual(startedLines({ port: 4321, deskHome: '/Users/snow/agent-house', deployed }), [
+      'The Desk is running at http://localhost:4321 (data: /Users/snow/agent-house)',
+      'The Desk: this is main @ aaaaaaa "News: routes", deployed 2026-11-28T09:14:03-05:00',
+    ]);
+    assert.equal(startedLines({ port: 1, deskHome: '/h', deployed: { ...deployed, deployedAt: '' } })[1], 'The Desk: this is main @ aaaaaaa "News: routes"');
   });
 });
 
@@ -241,13 +282,18 @@ describe('a port that is already taken', () => {
       const child = spawn(process.execPath, ['server/index.js'], { cwd: REPO_ROOT, env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
       let stdout = '';
       let stderr = '';
+      let stopping = false;
       const timer = setTimeout(() => {
         child.kill('SIGKILL');
         reject(new Error(`server did not finish: ${stdout}${stderr}`));
       }, 10_000);
       child.stdout.on('data', (d) => {
         stdout += d;
-        if (untilOutput && stdout.includes(untilOutput)) child.kill('SIGTERM');
+        // Once only: a second SIGTERM while it is stopping ends it at once (no exit 0).
+        if (untilOutput && !stopping && stdout.includes(untilOutput)) {
+          stopping = true;
+          child.kill('SIGTERM');
+        }
       });
       child.stderr.on('data', (d) => (stderr += d));
       child.on('exit', (code) => {
