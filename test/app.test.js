@@ -493,7 +493,9 @@ describe('app/app.js', () => {
   test('a reload skipped or dropped because of a change here gets one more round once both states are idle', () => {
     const js = read('app.js');
     assert.match(js, /if \(store\.missed \|\| news\.missed\(\)\) retryWhenIdle\(\);/);
-    assert.match(js, /function retryWhenIdle\(\) \{\s*if \(retryQueued\) return;\s*retryQueued = true;\s*Promise\.all\(\[store\.whenIdle\(\), news\.whenIdle\(\)\]\)\.then\(\(\) => \{ retryQueued = false; syncTab\(\); \}\);\s*\}/);
+    // A fresh round (force): asked from inside the round that is finishing, a plain catchUp() would
+    // only hand back that same round (see createRefresher's test: a call during a run shares it).
+    assert.match(js, /function retryWhenIdle\(\) \{\s*if \(retryQueued\) return;\s*retryQueued = true;\s*Promise\.all\(\[store\.whenIdle\(\), news\.whenIdle\(\)\]\)\.then\(\(\) => \{ retryQueued = false; if \(ready\) catchUp\(\{ force: true \}\); \}\);\s*\}/);
     assert.match(read('news.js'), /missed: \(\) => store\.missed,\s*\/\*\*[^*]*\*\/\s*whenIdle: \(\) => store\.whenIdle\(\),/);
   });
 

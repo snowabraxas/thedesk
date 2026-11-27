@@ -124,12 +124,13 @@ function drawCaughtUp(feedChanged) {
   else if (!$('#room').hidden) renderRoom();
 }
 // A reload skipped or dropped because Snow changed something meanwhile (the state client's `missed`):
-// one more round once both states have nothing waiting to be saved.
+// one more round once both states have nothing waiting to be saved. A fresh one (force): the round
+// that queued this may still be finishing, and asking without force would only get that round back.
 let retryQueued = false;
 function retryWhenIdle() {
   if (retryQueued) return;
   retryQueued = true;
-  Promise.all([store.whenIdle(), news.whenIdle()]).then(() => { retryQueued = false; syncTab(); });
+  Promise.all([store.whenIdle(), news.whenIdle()]).then(() => { retryQueued = false; if (ready) catchUp({ force: true }); });
 }
 const catchUp = createRefresher(catchUpRound, drawCaughtUp);
 function syncTab() { if (ready) catchUp(); }

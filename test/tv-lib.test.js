@@ -127,6 +127,25 @@ describe('createRefresher (one room refresh at a time)', () => {
     assert.equal(draws, 1);
   });
 
+  test('asked from inside its own run (as a retry queued by the run would be), refresh() hands back that run; force starts anew', async () => {
+    let runs = 0;
+    let fromInside = null, forced = null;
+    const refresh = createRefresher(async () => {
+      runs++;
+      if (runs === 1) {
+        await Promise.resolve();
+        fromInside = refresh();
+        forced = refresh({ force: true });
+      }
+    }, () => {});
+    const first = refresh();
+    await first;
+    await forced;
+    assert.equal(fromInside, first, 'shared: no new round');
+    assert.notEqual(forced, first);
+    assert.equal(runs, 2, 'only the forced call ran again');
+  });
+
   test('once it has settled, the next call starts a new refresh', async () => {
     let runs = 0, draws = 0;
     const refresh = createRefresher(() => { runs++; return Promise.resolve(); }, () => { draws++; });
