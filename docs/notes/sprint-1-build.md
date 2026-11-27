@@ -39,12 +39,18 @@ data/schema/    feed.schema.json (the agent <-> Desk contract)
 
 - Per-user LaunchAgent `local.thedesk.server` in `~/Library/LaunchAgents`, managed by `scripts/service.js` (`npm run service:*`). RunAtLoad + KeepAlive true + ThrottleInterval 10: it restarts in under a second after a stop or crash, and a crash loop retries every 10 s.
 - Runs `/opt/homebrew/bin/node server/index.js` from this folder with `DESK_HOME=~/agent-house`, logging to `~/agent-house/logs/the-desk.log` (one 5 MB rotation). Installed 27 Nov 2026 with Snow's OK; macOS didn't block node from reading ~/Documents.
-- Verified: kill, kill -9, stop/start (same path as a login), restart. Not yet verified: a real reboot (Snow).
+- Verified: kill, kill -9, stop/start (same path as a login), restart, and a real reboot on 27 Nov 2026 (boot 02:18:38, the service started itself at 02:19:14 after login, `runs = 1`, never exited, GET / 200, nobody touched Terminal).
 
 ## Follow-ups (not in Sprint 1)
 
-- **The service runs whatever is checked out here.** Switching to a story branch changes Snow's live Desk (`app/` on reload, `server/` on the next restart). Option: run the service from a separate `main` worktree outside ~/Documents. Needs Snow / lead PM.
-- The server log has no timestamps and no "stopping" line; add both (makes reboot checks provable).
+- **The service runs whatever is checked out here.** Switching to a story branch changes Snow's live Desk (`app/` on reload, `server/` on the next restart). Lead PM's answer: Sprint 2 story N1 (a `main`-only copy outside ~/Documents plus `npm run deploy`). Until then, story work happens in a separate worktree (Lotus used `~/Documents/Projects/the-desk-lotus`).
+- The server log has no timestamps and no "stopping" line; add both (makes reboot checks provable). Now part of N1.
+- **Lotus leftovers for N6** (from the L1 tester's re-check, none blocking):
+  - Theme map: once most themes are read, the lit spoke runs through "you" and a moss link touches "How teams operate" (2.6–3.5:1). Fix: a halo on map labels (`paint-order:stroke` with a midnight-green stroke) or move "you" off the spoke. The "Theme map" heading hits 4.44:1 at night on a phone at one scroll position when all are read.
+  - Focus ring on a wrapped article title: the 7 px box-shadow paints a bar across the first line. Fix: `outline` with `outline-offset` instead of box-shadow on `.art h3 a:focus-visible`.
+  - After keyboard Undo of a note delete, focus stays on the faded toast button; move it to `#noteText` (drawer open) or back to where it was.
+  - Undo of a note delete after the drawer closed leaves "Notes (n)" and the My notes count stale until the next render; call `renderFeed()` when the drawer is hidden.
+  - Still open from Sprint 1: phone-room hotspots and Wila's orb under 44 px with overlapping labels; article title links 25 px tall.
 - "Last good" edition lives only in memory; after a restart with a bad `feed.json` and no `editions/`, the sample shows. Fine once S5 archives editions; could persist to disk.
 - Validator accepts `https://user@host/` links; consider rejecting userinfo.
 - Un-marking and re-marking an article read grants XP again (inherited from the prototype).
