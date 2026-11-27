@@ -27,6 +27,20 @@ npm run validate-news -- path/to/news.json path/to/breaking.json   # or any News
 
 The server only listens on this Mac (127.0.0.1). `PORT` changes the port and `DESK_HOME` changes where the desks' data lives (default `~/agent-house`). `npm start` runs it without the auto-restart.
 
+## The API
+
+What the desk pages talk to. Everything is JSON, never cached, and only answers requests addressed to `localhost:<port>` or `127.0.0.1:<port>` (anything else gets 403). Paths below are under `DESK_HOME/desks/`.
+
+| Route | What it does |
+| --- | --- |
+| `GET /api/feed` | Product Feed's edition. The `X-Desk-Feed-Source` header says which one: `live` (`product-feed/feed.json`), `last-good` (the last valid one, kept in `product-feed/last-good.json`), `edition:<YYYY-MM-DD.json>` (from `product-feed/editions/`) or `sample` (marked `"sample": true`). |
+| `GET` / `PUT /api/state` | Snow's Product Feed state (reads, saves, folders, notes, XP, streak, badges) in `product-feed/state.json`. |
+| `GET /api/news` | The News morning edition, in the same order: `X-Desk-News-Source` is `live` (`news/news.json`), `last-good` (`news/last-good.json`), `edition:<file>` (`news/editions/`) or `sample` (`data/samples/news.sample.json`, marked `"sample": true`). |
+| `GET /api/breaking` | `{"breaking": {...}}` when `news/breaking.json` is valid and from today in Toronto, otherwise `{"breaking": null}`. |
+| `GET` / `PUT /api/news/state` | Snow's News state (`read`, `dismissed`, `shelfOpen`) in `news/state.json`. |
+
+`PUT` takes a JSON object up to 1 MB (`Content-Type: application/json`) and saves it whole, so a crash never leaves half a file. Details: `docs/notes/sprint-2-build.md` (N3).
+
 ## Always on
 
 The Desk can run by itself in the background. macOS starts it when you log in and starts it again if it ever stops, so http://localhost:4321 is simply there.

@@ -64,3 +64,45 @@ Technical notes for the team. Snow doesn't need to read this.
 - Story ids repeat every day (`s1` each morning), so N3's read state should key stories by edition and id (for example `2026-12-07/s1`), and a breaking story by its `at`.
 - N3 decides "breaking is from today" from `at`; every accepted form parses with `Date.parse`.
 - `agents/news/AGENTS.md` step 9 and the breaking section now give the real command. N9 should pin the folder the agent runs it from (likely N1's main-only live copy).
+
+## N3. News server routes
+
+**Routes** (all JSON, `Cache-Control: no-store`, refused with 403 unless the Host is `localhost:<port>` or `127.0.0.1:<port>`, like every route):
+
+| Route | Answer |
+| --- | --- |
+| `GET /api/news` | The morning edition. `X-Desk-News-Source`: `live`, `last-good`, `edition:<YYYY-MM-DD.json>` or `sample`. HEAD too; other methods 405. |
+| `GET /api/breaking` | `{"breaking": <story with at>}` when `desks/news/breaking.json` is valid and its `at` falls on today in Toronto, else `{"breaking": null}`. Never 404 or 500 for a missing or broken file. |
+| `GET` / `PUT /api/news/state` | Snow's News state in `desks/news/state.json`. |
+| `GET /api/feed`, `GET` / `PUT /api/state` | Product Feed, unchanged (`X-Desk-Feed-Source` keeps its values). |
+
+**Fallback order, both desks** (`server/edition-loader.js`, used by `feed.js` and `news.js`):
+1. `live`: the agent's `news.json` / `feed.json`, when it passes the contract (`checkNewsFile` / `checkFeedFile`).
+2. `last-good`: the last valid live file this server served. In memory, and on disk as `last-good.json` next to the live file. After a restart it's read from disk and checked against the contract again; a damaged one is logged once per change and skipped.
+3. `edition:<file>`: the newest valid `editions/YYYY-MM-DD.json`, by the date in the name (not the `edition` inside). Other names (`latest.json`, `.bak`, a folder) are ignored; invalid files are logged once per change and skipped.
+4. `sample`: News `data/samples/news.sample.json`, Product Feed `prototype/feed.json`, with `"sample": true` added by the server. Every agent file (live, last-good, editions, breaking) comes back without a `sample` key.
+
+As in Sprint 1, a file is re-read only when its stat changes, and each change is logged once (an invalid live file names what is shown instead). Log lines quote agent values only through the `schema-common.js` helpers. Note the order puts `last-good.json` ahead of `editions/` even when an edition file has a later date (the spec's order; normally they hold the same edition, since the agent writes both).
+
+**Files The Desk writes into `desks/news/`** (and the same two into `desks/product-feed/`):
+- `last-good.json`: written whenever a valid live file is served and `last-good.json` doesn't already hold exactly that edition (pretty-printed JSON). That covers a new edition and also a `last-good.json` deleted or damaged while the live file stayed the same; a request costs one extra stat. Atomic (temp file `.last-good.json.<random>.tmp` in the same folder, fsync, rename, folder fsync: `server/atomic-file.js`, shared with the state store), one write at a time, mode 0600. A failed write is logged once per change (`couldn't keep a copy of the <date> edition in .../last-good.json (ENOSPC)`) and the live edition is still served. The sample is never written there.
+- `state.json`: on `PUT /api/news/state`.
+- Never `news.json`, `breaking.json` or `editions/`: those are the agent's. N9's brief could say "leave `last-good.json` and `state.json` alone".
+
+This closes the Sprint 1 follow-up: a restart with a bad `feed.json` and no `editions/` now shows the last good edition, not the sample.
+
+**Breaking: "today in Toronto".** `Date.parse(at)` (every form the contract accepts parses), then the calendar day of that moment in `America/Toronto` (`Intl.DateTimeFormat`, so the machine's `TZ` doesn't matter; a test runs it under UTC, Asia/Tokyo, Pacific/Kiritimati and Pacific/Pago_Pago), compared with today's Toronto day. So `2026-12-08T01:30:00+09:00` is today on 7 Dec in Toronto, `2026-12-07T02:00:00Z` is yesterday evening there, and anything dated tomorrow or later is not shown. Missing, old or future files are silent; an invalid one is logged once per change. Yesterday's story stops showing at Toronto midnight without the file changing. `createServer({ now })` sets the clock for tests.
+
+**State** (`server/state-store.js`). `createStateStore(deskHome, desk)` now takes the desk name and saves to `desks/<desk>/state.json`; Product Feed and News share the same code (1 MB cap, 415 unless `application/json`, 400 for a non-object or a known key with the wrong shape, unknown keys kept, atomic queued writes, and `GET` answers 500 and leaves the file alone when it's not a JSON object, so the page knows not to save over it). `/api/state` is unchanged. The rules per desk are in `STATE_RULES`; `checkState(value, desk = 'product-feed')`.
+
+News keys:
+- `read`: `{ "<edition>/<story id>": time }`, for example `{ "2026-12-07/s1": "2026-12-07T13:05:00.000Z" }`. Keys must be a real date, `/`, and a story id (`[A-Za-z0-9_-]{1,40}`), because ids repeat every morning.
+- `dismissed`: `{ "<breaking at>": time }`, keyed by the breaking story's `at` exactly as served.
+- `shelfOpen`: `true` or `false`.
+- A time is an ISO date-time with a timezone (what `toISOString()` gives) or a number (`Date.now()`).
+- Error answers name the problem: `read keys must be "<edition>/<story id>", like "2026-12-07/s1" (got "s1")`, `read["2026-12-07/s1"] must be an ISO time or a number`, `shelfOpen must be true or false`.
+- XP and the streak stay in Product Feed's state: N4 awards them with `PUT /api/state`.
+
+**Sample edition** (`data/samples/news.sample.json`, for N4's screenshots and N7). Edition `2026-12-07`, empty note, 3 stories and 7 on the shelf, ranks 1 to 10, every region and kind. The top 3 and five shelf headlines are the approved design's; every headline starts with `[Sample]`, actors are generic, and every source is a section or home page from `agents/news/sources.yaml` (no invented article links, no person's blog). `data/samples/breaking.sample.json` is a valid `[Sample]` breaking story (`at` 2026-12-07 12:04 Toronto) for screenshots and tests only: the server never reads it. To show the banner on a test Desk, copy it to `$DESK_HOME/desks/news/breaking.json` with `at` set to today. Tests check both pass the contract and the rules above.
+
+**Tests.** `test/news.test.js` (loader fallbacks, last-good writes and restarts, editions by name, the sample, once-per-change logging, Toronto dates, breaking, News state rules, the sample's content) and new blocks in `test/api.test.js` (each route over HTTP, restarts, 1 MB cap, corrupt state on disk, the Host check on every new route, security headers) and `test/feed.test.js` (Product Feed's last-good on disk).
