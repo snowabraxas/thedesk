@@ -1,0 +1,16 @@
+{
+  "id": "b1",
+  "rank": 1,
+  "headline": "[Sample] A major regulator votes through new rules for frontier AI models",
+  "date": "2026-12-07",
+  "region": "eu",
+  "kind": "policy",
+  "summary": "Lawmakers approved the final text after months of talks. The rules add safety testing and incident reporting for the most capable models, with the first duties starting next year.",
+  "why": "It's the first binding rulebook aimed squarely at frontier models, and others may copy it.",
+  "skeptic": "Much depends on guidance that isn't written yet, and the budget for enforcement is small.",
+  "sources": [
+    { "name": "EU AI Office", "url": "https://digital-strategy.ec.europa.eu/en/policies/ai-office" },
+    { "name": "TechCrunch AI", "url": "https://techcrunch.com/category/artificial-intelligence/" }
+  ],
+  "at": "2026-12-07T12:04:00-05:00"
+}

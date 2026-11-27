@@ -1,0 +1,160 @@
+{
+  "desk": "news",
+  "edition": "2026-12-07",
+  "note": "",
+  "stories": [
+    {
+      "id": "s1",
+      "rank": 1,
+      "headline": "[Sample] A Chinese lab releases an open model that matches US leaders on reasoning tests",
+      "date": "2026-12-06",
+      "region": "china",
+      "kind": "launch",
+      "summary": "The model is free to download and run, and the lab says it was trained for a fraction of what US rivals spend. Early testers report strong maths and coding results.",
+      "why": "Open models this good change who can build with frontier AI, and put pressure on US pricing.",
+      "skeptic": "Benchmarks are self-reported so far, and independent tests often land lower.",
+      "sources": [
+        { "name": "Rest of World", "url": "https://restofworld.org" },
+        { "name": "ChinaTalk", "url": "https://www.chinatalk.media" },
+        { "name": "TechCrunch AI", "url": "https://techcrunch.com/category/artificial-intelligence/" }
+      ]
+    },
+    {
+      "id": "s2",
+      "rank": 2,
+      "headline": "[Sample] The US proposes tighter export rules for advanced AI chips",
+      "date": "2026-12-05",
+      "region": "us",
+      "kind": "policy",
+      "summary": "The draft rule widens the list of chips that need a licence to ship abroad and adds new reporting duties for cloud providers. Companies and the public have 30 days to comment before anything takes effect.",
+      "why": "Chip access decides how fast labs outside the US can train new models.",
+      "skeptic": "Past rules were worked around quickly, and critics say this one may push buyers to domestic Chinese chips faster.",
+      "sources": [
+        { "name": "Ars Technica AI", "url": "https://arstechnica.com/ai/" },
+        { "name": "DigiChina (Stanford)", "url": "https://digichina.stanford.edu" }
+      ]
+    },
+    {
+      "id": "s3",
+      "rank": 3,
+      "headline": "[Sample] The EU publishes new guidance for general-purpose AI models",
+      "date": "2026-12-04",
+      "region": "eu",
+      "kind": "policy",
+      "summary": "The guidance explains what model makers must disclose about training data and testing before release in Europe. New models come first, with a grace period for ones already on the market.",
+      "why": "It sets the paperwork bar for any model launched to European users.",
+      "skeptic": "Smaller labs say the cost of compliance favours the biggest companies.",
+      "sources": [
+        { "name": "EU AI Office", "url": "https://digital-strategy.ec.europa.eu/en/policies/ai-office" },
+        { "name": "TechCrunch AI", "url": "https://techcrunch.com/category/artificial-intelligence/" }
+      ]
+    }
+  ],
+  "more": [
+    {
+      "id": "m1",
+      "rank": 4,
+      "headline": "[Sample] A major cloud provider signs a multi-year compute deal with an AI lab",
+      "date": "2026-12-06",
+      "region": "us",
+      "kind": "deal",
+      "summary": "The deal reserves data-centre capacity for the lab's next round of training, paid partly in cash and partly in cloud credits. Neither side shared the full value.",
+      "why": "Compute deals now shape which labs can train the largest models, and on whose hardware.",
+      "skeptic": "Deals paid in cloud credits can make revenue look bigger than it is, and the real cash involved is hard to see from outside.",
+      "sources": [
+        { "name": "TechCrunch AI", "url": "https://techcrunch.com/category/artificial-intelligence/" },
+        { "name": "Ars Technica AI", "url": "https://arstechnica.com/ai/" }
+      ]
+    },
+    {
+      "id": "m2",
+      "rank": 5,
+      "headline": "[Sample] China updates its rules for labelling AI-generated content",
+      "date": "2026-12-05",
+      "region": "china",
+      "kind": "policy",
+      "summary": "The update asks platforms to add visible labels and hidden watermarks to AI-generated images, audio and video. Apps get a few months to comply.",
+      "why": "China often moves first on content rules, and other regulators watch how they work in practice.",
+      "skeptic": "Watermarks are easy to strip, and it's unclear how strictly smaller apps will be checked.",
+      "sources": [
+        { "name": "China Law Translate", "url": "https://www.chinalawtranslate.com" },
+        { "name": "DigiChina (Stanford)", "url": "https://digichina.stanford.edu" }
+      ]
+    },
+    {
+      "id": "m3",
+      "rank": 6,
+      "headline": "[Sample] A new study measures how often chatbots cite sources correctly",
+      "date": "2026-12-04",
+      "region": "global",
+      "kind": "research",
+      "summary": "Researchers asked several popular chatbots questions about the news and checked every link they gave. Many answers pointed to pages that didn't support the claim, and some to pages that didn't exist.",
+      "why": "Citations are how people check AI answers, so wrong ones quietly wear down trust.",
+      "skeptic": "The study used a fixed set of questions on one week's versions, and results can change with each model update.",
+      "sources": [
+        { "name": "arXiv cs.AI", "url": "https://arxiv.org/list/cs.AI/recent" },
+        { "name": "Ars Technica AI", "url": "https://arstechnica.com/ai/" }
+      ]
+    },
+    {
+      "id": "m4",
+      "rank": 7,
+      "headline": "[Sample] A new coding agent goes into public beta",
+      "date": "2026-12-06",
+      "region": "us",
+      "kind": "launch",
+      "summary": "The agent can open a project, plan changes across several files and run the tests before asking for a review. The beta is free for now, with a daily limit.",
+      "why": "Coding tools are where AI is earning real money, so each launch resets what people expect from the rest.",
+      "skeptic": "Demos use tidy projects, and early users say it struggles with large, older codebases.",
+      "sources": [
+        { "name": "TechCrunch AI", "url": "https://techcrunch.com/category/artificial-intelligence/" },
+        { "name": "Ars Technica AI", "url": "https://arstechnica.com/ai/" }
+      ]
+    },
+    {
+      "id": "m5",
+      "rank": 8,
+      "headline": "[Sample] A phone maker ships an on-device assistant to millions of users",
+      "date": "2026-12-05",
+      "region": "china",
+      "kind": "launch",
+      "summary": "The assistant runs on the phone itself for everyday tasks like summarising messages and tidying photos, and only reaches the cloud for harder requests. It arrives in a regular software update.",
+      "why": "Assistants that run on the phone keep more personal data off servers, and can reach more people than any chatbot app.",
+      "skeptic": "Early reviews say it handles simple tasks well but sends more requests to the cloud than the launch suggested.",
+      "sources": [
+        { "name": "Rest of World", "url": "https://restofworld.org" },
+        { "name": "TechCrunch AI", "url": "https://techcrunch.com/category/artificial-intelligence/" }
+      ]
+    },
+    {
+      "id": "m6",
+      "rank": 9,
+      "headline": "[Sample] A regional AI summit in Southeast Asia ends with a pledge to share compute",
+      "date": "",
+      "region": "other",
+      "kind": "event",
+      "summary": "Ministers from several countries agreed to pool money for data centres that local researchers and start-ups can use. Details on funding and timelines are due next year.",
+      "why": "Most of the world rents its AI from a handful of US and Chinese firms, and shared compute is one way to change that.",
+      "skeptic": "Summit pledges are easy to make, and past ones were slow to become working data centres.",
+      "sources": [
+        { "name": "Rest of World", "url": "https://restofworld.org" },
+        { "name": "TechCrunch AI", "url": "https://techcrunch.com/category/artificial-intelligence/" }
+      ]
+    },
+    {
+      "id": "m7",
+      "rank": 10,
+      "headline": "[Sample] A US standards body asks for public comment on how to test AI agents",
+      "date": "2026-12-04",
+      "region": "us",
+      "kind": "policy",
+      "summary": "The request asks companies and researchers how to measure whether an AI agent stays within the limits it was given. Answers will feed into voluntary testing guidelines.",
+      "why": "Agents act on their own, and there's no shared way yet to check that they're safe to let loose.",
+      "skeptic": "Voluntary guidelines have no teeth, and the fastest-moving companies may not wait for them.",
+      "sources": [
+        { "name": "NIST AI", "url": "https://www.nist.gov/artificial-intelligence" },
+        { "name": "Ars Technica AI", "url": "https://arstechnica.com/ai/" }
+      ]
+    }
+  ]
+}
