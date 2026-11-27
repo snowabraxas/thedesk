@@ -35,24 +35,30 @@ Run it from your work folder (any checkout of the repo except the live copy). It
    - Run from the live copy itself, it says "Run npm run deploy from your work folder (…), not from the live copy." It refuses a live path that is the work folder or sits inside it.
    - A staging folder left by an interrupted run is removed, but only if it holds nothing beyond `package.json`, `package-lock.json`, `node_modules` and `node_modules.old`. Otherwise it refuses and leaves the folder alone. If the run was cut off between the two renames of step 4 (the live copy has no `node_modules`, the staging folder has `node_modules.old`), those packages go back into the live copy first.
    - It reads main's sha and subject. It notes, without stopping, when the folder you ran it from is on another branch or has uncommitted changes. Neither is deployed.
-   - If the live copy exists, it must be a worktree of this repo (same `--git-common-dir`, top level is the folder itself), and `git status --porcelain` must be empty. A dirty copy is refused: it lists up to 10 lines and suggests `git -C <live> stash --include-untracked`.
+   - If the live copy exists, it must be a worktree of this repo (same `--git-common-dir`, top level is the folder itself), and `git status --porcelain -- . ':!/.deployed.json*'` must be empty. `.deployed.json` and its temp file are deploy's own, and an older commit's `.gitignore` may not list them, so a hand checkout to a pre-N1 commit doesn't block the repair. A dirty copy is refused: it lists up to 10 lines and suggests `git -C <live> stash --include-untracked`.
+   - Leftover `<live>/.deployed.json.tmp-*` files from an interrupted run are removed. If tidying up after an interrupted run fails, deploy stops with a plain message and changes nothing.
 2. **Packages first, outside the live copy.** This step runs only when one of these holds:
    - it's a new copy;
    - `node_modules` is missing;
    - `node_modules` is incomplete (a name in the live `package.json` "dependencies" has no `node_modules/<name>/package.json`, the same test the install guard uses);
    - no deploy is recorded;
-   - `git diff --quiet <last deployed> <new> -- package-lock.json` says the lockfile changed. The base is the sha in `.deployed.json`: the last deploy that went all the way through, whose packages are the ones in the live copy.
+   - `git diff --quiet <last deployed> <new> -- package-lock.json` says the lockfile changed. The base is the sha in `.deployed.json`: the last deploy that went all the way through, whose packages are the ones in the live copy;
+   - or the live copy's server doesn't load (`loadCheck()`, the same check as the install guard): every file is there but, say, ajv can't find `fast-deep-equal`.
 
    When it runs:
    - `git show <sha>:package.json` and `<sha>:package-lock.json` are written into `<live>.staging`, and `npm ci --omit=dev` runs there. It uses the npm next to Homebrew node, gets the same cleaned environment as git, and has a hard 10-minute limit (see `runCommand`). On failure deploy shows npm's `npm error code` line, the cause lines after it and the log path, not the usage text.
    - npm 11 empties `node_modules` before it installs, so it never runs in the live copy. If it fails, or the commit has no lockfile, deploy removes the staging folder and stops. The live copy's code, packages and `.deployed.json` are exactly as they were, so a launchd restart, a login or a reboot still runs the old, working version.
-3. **Move the live copy.** No live copy yet: `git -C <repo> worktree add --detach <live> <sha>`. Otherwise `git -C <live> checkout --quiet --detach <sha>`, or nothing if it's already there. If git fails, deploy shows its `fatal:` line.
+3. **Move the live copy.** No live copy yet: `git -C <repo> worktree add --detach <live> <sha>`. Otherwise `git -C <live> checkout --quiet --detach <sha>`, or nothing if it's already there. git can fail after it has moved HEAD (a post-checkout hook that exits 1), so on failure deploy asks where HEAD is:
+   - at the target: it carries on with the swap and shows git's message as a warning;
+   - anywhere other than the old commit: it checks the old commit out again (judged by HEAD afterwards, not by git's exit code);
+   - then it removes the staging folder and stops, showing git's `fatal:` line.
 4. **Swap the packages in.** Two renames on the same disk: `<live>/node_modules` to `<live>.staging/node_modules.old`, then `<live>.staging/node_modules` to `<live>/node_modules`. Then the staging folder is removed.
    - Whether there is an old `node_modules` is checked with `lstat`, so a symlink (dangling or not) is moved aside too. `.gitignore` says `node_modules` without the trailing slash, so such a link doesn't make the live copy look dirty.
    - The old copy goes into the staging folder, not the live copy, so an interrupted swap never leaves untracked files in the live copy.
    - If the second rename fails, deploy puts the old `node_modules` back, checks the old commit out again and says so. No restart, no new `.deployed.json`.
+   - If the staging folder can't be removed after a good swap, deploy warns, then still records and restarts. The next run tidies the folder away.
 5. **Record it.** `.deployed.json` is written (temp file and rename) only now, so it only ever names a commit whose packages are in. A deploy that changed nothing (same commit, no install) leaves it as it was, deploy time included.
-6. **Restart.** It reads the installed plist's `WorkingDirectory`. Not installed, or not the live copy: it stops (exit 1) and says to run `npm run service:install` once. Otherwise it calls `restart()` from `scripts/service.js` (`launchctl kickstart -k`, or bootstrap if it was stopped), uses the same health check (`/api/feed` within 15 s, log tail on failure), and ends with one line: `The Desk is live at http://localhost:4321 on main @ 1a2b3c4 "Subject"`.
+6. **Restart.** It reads the installed plist's `WorkingDirectory`. Not installed, or not the live copy: it stops (exit 1) and says to run `npm run service:install` once. With a fake HOME (see "The real launchd service is shared" below) it stops before the restart with that reason; the live copy is ready but nothing touches launchd. Otherwise it calls `restart()` from `scripts/service.js` (`launchctl kickstart -k`, or bootstrap if it was stopped), uses the same health check (`/api/feed` within 15 s, log tail on failure), and ends with one line: `The Desk is live at http://localhost:4321 on main @ 1a2b3c4 "Subject"`.
 
 git always runs with `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_COMMON_DIR`, `GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES`, `GIT_CONFIG_PARAMETERS` (and `GIT_CONFIG_COUNT/KEY_n/VALUE_n`, `GIT_NAMESPACE`, `GIT_PREFIX`) removed (`gitEnv()`). If deploy is ever started from a git hook, `git -C <live>` still means the live copy.
 
@@ -69,11 +75,26 @@ Between the checkout and the restart (a few seconds) the running server already 
 - `serviceConfig()` takes `runDir` (default: the live copy) instead of the old `repoRoot`. The plist is otherwise unchanged: same label, RunAtLoad, KeepAlive, ThrottleInterval 10, PATH, `DESK_HOME=~/agent-house`, `PORT=4321`, `DESK_LOG`, `DESK_SERVICE=1`, same log path.
 - `install` refuses, changing nothing and calling no launchctl (so the running service is left alone), unless the live copy is fully deployed (`liveCopyState()`):
   - no `<live>/server/index.js`: "The live copy isn't there yet … run npm run deploy first".
-  - Otherwise, any of these: no `node_modules`; a package from the live `package.json` "dependencies" missing (`node_modules is incomplete (no ajv)`); no readable `package.json` or `.deployed.json`; or `git -C <live> rev-parse HEAD` (with `gitEnv`) not equal to the sha in `.deployed.json` ("it holds 1a2b3c4, but the last deploy that finished was main @ 9f8e7d6 …"). The message is "The live copy isn't fully deployed yet (<dir>: <problems>), so nothing was changed. Run npm run deploy until it finishes (it repairs this)". Deploy reinstalls on the same package test, so it repairs whatever the guard refuses.
+  - Otherwise, any of these: no `node_modules`; a package from the live `package.json` "dependencies" missing (`node_modules is incomplete (no ajv)`); no readable `package.json` or `.deployed.json`; `git -C <live> rev-parse HEAD` (with `gitEnv`) not equal to the sha in `.deployed.json` ("it holds 1a2b3c4, but the last deploy that finished was main @ 9f8e7d6 …"); changes of its own (the same `git status` as deploy, e.g. `D server/feed.js`).
+  - When all of that holds, the load check must pass. A child `node --input-type=module -e …`, run in the live copy, imports `server/index.js` and exits. Importing it doesn't start the server: it only listens when it is the program node was started with, and `test/server.test.js` holds it to that. This catches a missing package of a package (ajv without `fast-deep-equal`) or a module that throws: "its server doesn't load: Error: Cannot find module 'fast-deep-equal'".
+  - The message is "The live copy isn't fully deployed yet (<dir>: <problems>), so nothing was changed. Run npm run deploy until it finishes (it repairs this, or says what to do)". Deploy reinstalls on the same package and load checks, so it repairs whatever the guard refuses, except changes of its own, which deploy refuses with the stash hint.
 
-  The dry run says which at the top. Its only command is that read-only `git rev-parse`.
-- `runCommand` (spawn-based) takes `cwd`, `timeoutMs`, `graceMs` and `env`. The limit is hard: SIGTERM at `timeoutMs`, then SIGKILL `graceMs` (10 s) later, because npm ignores SIGTERM on a hung registry connection. It then stops waiting for pipes a killed command's own children may hold, and says "(stopped after N s: it took too long)".
+  The dry run says which at the top. It runs only read-only commands: `git rev-parse`, `git status` and the load check.
+- `runCommand` (spawn-based) takes `cwd`, `timeoutMs`, `graceMs` and `env`.
+  - The command runs in its own process group (`detached: true`). Every stop goes to the whole group (`process.kill(-pid, …)`), so nothing it started survives a timeout.
+  - Because the group no longer gets the terminal's Ctrl+C, a SIGINT or SIGTERM to the script passes SIGTERM on to the group, then stops the script the usual way.
+  - The limit is hard: SIGTERM at `timeoutMs`, then SIGKILL `graceMs` (10 s) later, because npm ignores SIGTERM on a hung registry connection. It counts as timed out only if the command was still running at the deadline ("(stopped after N s: it took too long)").
+  - Once the command exits, its output gets a drain of at most `min(graceMs, 2 s)`. Something it left running may hold the pipes open, and that doesn't change the result: the real exit code stands.
+  - Output keeps its first and last 1 MB (`outputKeeper`), so npm's error lines at the end survive.
 - `gitEnv()` and `GIT` now live in `scripts/service.js` (deploy re-exports them), so the guard and deploy share them.
+
+### The real launchd service is shared
+
+launchd's label `local.thedesk.server` in `gui/<uid>` is the same whatever HOME says. A run with a fake HOME that reaches the real `/bin/launchctl` acts on Snow's live service: on 27 Nov a review run restarted it (runs = 2). So:
+- `launchdRefusal()` names a reason when HOME isn't the account's real home (`os.userInfo().homedir`), when the config's home isn't, or when `DESK_LIVE_DIR` or the live copy sits outside the real home.
+- `realDeps().run` is wrapped in `guardLaunchctl()`. Whenever there is such a reason, it refuses every launchctl verb that changes state (`bootstrap`, `bootout`, `kickstart`, `enable`, `disable`, `kill`, `load`, `unload`, `remove`) with "HOME (…) is not your real home folder (…), so I won't touch the real launchd service (its name is shared). Use --dry-run or the test hooks." `print` and `print-disabled` still run.
+- `service.js` `main()` refuses `install` (not `--dry-run`), `uninstall`, `start`, `stop` and `restart` up front for the same reasons. `deploy` stops before its restart.
+- **Rule for tests and fake-HOME runs: inject the runner** (`deps.run`) and the rest of `deps`. Never hand `realDeps()` to code that may reach launchctl. The tests do this throughout. The only test that touches `realDeps().run` swaps HOME and points it at a `launchctl` path that doesn't exist, so even a broken guard could only fail with ENOENT.
 - `status` shows `Runs from:` (the installed plist's WorkingDirectory) and `Deployed:` (that folder's `.deployed.json`). When the plist still points elsewhere, it says to run `service:install` (or `deploy` first, if there is no live copy).
 - `service:restart` now says "Restarted with the code in ~/the-desk-live."
 - The macOS-privacy hints stay, keyed on the folder the service runs from. With the live copy outside Documents they no longer appear.
@@ -98,6 +119,14 @@ Between the checkout and the restart (a few seconds) the running server already 
   - Also: git and npm getting the cleaned environment, and dry runs that only read.
   - Round three: `node_modules` incomplete (repaired); a symlinked `node_modules` (dangling or not) moved aside; the second rename failing (old packages and commit put back); a leftover `node_modules.old` restored before cleanup (and the dry run judging those packages); npm's code and cause lines shown, not usage; git's `fatal:` line shown when `worktree add` fails on a hand-deleted live copy; an unchanged deploy keeping `.deployed.json` byte for byte; the repo's `.gitignore` rules.
   - One test drives a stand-in `npm` shell script through the real `runCommand`: it must run in `<live>.staging`, never the work folder.
+- Closing round: `runCommand` with a background grandchild (done in 0.5 s, exit 0), the hard stop reaching the whole group (an orphan `sleep` that ignores SIGTERM is gone), Ctrl+C on the script stopping its command, long output keeping start and end. Plus `launchdRefusal` and `guardLaunchctl` cases, the guarded real runner under a fake HOME, `main()` refusing state-changing commands, the guard on a dirty copy and a server that doesn't load, `loadCheck` for real (a missing `fast-deep-equal`, and this repo), and deploy on:
+  - a post-checkout hook that fails after the move;
+  - a checkout that lands elsewhere, or doesn't move;
+  - a server that doesn't load (repaired);
+  - a pre-N1 `.gitignore`;
+  - leftover temp files;
+  - staging cleanup failing after a swap, or at the start;
+  - a fake HOME at restart.
 - `test/service.test.js`: the plist points at the live copy; install refuses without it, without `node_modules` or without a readable `.deployed.json` (no launchctl at all); an old plist from the work folder gets moved; status shows the folder and deployed commit. `runCommand` is tested for real: it runs in the given `cwd`, a `timeoutMs` stops a long child, a child that ignores SIGTERM is SIGKILLed after the grace period (and is gone afterwards), and `env` is passed. The guard is tested on every half-deployed state: no or incomplete `node_modules`, no `package.json`, no or broken `.deployed.json`, a stale `.deployed.json` (HEAD differs) and an unreadable HEAD. Assertions check the actual work-folder path, not the word "Documents", so a `TMPDIR` containing "Documents" passes.
 - `test/server.test.js` and `test/log-file.test.js`: timestamps (winter, summer, the local day, offsets east and on the half hour), every line stamped, the stopping line on SIGTERM and SIGINT with exit 0, the deployed line at start. `test/deployed.test.js`: reading and cleaning `.deployed.json`. `test/preview.test.js`: the preview script and `launch.json`.
 - Scratch servers in this story used ports 4399–4404 with `DESK_HOME` under `.tmp-*/` (gitignored). Dry runs used a fake `HOME` outside the repo: deploy refuses a live path inside the checkout.
@@ -108,17 +137,18 @@ Snow's OK is needed because this reinstalls the always-on service. Expect about 
 
 1. **Record the rollback point, then merge.** In `~/Documents/Projects/the-desk`, with `git status` clean and on `main`:
    ```
-   git rev-parse main > ~/the-desk-pre-n1.sha    # main before N1, kept outside the repo for a rollback
-   git merge --no-ff n1-live-copy && npm test
+   # main before N1, kept outside the repo for a rollback; only while N1 isn't merged yet
+   git merge-base --is-ancestor n1-live-copy main || git rev-parse main > ~/the-desk-pre-n1.sha
+   git merge --no-ff --no-edit n1-live-copy && npm test
    ```
    Until step 5 the service still runs from this folder, now on N1's code (`app/` is unchanged by N1, so 4321 looks the same).
 2. **Look first:** `npm run deploy -- --dry-run`. It should plan `npm ci --omit=dev` in `/Users/snow/the-desk-live.staging`, then `git worktree add --detach /Users/snow/the-desk-live <sha>`, the swap, and `.deployed.json`. Then it stops because the service "still runs from /Users/snow/Documents/Projects/the-desk".
 3. **Make the live copy:** `npm run deploy`. It installs the packages beside the live copy, makes `~/the-desk-live`, swaps them in and records the commit. Then it stops (exit 1 is expected here) with "Run npm run service:install once to move the service to the live copy." If npm fails, nothing is made. Fix it and run it again.
-4. **Look first:** `npm run service:install -- --dry-run`. Check the top line names `/Users/snow/the-desk-live, main @ <sha>`, and that the plist's `WorkingDirectory` and `server/index.js` are inside `/Users/snow/the-desk-live`.
-5. **Move the service:** `npm run service:install`. It boots out the old service, writes the new plist, starts it, and waits for `OK: The Desk is running at http://localhost:4321`.
+4. **Look first:** `npm run service:install -- --dry-run`. Check that the line "The service will run The Desk from the live copy: …" names `/Users/snow/the-desk-live, main @ <sha>`, and that the plist's `WorkingDirectory` and `server/index.js` are inside `/Users/snow/the-desk-live`.
+5. **Move the service:** `npm run service:install`. It writes the new plist, boots out the old service, starts the new one, and waits for `OK: The Desk is running at http://localhost:4321`.
 6. **Check:**
    - `npm run service:status`: `Runs from: /Users/snow/the-desk-live`, `Deployed: main @ <sha> ...`, `Answers: yes`, and no "still runs from" warning.
-   - `tail -n 3 ~/agent-house/logs/the-desk.log`: timestamped `running at` and `this is main @ <sha>` lines.
+   - `grep -E 'running at|this is main' ~/agent-house/logs/the-desk.log | tail -n 2`: timestamped `running at` and `this is main @ <sha>` lines.
    - **The story's "done when", part 1: work in the work folder no longer reaches 4321.** Under Sprint 1 this check gives 200, because the service served `app/` straight from this folder. After N1 it must give 404. The file is never committed; delete it straight away:
      ```
      cd ~/Documents/Projects/the-desk
@@ -136,21 +166,18 @@ Snow's OK is needed because this reinstalls the always-on service. Expect about 
 
 **Rollback** (only if the cutover fails, with Snow's OK). Neither way switches branches in the main checkout.
 
-- **The rollback point** is main before the N1 merge: `PRE=$(cat ~/the-desk-pre-n1.sha)` (recorded in step 1). If that file is gone, use the merge's first parent: `PRE=$(git rev-parse "$(git log --merges --first-parent --grep='n1-live-copy' -1 --format=%H main)^1")`. Don't use a later sha: anything after the merge contains N1, and its install would just put the service back on the live copy.
-- **Quick: run the pre-N1 code from its own folder.** Sprint 1's `service:install` points the service at whatever folder it runs from, so give it a detached worktree of `$PRE`, outside `~/Documents` (not `/tmp`, which macOS empties on restart):
+- **The rollback point** is main before the N1 merge, in `~/the-desk-pre-n1.sha` (step 1). If that file is gone, use the merge's first parent: `git rev-parse "$(git log --merges --first-parent --grep='n1-live-copy' -1 --format=%H main)^1" > ~/the-desk-pre-n1.sha`. Don't use a later sha: anything after the merge contains N1, and its install would just put the service back on the live copy.
+- **Quick: run the pre-N1 code from its own folder.** Sprint 1's `service:install` points the service at whatever folder it runs from, so give it a detached worktree of that commit, outside `~/Documents` (not `/tmp`, which macOS empties on restart). One chained block, so any failed check stops it:
   ```
-  cd ~/Documents/Projects/the-desk
-  git worktree add --detach ~/the-desk-rollback "$PRE"
-  ls ~/the-desk-rollback/scripts/deploy.js      # must say "No such file": this really is pre-N1 code
-  cd ~/the-desk-rollback && npm ci --omit=dev && npm run service:install
+  cd ~/Documents/Projects/the-desk && PRE=$(cat ~/the-desk-pre-n1.sha) && git worktree add --detach ~/the-desk-rollback "$PRE" && test -f ~/the-desk-rollback/server/index.js && test ! -e ~/the-desk-rollback/scripts/deploy.js && cd ~/the-desk-rollback && npm ci --omit=dev && npm run service:install
   ```
-  Check:
+  (`test ! -e …/scripts/deploy.js` proves it is pre-N1 code: deploy.js only exists with N1.) Check:
   - `npm run service:status` says it runs and answers. It must NOT show `Runs from: /Users/snow/the-desk-live`: Sprint 1's status has no "Runs from" line at all.
   - `plutil -extract WorkingDirectory raw ~/Library/LaunchAgents/local.thedesk.server.plist` prints `/Users/snow/the-desk-rollback`.
   - `lsof -a -p "$(lsof -nP -iTCP:4321 -sTCP:LISTEN -t)" -d cwd -Fn` shows `n/Users/snow/the-desk-rollback`.
 
-  `main` keeps N1. To return to the live copy after a fix: merge it, `npm run deploy`, `npm run service:install` (from the work folder), then `git worktree remove ~/the-desk-rollback`.
-- **Withdraw N1 from main:** on `main` in the work folder, `git revert -m 1 <merge sha>`, then `npm run service:install` (the Sprint 1 version runs the service from the work folder again, with the old branch-switching problem). The same checks apply, with the work folder in place of `~/the-desk-rollback`. To bring N1 back later, revert that revert and redo the cutover.
+  `main` keeps N1. To return to the live copy after a fix: merge it, then redo the cutover from step 2 (keeping `~/the-desk-pre-n1.sha`), and finally `git worktree remove ~/the-desk-rollback`.
+- **Withdraw N1 from main:** on `main` in the work folder, `git revert --no-edit -m 1 <merge sha>`, then `npm run service:install` (the Sprint 1 version runs the service from the work folder again, with the old branch-switching problem). The same checks apply, with the work folder in place of `~/the-desk-rollback`. To bring N1 back later, `git revert --no-edit <that revert's sha>`, then redo the cutover from step 2, keeping `~/the-desk-pre-n1.sha`.
 - In both cases `~/the-desk-live` stays but is unused. Remove it with `git worktree remove ~/the-desk-live` once it's no longer needed.
 
 ## N2. News contract: schemas and validator
