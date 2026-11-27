@@ -90,8 +90,10 @@ svg.ic{width:22px;height:22px;flex:none;fill:none;stroke:currentColor;stroke-wid
 .bd[data-phase=night]{background-image:url(assets/plate-night.webp)}
 /* Product Feed's corner: the laptop on the desk. At least as tall as the screen, so a phone is covered too. */
 .backdrop[data-view=feed] .bd{background-size:max(155%,190vh) auto;background-position:44% 66%}
+/* The News desk's corner: the TV and its low cabinet. */
+.backdrop[data-view=news] .bd{background-size:max(155%,190vh) auto;background-position:80% 54%}
 .veil{position:absolute;inset:0;background:linear-gradient(180deg,rgba(10,51,35,.28),rgba(10,51,35,0) 55%),var(--room-veil)}
-.backdrop[data-view=feed][data-phase=morning] .veil,.backdrop[data-view=feed][data-phase=golden] .veil{background:linear-gradient(180deg,rgba(10,51,35,.28),rgba(10,51,35,0) 55%),linear-gradient(var(--veil-boost),var(--veil-boost)),var(--room-veil)}
+.backdrop[data-view=feed][data-phase=morning] .veil,.backdrop[data-view=feed][data-phase=golden] .veil,.backdrop[data-view=news][data-phase=morning] .veil,.backdrop[data-view=news][data-phase=golden] .veil{background:linear-gradient(180deg,rgba(10,51,35,.28),rgba(10,51,35,0) 55%),linear-gradient(var(--veil-boost),var(--veil-boost)),var(--room-veil)}
 .view{position:relative;z-index:1}
 
 /* ---------- buttons shared by the room, the drawer and the cards ---------- */
@@ -106,6 +108,8 @@ svg.ic{width:22px;height:22px;flex:none;fill:none;stroke:currentColor;stroke-wid
 .stage{position:absolute;inset:0;overflow:hidden;transition:transform .9s cubic-bezier(.6,0,.2,1),opacity .7s ease;transform-origin:45% 59%}
 .hud,.dialogue{transition:opacity .4s ease}
 .frame.zoom .stage{transform:scale(3.4);opacity:0}
+/* Opening the News desk zooms into the TV instead of the laptop. */
+.frame[data-zoom=news] .stage{transform-origin:76% 52%}
 .frame.zoom .hud,.frame.zoom .dialogue{opacity:0}
 .plate{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;opacity:0;transition:opacity 2.5s ease}
 .plate.on{opacity:1}
@@ -175,6 +179,8 @@ svg.ic{width:22px;height:22px;flex:none;fill:none;stroke:currentColor;stroke-wid
 .rb.back{background:var(--pill-tint)}
 .rb.back:hover{background:rgba(255,255,255,.24)}
 .rb[aria-current]{background:var(--moss-green);color:var(--dark-green)}
+/* The News desk's accent is rosy brown. */
+#newsRail .rb[aria-current]{background:var(--rosy-brown)}
 
 /* the top capsule */
 .capsule{border-radius:var(--radius-pill);padding:10px 12px 10px 14px;display:flex;flex-wrap:wrap;align-items:center;gap:14px}
@@ -338,12 +344,82 @@ svg.ic{width:22px;height:22px;flex:none;fill:none;stroke:currentColor;stroke-wid
 .notes li.none{background:none;border:0;padding:0}
 .tiny{font-size:13px;color:var(--ink-muted);margin:0}
 
+/* ---------- the News desk (N4: plain layout from version C; the designer polishes it) ---------- */
+.news{min-height:100vh;color:var(--beige)}
+.nsample{color:var(--rosy-light)}
+.nprog{display:inline-flex;align-items:center;gap:10px;min-height:40px;margin:0;padding:0 16px;border-radius:var(--radius-pill);font-size:14px}
+.nprog .bar{display:inline-block;width:64px;height:7px;border-radius:4px;background:rgba(255,255,255,.2);overflow:hidden}
+.nprog .bar span{display:block;height:100%;width:0;background:var(--rosy-brown)}
+.nnote{margin:0;padding:10px 20px;border-radius:var(--radius-lg);font-size:14px}
+.nbreaking{display:flex;flex-wrap:wrap;gap:14px;align-items:center;padding:8px 8px 8px 10px;border-radius:var(--radius-lg);background:var(--rosy-light);color:var(--dark-green);border:1px solid var(--frost-edge);box-shadow:var(--shadow-frost)}
+.nblabel{margin:0;font:600 13px/1 var(--font-display);letter-spacing:.08em;text-transform:uppercase;background:var(--dark-green);color:var(--rosy-light);padding:10px 14px;border-radius:var(--radius-pill)}
+.nbhead{margin:0;flex:1 1 320px;font-weight:500}
+.nbreaking a{color:var(--dark-green);font-weight:600;padding:10px 4px}
+.nbx{flex:none;width:44px;height:44px;border:0;border-radius:50%;background:rgba(10,51,35,.12);color:var(--dark-green);display:grid;place-items:center;padding:0}
+.nbx:hover{background:rgba(10,51,35,.22)}
+.ncols{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:20px;align-items:start}
+.nmain,.ntop,.nstories,.nside{display:flex;flex-direction:column;gap:16px}
+.nh2{margin:0 0 0 8px;font:600 20px/1.2 var(--font-display);color:var(--beige)}
+.nh2:focus{outline:none}
+.nh2:focus-visible{outline:3px solid var(--beige);outline-offset:4px;border-radius:6px}
+.nstory{border-radius:var(--radius-lg);padding:22px 24px;display:flex;flex-direction:column;gap:14px}
+.nstory.read,.nitem.read{background:var(--frost-quiet)}
+.nstory h3{margin:0;font:600 21px/1.3 var(--font-display);color:var(--dark-green)}
+.nstory p,.nitem p{margin:0}
+.nmeta{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
+.nrank{width:38px;height:38px;border-radius:50%;display:grid;place-items:center;background:var(--midnight-green);color:var(--beige);font:600 18px/1 var(--font-display)}
+.ntag{font-size:12px;font-weight:600;line-height:1.3;padding:4px 10px;border-radius:var(--radius-pill);background:var(--chip);color:var(--dark-green)}
+.nmins{margin-left:auto;font-size:13px;color:var(--ink-muted)}
+.nboxes{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
+.nboxes>div{border-radius:var(--radius-md);padding:12px 14px;font-size:14px}
+.nwhy{background:var(--moss-tint)}
+.nskeptic{background:var(--rosy-tint)}
+.nboxes .lbl{margin:0 0 4px;font-size:12px;font-weight:600;letter-spacing:.06em;text-transform:uppercase}
+.nwhy .lbl{color:var(--moss-ink)}
+.nskeptic .lbl{color:var(--rosy-ink)}
+.nrow{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
+.nsrclbl{font-size:13px;color:var(--ink-muted)}
+.nsrcs{display:flex;flex-wrap:wrap;gap:8px;list-style:none;margin:0;padding:0}
+.nsrcs a,.nsrc-plain{display:inline-flex;align-items:center;min-height:32px;font-size:13px;padding:5px 11px;border-radius:var(--radius-pill);background:rgba(255,255,255,.7);border:1px solid rgba(10,51,35,.14);color:var(--midnight-green)}
+.nsrcs a{text-decoration:none}
+.nsrcs a:hover{text-decoration:underline}
+.nsrc-plain{color:var(--ink-muted)}
+.nread{margin-left:auto}
+.nshelf{border-radius:var(--radius-lg);padding:6px 8px}
+.nshelf h2{margin:0}
+#newsMoreBtn{width:100%;min-height:54px;border:0;background:none;color:var(--beige);display:flex;align-items:center;justify-content:space-between;gap:12px;padding:0 16px;border-radius:var(--radius-lg);font:600 17px var(--font-display);text-align:left}
+.nmorecount{font:500 14px var(--font-sans);color:var(--on-glass-muted)}
+.nmorelabel{font:500 14px var(--font-sans);padding:6px 14px;border-radius:var(--radius-pill)}
+.nmore{list-style:none;margin:0;padding:0 8px 10px;display:flex;flex-direction:column;gap:8px}
+.nitem{border-radius:var(--radius-md);padding:4px 6px}
+.nitem h3{margin:0;font:inherit}
+.nitembtn{width:100%;min-height:44px;display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;border:0;background:none;color:var(--dark-green);text-align:left;padding:8px;border-radius:var(--radius-sm)}
+.nitemtitle{flex:1 1 280px;font-weight:500}
+.nitemmeta{font-size:13px;color:var(--ink-muted)}
+.nitembtn[aria-expanded=true] svg.ic{transform:rotate(180deg)}
+.nitembody{display:flex;flex-direction:column;gap:12px;padding:4px 8px 12px}
+.nglance{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+.nglance p{margin:0;padding:12px;border-radius:var(--radius-md);background:var(--pill-tint);border:1px solid var(--glass-edge);display:flex;flex-direction:column;gap:4px}
+.nglance b{font:600 26px/1 var(--font-display)}
+.nglance span{font-size:12px;color:var(--on-glass-muted)}
+.nregions,.nkinds{list-style:none;margin:0;padding:0;display:flex;flex-wrap:wrap;gap:8px}
+.nregions{flex-direction:column}
+.nregions li{display:grid;grid-template-columns:1fr auto;gap:4px;font-size:14px}
+.nrcount{color:var(--on-glass-muted)}
+.nbar{grid-column:1/-1;height:8px;border-radius:4px;background:rgba(255,255,255,.16);overflow:hidden}
+.nbar span{display:block;height:100%;border-radius:4px;background:var(--rosy-brown)}
+.nkinds li{font-size:13px;padding:5px 12px;border-radius:var(--radius-pill)}
+.nnone{font-size:14px;color:var(--on-glass-muted)}
+.nsoon{border-style:dashed}
+.nsoon p{margin:0;font-size:14px;color:var(--on-glass-muted)}
+
 /* Agent and note text can hold a very long word or link: break it anywhere rather than widen the page. */
-.art h3,.art p,.art .meta,.tagchip,.drawer h3,.dsrc,.notes li p,.notecard p,.notecard .on,.mentor,.ftitle p,.listhead h2{overflow-wrap:anywhere}
+.art h3,.art p,.art .meta,.tagchip,.drawer h3,.dsrc,.notes li p,.notecard p,.notecard .on,.mentor,.ftitle p,.listhead h2,.nstory h3,.nstory p,.nitem p,.nitemtitle,.ntag,.nbhead,.nnote,.nsrcs a,.nsrc-plain,.nkinds li,.nrname{overflow-wrap:anywhere}
 
 /* ---------- smaller screens ---------- */
 @media (max-width:1199px){
   .capsule{border-radius:var(--radius-lg)}
+  .ncols{grid-template-columns:minmax(0,1fr)}
   .cols{grid-template-columns:264px minmax(0,1fr);grid-template-rows:auto 1fr}
   .shelves{grid-column:1;grid-row:1}
   .list{grid-column:2;grid-row:1 / span 2}
@@ -361,7 +437,7 @@ svg.ic{width:22px;height:22px;flex:none;fill:none;stroke:currentColor;stroke-wid
   /* The phone crop puts the brightest part of the plate behind the glance tiles. */
   .backdrop{--veil-boost:rgba(16,86,102,.5)}
   /* Keyboard focus scrolls into view above the bottom bar, never under it. */
-  html:has(#feed:not([hidden])){scroll-padding-bottom:calc(96px + env(safe-area-inset-bottom))}
+  html:has(#feed:not([hidden])),html:has(#news:not([hidden])){scroll-padding-bottom:calc(96px + env(safe-area-inset-bottom))}
   .fwrap{grid-template-columns:minmax(0,1fr);gap:16px;padding:14px 12px calc(104px + env(safe-area-inset-bottom))}
   .rail{position:fixed;top:auto;left:12px;right:12px;bottom:calc(10px + env(safe-area-inset-bottom));z-index:30;flex-direction:row;justify-content:space-around;padding:6px 8px;background:var(--glass-deep)}
   .capsule{gap:12px;padding:12px}
@@ -378,6 +454,10 @@ svg.ic{width:22px;height:22px;flex:none;fill:none;stroke:currentColor;stroke-wid
   .art h3{font-size:19px}
   .badges{grid-template-columns:repeat(2,minmax(0,1fr))}
   .fig{height:250px}
-  #feed:not([hidden]) ~ .toast{bottom:calc(92px + env(safe-area-inset-bottom))}
+  #feed:not([hidden]) ~ .toast,#news:not([hidden]) ~ .toast{bottom:calc(92px + env(safe-area-inset-bottom))}
+  .nboxes{grid-template-columns:minmax(0,1fr)}
+  .nstory{padding:18px 18px 16px}
+  .nstory h3{font-size:19px}
+  .nbreaking{border-radius:var(--radius-lg)}
 }
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}

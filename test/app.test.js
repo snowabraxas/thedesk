@@ -76,6 +76,16 @@ describe('app/style.css', () => {
       'note text in the drawer': '.notes li p',
       'note text in My notes': '.notecard p',
       "Wila's line (holds a theme and a source from the feed)": '.mentor',
+      'News headline': '.nstory h3',
+      'News summary, why and skeptic': '.nstory p',
+      'News shelf headline': '.nitemtitle',
+      'News shelf summary, why and skeptic': '.nitem p',
+      'News source names': '.nsrcs a',
+      'News refused links, shown as text': '.nsrc-plain',
+      'News region and kind tags': '.ntag',
+      'News kind counts': '.nkinds li',
+      'breaking headline': '.nbhead',
+      "the News agent's note": '.nnote',
     };
     for (const [what, selector] of Object.entries(needed)) assert.ok(wraps.has(selector), `${what} (${selector})`);
   });
@@ -91,7 +101,7 @@ describe('app/style.css', () => {
     }
     const traps = selectorsWith(css, /(^|;|\s)(transform|filter|backdrop-filter|-webkit-backdrop-filter|perspective|will-change|contain)\s*:/);
     const holdsTransform = selectorsWith(css, /animation\s*:[^;}]*\b(both|forwards)\b/);
-    for (const id of ['toast', 'drawer', 'scrim', 'rail']) {
+    for (const id of ['toast', 'drawer', 'scrim', 'rail', 'newsRail']) {
       for (const selectors of ancestorsOf(html, id)) {
         for (const s of selectors) {
           assert.ok(!traps.has(s), `${s} (around #${id}) must not set transform, filter or backdrop-filter`);
@@ -119,7 +129,7 @@ describe('app/style.css', () => {
   });
 
   test('no amber or yellow anywhere in the app', () => {
-    for (const file of ['style.css', 'app.js', 'index.html', 'favicon.svg']) {
+    for (const file of ['style.css', 'app.js', 'news.js', 'news-html.js', 'news-lib.js', 'index.html', 'favicon.svg']) {
       const text = read(file);
       for (const c of [...hexes(text), ...rgbs(text)]) assert.ok(!isAmberOrYellow(c.rgb), `${file}: ${c.text} is amber or yellow`);
     }
@@ -131,7 +141,7 @@ describe('app/style.css', () => {
   test("Caveat is only for Snow's own notes", () => {
     const hand = selectorsWith(read('style.css'), /font(-family)?\s*:[^;]*(var\(--font-hand\)|Caveat)/);
     assert.deepEqual([...hand].sort(), ['.notecard p', '.notes li p', '.pane textarea'].sort());
-    assert.doesNotMatch(read('app.js'), /Caveat|font-hand/, 'no handwriting set from script');
+    for (const file of ['app.js', 'news.js', 'news-html.js']) assert.doesNotMatch(read(file), /Caveat|font-hand/, `no handwriting set from ${file}`);
   });
 
   test("the desk's one opening motion is under a second, and reduced motion turns every motion off", () => {
@@ -171,7 +181,7 @@ describe('app/style.css', () => {
   test('buttons are at least 44px tall', () => {
     const css = read('style.css');
     const px = (body, prop) => { const m = body.match(new RegExp(`(?:^|;)\\s*${prop}\\s*:\\s*(\\d+)px`)); return m ? Number(m[1]) : 0; };
-    for (const s of ['.act', '.ab', '.addbtn', '.rb', '.shelf>button.s', '.shelf .mini', '.shelf.confirm button', '.x', '.toast button', '.notes li button', '.chip', '.notecard .on button']) {
+    for (const s of ['.act', '.ab', '.addbtn', '.rb', '.shelf>button.s', '.shelf .mini', '.shelf.confirm button', '.x', '.toast button', '.notes li button', '.chip', '.notecard .on button', '.nbx', '#newsMoreBtn', '.nitembtn']) {
       const bodies = rulesFor(css, s);
       assert.ok(bodies.length, `${s} has a rule`);
       const tallest = Math.max(...bodies.map((b) => Math.max(px(b, 'min-height'), px(b, 'height'))));
@@ -183,6 +193,23 @@ describe('app/style.css', () => {
 describe('app/index.html', () => {
   test('the notes drawer is a modal dialog', () => {
     assert.match(read('index.html'), /<aside class="drawer frost" id="drawer" hidden role="dialog" aria-modal="true" aria-label="Article notes">/);
+  });
+
+  test('the News desk is its own hidden section, with its h1, a way back to the room, and a closed shelf', () => {
+    const html = read('index.html');
+    assert.match(html, /<section id="news" class="view news" hidden aria-labelledby="newsTitle">/);
+    assert.match(html, /<h1 id="newsTitle">/);
+    assert.match(html, /<nav class="rail glass" id="newsRail" aria-label="News sections">\s*<a class="rb back" href="#" aria-label="Back to the room"/);
+    assert.match(html, /<button type="button" id="newsMoreBtn" aria-expanded="false" aria-controls="newsMoreList">/);
+    assert.match(html, /<ul class="nmore" id="newsMoreList" hidden><\/ul>/);
+    assert.match(html, /<h2 id="newsLensesTitle">Lenses arrive in Phase 2<\/h2>/);
+  });
+
+  test('the News page has one h1, then h2 for each section (h3 is for headlines, drawn from the edition)', () => {
+    const news = read('index.html').match(/<section id="news"[\s\S]*?\n<\/section>/)[0];
+    assert.equal((news.match(/<h1\b/g) || []).length, 1);
+    assert.equal((news.match(/<h3\b/g) || []).length, 0);
+    assert.deepEqual([...news.matchAll(/<h2\b[^>]*id="(\w+)"/g)].map((m) => m[1]), ['newsTopTitle', 'newsMoreTitle', 'newsGlanceTitle', 'newsRegionsTitle', 'newsKindsTitle', 'newsLensesTitle']);
   });
 });
 
@@ -206,6 +233,35 @@ describe('app/app.js', () => {
 
   test("Wila's line on the feed is set as plain text", () => {
     assert.match(read('app.js'), /\$\('#mentorLine'\)\.textContent = mentorLine\(feed, S\);/);
+  });
+
+  test('the TV opens the News desk with the same zoom as the laptop, and #news is routed like #feed', () => {
+    const js = read('app.js');
+    assert.match(js, /\{ id: 'news', name: 'News', [^}]*go: 'news' \}/);
+    assert.match(js, /\{ id: 'feed', name: 'Product Feed', [^}]*go: 'feed' \}/);
+    assert.match(js, /if \(o\.go\) return openDesk\(o\.go\);/);
+    assert.match(js, /function openDesk\(desk\) \{ \$\('#frame'\)\.dataset\.zoom = desk; \$\('#frame'\)\.classList\.add\('zoom'\); setTimeout\(\(\) => \{ location\.hash = desk; \}, 750\); \}/);
+    assert.match(js, /const DESK_VIEWS = \{ '#feed': 'feed', '#news': 'news' \};/);
+    assert.match(js, /\$\('#feed'\)\.hidden = view !== 'feed'; \$\('#news'\)\.hidden = view !== 'news'; \$\('#room'\)\.hidden = view !== 'room';/);
+    assert.ok(selectorsWith(read('style.css'), /transform-origin/).has('.frame[data-zoom=news] .stage'), 'the zoom goes into the TV');
+  });
+
+  test('reading a News story pays through the same award() as the feed, once everything has loaded', () => {
+    const js = read('app.js');
+    assert.match(js, /const news = createNewsPage\(\{ award, toast, isReady: \(\) => ready, canAward: \(\) => store\.canSave \}\);/);
+    assert.match(js, /Promise\.all\(\[loadState\(\), loadFeed\(\), news\.load\(\)\]\)\.then\(\(\) => \{ ready = true; renderAll\(\); \}\);/);
+    const nj = read('news.js');
+    assert.match(nj, /const r = toggleRead\(N, s\.key, \{ canAward: store\.canSave && canAward\(\) \}\);\s*store\.save\(\);\s*if \(r\.award\) award\(READ_XP, 'story read'\);/);
+    assert.match(nj, /url: STATE_URL,\s*normalize: normalizeNewsState,\s*empty: blankNewsState,/);
+    assert.match(nj, /const STATE_URL = '\/api\/news\/state';/);
+  });
+
+  test('news.js puts agent text in the page only through textContent or news-html.js', () => {
+    const nj = read('news.js');
+    for (const [, value] of nj.matchAll(/\.innerHTML = ([^;]+);/g)) {
+      assert.match(value, /^(show \? breakingHtml\(breakingView\(breaking\)\) : ''|n \? view\.top\.map\(storyCardHtml\)\.join\(''\) : noStoriesHtml\(!!news\)|more\.map\(\(s, i\) => shelfItemHtml\(s, i, openItems\.has\(`m\$\{i\}`\)\)\)\.join\(''\)|g\.(numbers|regions|kinds))$/, value);
+    }
+    assert.doesNotMatch(nj, /insertAdjacentHTML|outerHTML|document\.write/);
   });
 
   test('the "Sample picks" label shows only when the server marks the feed as a sample', () => {
