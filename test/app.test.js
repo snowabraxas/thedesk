@@ -129,7 +129,7 @@ describe('app/style.css', () => {
   });
 
   test('no amber or yellow anywhere in the app', () => {
-    for (const file of ['style.css', 'app.js', 'news.js', 'news-html.js', 'news-lib.js', 'index.html', 'favicon.svg']) {
+    for (const file of ['style.css', 'app.js', 'news.js', 'news-html.js', 'news-lib.js', 'tv-lib.js', 'index.html', 'favicon.svg']) {
       const text = read(file);
       for (const c of [...hexes(text), ...rgbs(text)]) assert.ok(!isAmberOrYellow(c.rgb), `${file}: ${c.text} is amber or yellow`);
     }
@@ -166,6 +166,33 @@ describe('app/style.css', () => {
     const frames = stripCssComments(css).match(/@keyframes tvwarm\{(.*?)\}\}/)[1];
     assert.match(frames, /100%\{opacity:0/, 'it ends invisible');
     assert.equal(rulesFor(css, '.news').some((b) => /animation/.test(b)), false, 'the News page has no second opening motion');
+  });
+
+  test("the TV in the room has one gentle ambient motion, its screen's slow hum, and it stays on without motion", () => {
+    const css = read('style.css');
+    const clean = stripCssComments(css);
+    const tvAnimated = [...selectorsWith(css, /animation\s*:/)].filter((s) => s.includes('.tv'));
+    assert.deepEqual(tvAnimated, ['.hs.tv.tv-on .screen'], 'only the glowing screen moves');
+    const hum = rulesFor(css, '.hs.tv.tv-on .screen').join(';');
+    const [, name, seconds] = hum.match(/animation\s*:\s*(\w+)\s+([\d.]+)s/) || [];
+    assert.equal(name, 'tvhum');
+    assert.ok(Number(seconds) >= 4, `a slow hum, not a blink (${seconds}s)`);
+    assert.match(hum, /(^|;)\s*opacity\s*:\s*1\s*(;|$)/, 'with reduced motion (no animation) the screen simply stays on');
+    const frames = clean.match(/@keyframes tvhum\{(.*?)\}\}/)[1];
+    assert.doesNotMatch(frames, /transform|scale|translate/, 'the hum only dims and brightens');
+    for (const [, opacity] of frames.matchAll(/opacity:([\d.]+)/g)) assert.ok(Number(opacity) >= 0.6, `never dims below 0.6 (${opacity})`);
+    // The breaking mark is still: one pulse at most on the TV.
+    assert.equal(rulesFor(css, '.hs.tv .bmark').some((b) => /animation/.test(b)), false);
+    assert.equal(rulesFor(css, '.hs.tv.tv-breaking .bmark').some((b) => /animation/.test(b)), false);
+    // Quiet at rest: no glow and no mark until the room says so.
+    assert.match(rulesFor(css, '.hs.tv .screen').join(';'), /(^|;)opacity:0(;|$)/);
+    assert.match(rulesFor(css, '.hs.tv .bmark').join(';'), /(^|;)opacity:0(;|$)/);
+    assert.match(rulesFor(css, '.hs.tv.tv-breaking .bmark').join(';'), /(^|;)opacity:1(;|$)/);
+  });
+
+  test('the TV never takes taps from the room: its screen and mark let them through to the button', () => {
+    const css = read('style.css');
+    for (const s of ['.hs.tv .screen', '.hs.tv .bmark']) assert.match(rulesFor(css, s).join(';'), /pointer-events:none/, s);
   });
 
   test('News focus rings are outline only (a box-shadow ring paints a bar across wrapped lines)', () => {
@@ -270,6 +297,31 @@ describe('app/app.js', () => {
     assert.match(js, /const DESK_VIEWS = \{ '#feed': 'feed', '#news': 'news' \};/);
     assert.match(js, /\$\('#feed'\)\.hidden = view !== 'feed'; \$\('#news'\)\.hidden = view !== 'news'; \$\('#room'\)\.hidden = view !== 'room';/);
     assert.ok(selectorsWith(read('style.css'), /transform-origin/).has('.frame[data-zoom=news] .stage'), 'the zoom goes into the TV');
+  });
+
+  test('the TV shows the News state: glow, mark and a tag that is also its name', () => {
+    const js = read('app.js');
+    assert.match(js, /import \{ readSignals, tvLook \} from '\.\/tv-lib\.js';/);
+    assert.match(js, /const tv = tvLook\(readSignals\(news\.signals\)\);/);
+    assert.match(js, /b\.classList\.toggle\('tv-on', isTv && tv\.on\);/);
+    assert.match(js, /b\.classList\.toggle\('tv-breaking', isTv && tv\.breaking\);/);
+    // The laptop's "new" glow breathes; the TV has its own, so it never gets a second pulse.
+    assert.match(js, /b\.classList\.toggle\('new', isFeed && unread > 0\);/);
+    // Colour never carries the meaning alone: the tag says it, and screen readers hear the same words.
+    assert.match(js, /isTv \? tv\.tag :/);
+    assert.match(js, /tag\.textContent = label;\s*b\.setAttribute\('aria-label', label\);/);
+    // The screen and the mark are pictures; the button's name says what they mean.
+    assert.match(js, /const TV_PARTS = `<span class="screen" aria-hidden="true"><\/span><span class="bmark" aria-hidden="true">\$\{ICON\.onAir\}<\/span>`;/);
+    assert.match(js, /<button class="hs\$\{o\.id === 'news' \? ' tv' : ''\}"/);
+  });
+
+  test('the room learns the News state on load, on coming back from a desk, and when the tab comes back', () => {
+    const js = read('app.js');
+    assert.match(js, /Promise\.all\(\[loadState\(\), loadFeed\(\), news\.load\(\)\]\)\.then\(\(\) => \{ ready = true; renderAll\(\); \}\);/);
+    assert.match(js, /else \{ requestAnimationFrame\(\(\) => requestAnimationFrame\(\(\) => \$\('#frame'\)\.classList\.remove\('zoom'\)\)\); renderRoom\(\); refreshTv\(\); \}/);
+    // A failed fetch keeps what was there, and the room redraws either way (never an error in the room).
+    assert.match(js, /function refreshTv\(\) \{ news\.refresh\(\)\.then\(renderRoom, renderRoom\); \}/);
+    assert.match(js, /document\.addEventListener\('visibilitychange', \(\) => \{ if \(document\.visibilityState === 'visible' && !\$\('#room'\)\.hidden\) refreshTv\(\); \}\);/);
   });
 
   test('reading a News story pays through the same award() as the feed, once everything has loaded', () => {

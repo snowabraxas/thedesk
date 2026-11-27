@@ -353,6 +353,7 @@ async function backToRoom(page, step) {
   } catch (e) {
     throw new ShotError(`${step}: Back didn't return to the room.\n  ${e.message.split('\n')[0]}`);
   }
+  await page.evaluate(() => window.scrollTo(0, 0));
 }
 
 // The room in one light, with the TV in each state it can show on this Desk.
