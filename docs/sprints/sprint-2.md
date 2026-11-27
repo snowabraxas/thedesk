@@ -15,7 +15,7 @@ Update this table the moment a story changes state (Not started, In progress, In
 | N1 Live copy separate from work in progress | Tester | In review | Branch n1-live-copy: built, 303 tests pass; tester and review running. Snow's OK to install |
 | N2 News contract: schemas and validator | Developer, tester | Done | Merged 27 Nov. `npm run validate-news`. Tester passed; 3 review rounds fixed. Product Feed links got stricter too (see sprint-2-build notes, for S5) |
 | N3 News server routes | Tester | In review | Branch n3-news-routes: built, 458 tests pass; tester and review running |
-| N4 The News desk page | Designer, developer | Not started | Snow approves the design |
+| N4 The News desk page | Developer, then designer | In progress | Branch n4-news-page (on top of N3). Logic first, then the Lotus look. Snow approves the design |
 | N5 The TV in the room | Designer, developer | Not started | |
 | N6 Polish at 390 px and contrast | Designer, tester | Not started | Snow's OK before changes land |
 | N7 Sample edition and friendly states | Developer, tester | Not started | |
