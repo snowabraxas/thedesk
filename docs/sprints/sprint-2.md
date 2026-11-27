@@ -16,7 +16,7 @@ Update this table the moment a story changes state (Not started, In progress, In
 | N2 News contract: schemas and validator | Developer, tester | Done | Merged 27 Nov. `npm run validate-news`. Tester passed; 3 review rounds fixed. Product Feed links got stricter too (see sprint-2-build notes, for S5) |
 | N3 News server routes | Developer, tester | Done | Merged and live 27 Nov. /api/news (live, last good on disk, editions, sample), /api/breaking (today in Toronto), /api/news/state. Product Feed keeps its last good edition on disk too |
 | N4 The News desk page | Developer | In review | Snow approved the screenshots 27 Nov. Tester passed; fixing review items (two tabs, sample keys, glow contrast) before merge |
-| N5 The TV in the room | Snow | In review | Branch n5-tv-in-room: built, 583 tests. Screenshots with Snow (breaking mark: option A badge or B lower third); tester running |
+| N5 The TV in the room | Tester | In review | Branch n5-tv-in-room. Snow approved 27 Nov with breaking mark A (the badge). Tester running; merges after N4 |
 | N6 Polish at 390 px and contrast | Designer, tester | Not started | Snow's OK before changes land |
 | N7 Sample edition and friendly states | Developer, tester | Not started | |
 | N9 The News agent | Snow and lead dev | Not started | After S5 |
