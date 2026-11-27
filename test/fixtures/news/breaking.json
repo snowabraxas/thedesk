@@ -1,0 +1,16 @@
+{
+  "id": "b1",
+  "rank": 1,
+  "headline": "Test breaking story: a test regulation passes",
+  "date": "2026-12-07",
+  "region": "us",
+  "kind": "policy",
+  "summary": "This is the test breaking story for The Desk's News tests. It stands in for a truly major story. Nothing here happened.",
+  "why": "Test fixture: shows the breaking banner.",
+  "skeptic": "Test fixture: the skeptic's view of the test regulation.",
+  "sources": [
+    { "name": "Example News", "url": "https://example.com/news/test-breaking" },
+    { "name": "Example Wire", "url": "https://example.org/wire/test-breaking" }
+  ],
+  "at": "2026-12-07T12:04:00-05:00"
+}

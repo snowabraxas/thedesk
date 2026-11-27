@@ -1,0 +1,85 @@
+{
+  "desk": "news",
+  "edition": "2026-12-07",
+  "note": "",
+  "stories": [
+    {
+      "id": "s1",
+      "rank": 1,
+      "headline": "Test story one: a lab releases a test model",
+      "date": "2026-12-06",
+      "region": "us",
+      "kind": "launch",
+      "summary": "This is test story one for The Desk's News tests. It stands in for a real launch story. Nothing here happened.",
+      "why": "Test fixture: shows a top story with two sources.",
+      "skeptic": "Test fixture: the skeptic's view goes here.",
+      "sources": [
+        { "name": "Example News", "url": "https://example.com/news/test-story-one" },
+        { "name": "Example Wire", "url": "https://example.org/wire/test-story-one" }
+      ]
+    },
+    {
+      "id": "s2",
+      "rank": 2,
+      "headline": "Test story two: a test policy is announced",
+      "date": "2026-12-05",
+      "region": "china",
+      "kind": "policy",
+      "summary": "This is test story two for The Desk's News tests. It stands in for a real policy story.",
+      "why": "Test fixture: shows a second region and kind.",
+      "skeptic": "Test fixture: an open question about test story two.",
+      "sources": [
+        { "name": "Example News", "url": "https://example.com/news/test-story-two" },
+        { "name": "Example Daily", "url": "https://example.net/daily/test-story-two" },
+        { "name": "Example Wire", "url": "https://example.org/wire/test-story-two" }
+      ]
+    },
+    {
+      "id": "s3",
+      "rank": 3,
+      "headline": "Test story three: a test research paper",
+      "date": "",
+      "region": "eu",
+      "kind": "research",
+      "summary": "This is test story three for The Desk's News tests. Its date is left empty on purpose.",
+      "why": "Test fixture: shows a story with no date.",
+      "skeptic": "Test fixture: a fair critique of test story three.",
+      "sources": [
+        { "name": "Example Journal", "url": "https://example.org/journal/test-story-three" },
+        { "name": "Example News", "url": "https://example.com/news/test-story-three" }
+      ]
+    }
+  ],
+  "more": [
+    {
+      "id": "m1",
+      "rank": 4,
+      "headline": "Test shelf story one: a test deal",
+      "date": "2026-12-06",
+      "region": "global",
+      "kind": "deal",
+      "summary": "This is the first shelf story in The Desk's News tests.",
+      "why": "Test fixture: shows a story on the more shelf.",
+      "skeptic": "Test fixture: the skeptic's view of the test deal.",
+      "sources": [
+        { "name": "Example Wire", "url": "https://example.org/wire/test-shelf-one" },
+        { "name": "Example Daily", "url": "https://example.net/daily/test-shelf-one" }
+      ]
+    },
+    {
+      "id": "m2",
+      "rank": 5,
+      "headline": "Test shelf story two: a test event",
+      "date": "2026-12-04",
+      "region": "other",
+      "kind": "event",
+      "summary": "This is the second shelf story in The Desk's News tests.",
+      "why": "Test fixture: shows the last region and kind.",
+      "skeptic": "Test fixture: an open question about the test event.",
+      "sources": [
+        { "name": "Example News", "url": "https://example.com/news/test-shelf-two" },
+        { "name": "Example Journal", "url": "https://example.org/journal/test-shelf-two" }
+      ]
+    }
+  ]
+}
