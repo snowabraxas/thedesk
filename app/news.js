@@ -55,12 +55,13 @@ export function createNewsPage({ award, toast, isReady, canAward }) {
     N = r.state;
     if (!r.ok) toast("I couldn't open your saved News reads, so changes won't be saved for now. Try reloading in a bit.", 'Reload', () => location.reload());
   }
+  // A failed fetch keeps what was already there (nothing, on the first load).
   async function loadEdition() {
     try {
       const d = await getJson(NEWS_URL);
       news = d && typeof d === 'object' && !Array.isArray(d) ? d : null;
     } catch {
-      news = null;
+      /* keep the edition we had */
     }
   }
   async function loadBreaking() {
@@ -68,7 +69,7 @@ export function createNewsPage({ award, toast, isReady, canAward }) {
       const d = await getJson(BREAKING_URL);
       breaking = d && typeof d === 'object' && d.breaking && typeof d.breaking === 'object' ? d.breaking : null;
     } catch {
-      breaking = null;
+      /* keep the breaking story we had */
     }
   }
   /** The first load: Snow's News state, the edition and the breaking story. */
@@ -76,7 +77,9 @@ export function createNewsPage({ award, toast, isReady, canAward }) {
   /** Opening the page again later in the day: fetch the edition and breaking story again, then redraw. */
   async function refresh() {
     if (!isReady()) return;
+    const before = news?.edition;
     await Promise.all([loadEdition(), loadBreaking()]);
+    if (news?.edition !== before) openItems.clear(); // opened items are by position: a new edition starts closed
     if (!$('#news').hidden) render();
   }
 

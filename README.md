@@ -37,7 +37,7 @@ What the desk pages talk to. Everything is JSON, never cached, and only answers 
 | `GET` / `PUT /api/state` | Snow's Product Feed state (reads, saves, folders, notes, XP, streak, badges) in `product-feed/state.json`. |
 | `GET /api/news` | The News morning edition, in the same order: `X-Desk-News-Source` is `live` (`news/news.json`), `last-good` (`news/last-good.json`), `edition:<file>` (`news/editions/`) or `sample` (`data/samples/news.sample.json`, marked `"sample": true`). |
 | `GET /api/breaking` | `{"breaking": {...}}` when `news/breaking.json` is valid and from today in Toronto, otherwise `{"breaking": null}`. |
-| `GET` / `PUT /api/news/state` | Snow's News state (`read`, `dismissed`, `shelfOpen`) in `news/state.json`. |
+| `GET` / `PUT /api/news/state` | Snow's News state (`read`, `dismissed`, `shelfOpen`, and `awarded`, the stories already paid XP) in `news/state.json`. |
 
 `PUT` takes a JSON object up to 1 MB (`Content-Type: application/json`) and saves it whole, so a crash never leaves half a file. Details: `docs/notes/sprint-2-build.md` (N3).
 
