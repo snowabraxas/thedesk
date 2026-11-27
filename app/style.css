@@ -144,11 +144,12 @@ svg.ic{width:22px;height:22px;flex:none;fill:none;stroke:currentColor;stroke-wid
 @keyframes breathe{0%,100%{opacity:.25}50%{opacity:.75}}
 @keyframes hop{0%,100%{transform:translateY(0)}50%{transform:translateY(-4px)}}
 /* The TV (News). While today's top stories are unread its screen is on: a soft rosy light with faint
-   scan lines, laid over the painted glass with a screen blend so the glass still shows through, and a
-   little light spilling onto the wall. Its one ambient motion is a slow hum of that light (off under
-   reduced motion, where it simply stays on). A breaking story Snow hasn't dismissed puts a small
-   rosy "on air" mark on its corner, still. The tag says both in words, so neither relies on colour. */
-.hs.tv .screen{position:absolute;left:6.6%;top:11.8%;width:43.8%;height:69%;border-radius:26%/22%;pointer-events:none;opacity:0;transition:opacity .6s ease;mix-blend-mode:screen;background:repeating-linear-gradient(180deg,rgba(135,67,56,0) 0 2px,rgba(135,67,56,.16) 2px 3px),radial-gradient(ellipse 85% 80% at 44% 40%,rgba(var(--tv-glow),.72),rgba(211,150,140,.7) 55%,rgba(190,118,108,.58));box-shadow:0 0 12px 4px rgba(211,150,140,.55),0 0 60px 26px rgba(211,150,140,.42)}
+   scan lines, half see-through so the painted glass and its window reflection still show, and a
+   little light spilling onto the wall. (No blend mode: one, even invisible, changes how the frosted
+   HUD renders on a phone.) Its one ambient motion is a slow hum of that light (off under reduced
+   motion, where it simply stays on). A breaking story Snow hasn't dismissed puts a small rosy
+   "on air" mark on its top edge, still. The tag says both in words, so neither relies on colour. */
+.hs.tv .screen{position:absolute;left:6.6%;top:11.8%;width:43.8%;height:69%;border-radius:26%/22%;pointer-events:none;opacity:0;transition:opacity .6s ease;background:repeating-linear-gradient(180deg,rgba(135,67,56,0) 0 2px,rgba(135,67,56,.12) 2px 3px),radial-gradient(ellipse 80% 75% at 44% 40%,rgba(255,244,240,.74),rgba(var(--tv-glow),.58) 50%,rgba(222,166,156,.5));box-shadow:0 0 10px 3px rgba(var(--tv-glow),.5),0 0 34px 12px rgba(211,150,140,.3),0 0 70px 30px rgba(211,150,140,.16)}
 .hs.tv.tv-on .screen{opacity:1;animation:tvhum 5.6s ease-in-out infinite}
 @keyframes tvhum{0%,100%{opacity:1}50%{opacity:.74}}
 .hs.tv .bmark{position:absolute;left:66%;top:4%;translate:-50% -50%;width:clamp(16px,1.7vw,24px);aspect-ratio:1;border-radius:50%;display:grid;place-items:center;background:var(--rosy-brown);color:var(--dark-green);box-shadow:0 0 0 2px rgba(252,251,243,.9),0 2px 6px rgba(6,30,24,.3);pointer-events:none;opacity:0;transform:scale(.6);transition:opacity .35s ease,transform .35s ease}

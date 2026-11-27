@@ -195,6 +195,10 @@ describe('app/style.css', () => {
     for (const s of ['.hs.tv .screen', '.hs.tv .bmark']) assert.match(rulesFor(css, s).join(';'), /pointer-events:none/, s);
   });
 
+  test('no blend modes: even an invisible one changes how the frosted glass renders on a phone', () => {
+    assert.deepEqual([...selectorsWith(read('style.css'), /mix-blend-mode/)], []);
+  });
+
   test('News focus rings are outline only (a box-shadow ring paints a bar across wrapped lines)', () => {
     const css = read('style.css');
     const ring = rulesFor(css, '#news :focus-visible').join(';');
