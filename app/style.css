@@ -189,12 +189,13 @@ svg.ic{width:22px;height:22px;flex:none;fill:none;stroke:currentColor;stroke-wid
   /* Every tag shows at once here. The TV's grows leftwards from its right edge, Language's rightwards
      from its left edge (the two objects share that edge), so the neighbours can never meet whatever
      the words. The TV shows its short label ("News · 3 new"; the mark shows a breaking story), sits
-     right on its top edge, clear of Wila's orb, and the mark drops lower to stay clear of it. */
+     right on its top edge, clear of Wila's orb. The mark sits on the TV's top-left corner, 6px under
+     the tag: on the right, Workout Coach's tag overlaps the TV's edge at phone widths. */
   .hs.tv .tag{left:auto;right:2px;transform:none}
   .hs.tv .tag .tfull{display:none}
   .hs.tv .tag .tshort{display:inline}
   .hs[data-id=lang] .tag{left:2px;transform:translate(0,-4px)}
-  .hs.tv .bmark{top:6px;left:66%;width:14px}
+  .hs.tv .bmark{top:6px;left:-8%;width:14px}
 }
 @media (max-width:720px){
   .room{place-items:start center;align-content:start;padding-bottom:24px}

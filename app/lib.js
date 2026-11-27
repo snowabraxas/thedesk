@@ -193,6 +193,13 @@ export async function readArticle(getState, id, { canPay = true, peek, also = as
   return markArticleRead(getState(), id, { canAward: pay });
 }
 
+/** How long a GET may take before it counts as failed (a stuck one would keep a catch-up round running). */
+export const GET_TIMEOUT = 10000;
+/** An AbortSignal that fires after ms (undefined where the browser has no AbortSignal.timeout). */
+export function timeoutSignal(ms) {
+  return typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function' ? AbortSignal.timeout(ms) : undefined;
+}
+
 /**
  * Keeps overlapping fetches of the same thing in order. start() is called as a fetch goes out and
  * returns take(), to call when its answer arrives: true if the answer may be used, that is if no fetch
@@ -256,6 +263,7 @@ export function createStateClient({
   delay = 600,
   retryDelay = 15000,
   keepaliveMax = 64000, // browsers refuse keepalive bodies over 64 KB
+  timeout = GET_TIMEOUT, // a GET that hasn't answered by then counts as failed
 }) {
   const headers = { 'Content-Type': 'application/json' };
   let canSave = false;
@@ -269,6 +277,9 @@ export function createStateClient({
   let running = null; // the flush on its way, if any
   let edits = 0; // save() calls so far: a reload that went out before one never applies its answer
   const reloads = newestAnswer(); // overlapping reloads: an older answer never replaces a newer one
+  let missed = false; // the last reload was skipped or dropped because of a change here (retry when idle)
+  let disposed = false;
+  let idleWaiters = [];
 
   // Read the small reply even when only the status matters, so the browser can finish the request.
   const finish = async (r) => {
@@ -294,7 +305,7 @@ export function createStateClient({
   // GET the server's copy, normalized. Throws when it can't be read.
   async function readServer() {
     try {
-      const r = await fetchFn(url, { cache: 'no-store' });
+      const r = await fetchFn(url, { cache: 'no-store', signal: timeoutSignal(timeout) });
       if (!r.ok) {
         await finish(r);
         throw new Error(`GET ${url} answered ${r.status}`);
@@ -309,6 +320,7 @@ export function createStateClient({
   }
 
   async function load() {
+    if (disposed) return { ok: false, state: empty() };
     try {
       const state = await readServer();
       canSave = true;
@@ -331,21 +343,58 @@ export function createStateClient({
   }
 
   const idle = () => !dirty && !writing;
+  // Wake everyone waiting for the client to be idle (after a PUT lands with nothing else waiting).
+  function wakeIdle() {
+    if (!idle() || !idleWaiters.length) return;
+    const waiting = idleWaiters;
+    idleWaiters = [];
+    for (const resolve of waiting) resolve();
+  }
+  /** Resolves once nothing is waiting to be saved and no PUT is on its way (now, if so already). */
+  function whenIdle() {
+    return idle() ? Promise.resolve() : new Promise((resolve) => idleWaiters.push(resolve));
+  }
   /**
    * The server's copy, handed to apply(state) to replace this tab's, but only when nothing is
    * waiting to be saved, before the GET and in the instant it is applied; only when nothing changed
    * here while the GET was out (not even a change already saved: the answer wouldn't have it); and
-   * only when no reload that went out later has applied its answer.
+   * only when no reload that went out later has applied its answer. Skipped or dropped because of a
+   * change here, it sets `missed`, so the page can reload once more when the client is idle.
    */
   async function reload(apply = () => {}) {
-    if (!canSave || !idle()) return { ok: false };
+    if (!canSave) return { ok: false };
+    if (!idle()) {
+      missed = true;
+      return { ok: false };
+    }
     const take = reloads.start();
     const editsBefore = edits;
     const r = await peek();
-    if (!r.ok || !idle() || edits !== editsBefore || !take()) return { ok: false };
+    if (!r.ok) return { ok: false };
+    if (!idle() || edits !== editsBefore) {
+      missed = true;
+      return { ok: false };
+    }
+    if (!take()) return { ok: false };
+    missed = false;
     base = countersOf(r.state);
     apply(r.state);
     return r;
+  }
+
+  /**
+   * Catching up: reload(apply) once the first load has worked; until then (the server was down as
+   * the page opened, or the read failed), load() again and hand its state to apply, so the page
+   * stops working from a blank state and starts saving. { ok, loaded } (loaded: this was the first
+   * good read).
+   */
+  async function catchUp(apply = () => {}) {
+    if (canSave) return reload(apply);
+    const r = await load();
+    if (!r.ok) return { ok: false };
+    missed = false;
+    apply(r.state);
+    return { ok: true, loaded: true, state: r.state };
   }
 
   function save() {
@@ -407,6 +456,7 @@ export function createStateClient({
       } finally {
         writing = false;
         running = null;
+        wakeIdle();
       }
     })();
     return running;
@@ -414,6 +464,7 @@ export function createStateClient({
 
   /** Stops for good: no more saves or retries (a test's tab, or a page being torn down). */
   function dispose() {
+    disposed = true;
     canSave = false;
     clearTimeout(timer);
     timer = null;
@@ -426,6 +477,7 @@ export function createStateClient({
     timer = null;
     pending = false;
     dirty = false;
+    wakeIdle();
     // Count from the last confirmed value: if a PUT still on its way lands too, the server's
     // high-water mark for this tab stops its XP being added twice.
     const { body, sent } = bodyOf(getState(), base);
@@ -451,9 +503,15 @@ export function createStateClient({
     flushOnExit,
     peek,
     reload,
+    catchUp,
+    whenIdle,
     dispose,
     get canSave() {
       return canSave;
+    },
+    /** The last reload was skipped or dropped because of a change here; reload once more when idle. */
+    get missed() {
+      return missed;
     },
     get dirty() {
       return dirty;

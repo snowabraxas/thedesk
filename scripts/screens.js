@@ -344,7 +344,7 @@ async function waitTv(page, want, step) {
 // covered by another tag, a badge, the TV's mark or Wila's orb (sampled every 2px with
 // elementFromPoint; the transparent hotspot buttons don't count, they hide nothing). Text pushed off
 // the screen's edge is only a warning (N6's label clipping). Always: while the TV's mark and tag both
-// show, they keep at least 2px apart.
+// show, they keep at least 2px apart. allTags: the mark's ring (2px) touches no tag, badge or Wila's orb.
 async function checkTagLayout(page, step, { allTags }) {
   const style = await page.addStyleTag({ content: '#hotspots .hs{pointer-events:none!important}#hotspots .hs .tag,#hotspots .hs .badge,#hotspots .hs .bmark{pointer-events:auto!important}' });
   let r;
@@ -369,18 +369,25 @@ async function checkTagLayout(page, step, { allTags }) {
       const tv = document.querySelector(sel);
       const tag = tv.querySelector('.tag'), mark = tv.querySelector('.bmark');
       const shows = el => Number(getComputedStyle(el).opacity) > 0.5;
+      const apart = (a, b) => Math.max(a.left - b.right, b.left - a.right, a.top - b.bottom, b.top - a.bottom);
       let gap = null;
-      if (shows(tag) && shows(mark)) {
-        const t = tag.getBoundingClientRect(), m = mark.getBoundingClientRect();
-        gap = Math.max(m.left - t.right, t.left - m.right, m.top - t.bottom, t.top - m.bottom);
+      const touching = [];
+      if (shows(mark)) {
+        const m = mark.getBoundingClientRect();
+        if (shows(tag)) gap = apart(m, tag.getBoundingClientRect());
+        const ring = { left: m.left - 2, right: m.right + 2, top: m.top - 2, bottom: m.bottom + 2 };
+        if (allTags) for (const el of document.querySelectorAll('#hotspots .hs .tag, #hotspots .hs .badge, .wila')) {
+          if (apart(ring, el.getBoundingClientRect()) < 1) touching.push(el.closest('.hs')?.dataset.id || 'Wila');
+        }
       }
-      return { covered, clipped, gap };
+      return { covered, clipped, gap, touching };
     }, { sel: TV, allTags });
   } finally {
     await style.evaluate(el => el.remove());
   }
   if (r.covered.length) throw new ShotError(`${step}: a tag's text is covered: ${r.covered.join('; ')}.`);
   if (r.gap !== null && r.gap < 2) throw new ShotError(`${step}: the TV's tag and mark touch (${r.gap.toFixed(1)}px apart).`);
+  if (r.touching.length) throw new ShotError(`${step}: the breaking mark's ring touches ${r.touching.join(', ')}.`);
   if (r.clipped.length) console.warn(`  (warning) ${step}: tag text runs off the screen: ${r.clipped.join(', ')} (N6).`);
 }
 

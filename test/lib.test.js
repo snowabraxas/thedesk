@@ -974,6 +974,100 @@ describe('createStateClient', () => {
       assert.deepEqual(A.S.notes.map((n) => n.id), ['from-the-other-tab'], 'not set back');
     });
 
+    test('N5 closing check: catchUp after a failed first load loads the state, hands it over and starts saving', async () => {
+      // The page opened while the server was down: everything after must not work from a blank state.
+      const srv = memoryServer({ xp: 30, notes: [{ id: 'kept' }] });
+      srv.down = true;
+      const A = tab(srv);
+      const first = await A.client.load();
+      A.S = first.state;
+      assert.equal(first.ok, false);
+      assert.equal(A.client.canSave, false);
+      const apply = (fresh) => { A.S = fresh; };
+      assert.deepEqual(await A.client.catchUp(apply), { ok: false }, 'still down: nothing handed over');
+      assert.deepEqual(A.S.notes, []);
+      srv.down = false;
+      const r = await A.client.catchUp(apply);
+      assert.equal(r.ok, true);
+      assert.equal(r.loaded, true);
+      assert.deepEqual(A.S.notes.map((n) => n.id), ['kept']);
+      assert.equal(A.client.canSave, true);
+      A.S.xp += 10;
+      A.client.save();
+      await A.client.flush();
+      assert.equal(srv.puts.at(-1)._sync.xp, 30, 'counts from the XP it loaded');
+      srv.value = { ...srv.value, notes: [{ id: 'kept' }, { id: 'later' }] };
+      await A.client.catchUp(apply);
+      assert.deepEqual(A.S.notes.map((n) => n.id), ['kept', 'later'], 'from then on catchUp is reload');
+    });
+
+    test('N5 closing check: a disposed client never comes back to life through catchUp', async () => {
+      const srv = memoryServer({ xp: 0 });
+      srv.down = true;
+      const A = tab(srv);
+      await A.client.load();
+      A.client.dispose();
+      srv.down = false;
+      let applied = false;
+      assert.deepEqual(await A.client.catchUp(() => { applied = true; }), { ok: false });
+      assert.equal(applied, false);
+      assert.equal(A.client.canSave, false);
+    });
+
+    test('N5 closing check: a GET that never answers fails after the timeout, so a catch-up round ends', async () => {
+      let gets = 0;
+      // A server that never answers, but stops when the request is aborted, as fetch does.
+      const fetchFn = (url, opts = {}) => {
+        gets++;
+        return new Promise((resolve, reject) => opts.signal?.addEventListener('abort', () => reject(opts.signal.reason)));
+      };
+      const A = tab(memoryServer(), { fetchFn, timeout: 40 });
+      const started = Date.now();
+      const r = await A.client.load();
+      assert.equal(r.ok, false);
+      assert.ok(Date.now() - started < 2000, 'gave up quickly');
+      assert.deepEqual(await A.client.catchUp(() => {}), { ok: false });
+      assert.equal(gets, 2);
+    });
+
+    test('N5 closing check: a reload skipped or dropped because of a change here is marked missed until one applies', async () => {
+      const srv = memoryServer({ xp: 0, notes: [] });
+      const A = tab(srv);
+      A.S = (await A.client.load()).state;
+      const apply = (fresh) => { A.S = fresh; };
+      assert.equal(A.client.missed, false);
+      A.S.notes.push({ id: 'mine' });
+      A.client.save();
+      assert.deepEqual(await A.client.reload(apply), { ok: false });
+      assert.equal(A.client.missed, true, 'skipped: a change was waiting');
+      let woke = false;
+      const idle = A.client.whenIdle().then(() => { woke = true; });
+      await settle();
+      assert.equal(woke, false, 'not idle while the change waits');
+      await A.client.flush();
+      await idle;
+      assert.equal(woke, true, 'idle once the PUT has landed');
+      srv.value = { ...srv.value, notes: [{ id: 'mine' }, { id: 'other-tab' }] };
+      assert.equal((await A.client.reload(apply)).ok, true);
+      assert.equal(A.client.missed, false, 'the retry applied');
+      assert.deepEqual(A.S.notes.map((n) => n.id), ['mine', 'other-tab']);
+      // Dropped after the GET: also missed.
+      const gets = heldGets(srv);
+      const B = tab(srv, { fetchFn: gets.fetchFn });
+      const loading = B.client.load();
+      gets.held.shift()();
+      B.S = (await loading).state;
+      const pending = B.client.reload((fresh) => { B.S = fresh; });
+      await settle();
+      B.S.notes.push({ id: 'b' });
+      B.client.save();
+      await B.client.flush();
+      gets.held.shift()();
+      await pending;
+      assert.equal(B.client.missed, true);
+      assert.equal(await Promise.race([B.client.whenIdle().then(() => 'idle'), settle().then(() => 'waiting')]), 'idle', 'already idle: resolves at once');
+    });
+
     test('N5: overlapping reloads answering in order both apply, the newer last', async () => {
       const srv = memoryServer({ xp: 0, notes: [] });
       const gets = heldGets(srv);

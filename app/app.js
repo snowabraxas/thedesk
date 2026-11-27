@@ -2,9 +2,9 @@
 // Snow's reads, saves, folders, notes, XP and badges live on the local server
 // (GET and PUT /api/state); the edition comes from GET /api/feed.
 import {
-  PHASE_LABEL, WEEK_GOAL, BADGES, articlesFor, autoPhase, awardText, blank, cnt, createStateClient, dayKey, esc, fmtDate, fmtDay,
+  GET_TIMEOUT, PHASE_LABEL, WEEK_GOAL, BADGES, articlesFor, autoPhase, awardText, blank, cnt, createStateClient, dayKey, esc, fmtDate, fmtDay,
   freshBadges, level as levelFor, mentorLine, moon, moonPath, readsThisWeek as readsSince, safeUrl,
-  readArticle, streak as streakOf, themeScores as scoresFor, uid, wilaLine,
+  readArticle, streak as streakOf, themeScores as scoresFor, timeoutSignal, uid, wilaLine,
 } from './lib.js';
 import { createNewsPage } from './news.js';
 import { createRefresher, readSignals, tvLook } from './tv-lib.js';
@@ -79,12 +79,14 @@ async function loadState() {
 }
 // Another tab may have changed things since this one loaded: pick up the saved state when nothing
 // here is waiting to be saved. reload hands it over only in that case, checked in the same instant,
-// so a change made while the GET was out is never thrown away. Returns whether anything changed.
+// so a change made while the GET was out is never thrown away. If the first load failed (the server
+// was down as the page opened), catchUp loads it now instead, so the page stops working from a blank
+// state. Returns whether anything changed.
 // Called when the feed or News opens, when the tab comes back into view or focus, and before paying.
 async function reloadState() {
   if (!ready) return false;
   const before = JSON.stringify(S);
-  await store.reload((fresh) => { S = fresh; });
+  await store.catchUp((fresh) => { S = fresh; });
   return JSON.stringify(S) !== before;
 }
 // Redraw the feed without losing the keyboard's place (the buttons are drawn again).
@@ -103,26 +105,44 @@ function keepFocus(draw) {
 // (createRefresher): a tab return fires visibilitychange and focus, and the second shares the first;
 // opening the room starts a fresh round (force) and the older round's answer is dropped. news.js and
 // the state client also use only the newest answer when fetches overlap, so a slow old answer can't
-// bring back a mark Snow just cleared.
+// bring back a mark Snow just cleared. A state whose first load failed is loaded again (catchUp), and
+// an empty Product Feed edition fetched again, so a page opened while the server was down recovers.
+const busy = () => editing !== null || !$('#drawer').hidden;
 async function catchUpRound() {
-  const busy = editing !== null || !$('#drawer').hidden;
-  const [feedChanged] = await Promise.all([busy ? false : reloadState(), $('#feed').hidden ? news.refresh({ xp: false }) : news.sync()]);
-  return feedChanged;
+  const [feedChanged, , gotFeed] = await Promise.all([
+    busy() ? false : reloadState(),
+    $('#feed').hidden ? news.refresh({ xp: false }) : news.sync(),
+    feed.articles.length ? false : loadFeed(),
+  ]);
+  if (store.missed || news.missed()) retryWhenIdle();
+  return feedChanged || gotFeed;
 }
+// Checked again at drawing time: a rename or the notes drawer may have started while the round was
+// out. Skipping is enough, as finishing the rename and closing the drawer both redraw the feed.
 function drawCaughtUp(feedChanged) {
-  if (!$('#feed').hidden) { if (feedChanged) keepFocus(renderFeed); }
+  if (!$('#feed').hidden) { if (feedChanged && !busy()) keepFocus(renderFeed); }
   else if (!$('#room').hidden) renderRoom();
+}
+// A reload skipped or dropped because Snow changed something meanwhile (the state client's `missed`):
+// one more round once both states have nothing waiting to be saved.
+let retryQueued = false;
+function retryWhenIdle() {
+  if (retryQueued) return;
+  retryQueued = true;
+  Promise.all([store.whenIdle(), news.whenIdle()]).then(() => { retryQueued = false; syncTab(); });
 }
 const catchUp = createRefresher(catchUpRound, drawCaughtUp);
 function syncTab() { if (ready) catchUp(); }
+// The Product Feed's edition. Returns whether it has articles (a catch-up round fetches it again while it has none).
 async function loadFeed() {
   try {
-    const r = await fetch(FEED_URL, { cache: 'no-store' });
+    const r = await fetch(FEED_URL, { cache: 'no-store', signal: timeoutSignal(GET_TIMEOUT) });
     if (!r.ok) throw new Error('feed ' + r.status);
     const d = await r.json();
     if (!d || typeof d !== 'object' || Array.isArray(d)) throw new Error('feed is not an object');
     feed = { ...d, articles: Array.isArray(d.articles) ? d.articles : [], themes: Array.isArray(d.themes) ? d.themes : [] };
   } catch (e) { feed = { articles: [], themes: [] }; }
+  return feed.articles.length > 0;
 }
 
 /* ================= progress ================= */
