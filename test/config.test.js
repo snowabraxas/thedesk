@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { describe, test } from 'node:test';
-import { DEFAULT_PORT, expandHome, feedPath, resolveDeskHome, resolvePort } from '../server/config.js';
+import { DEFAULT_PORT, breakingPath, expandHome, feedPath, newsDir, newsPath, resolveDeskHome, resolvePort } from '../server/config.js';
 
 describe('config', () => {
   test('PORT defaults to 4321', () => {
@@ -33,5 +33,11 @@ describe('config', () => {
 
   test('the Product Feed lives at desks/product-feed/feed.json', () => {
     assert.equal(feedPath('/h'), path.join('/h', 'desks', 'product-feed', 'feed.json'));
+  });
+
+  test('News lives at desks/news: news.json and breaking.json', () => {
+    assert.equal(newsDir('/h'), path.join('/h', 'desks', 'news'));
+    assert.equal(newsPath('/h'), path.join('/h', 'desks', 'news', 'news.json'));
+    assert.equal(breakingPath('/h'), path.join('/h', 'desks', 'news', 'breaking.json'));
   });
 });

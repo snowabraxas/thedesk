@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, test } from 'node:test';
 import { REPO_ROOT, SAMPLE_FEED_PATH } from '../server/config.js';
+import { NPM_CLI, runNpm as runNpmScript } from './helpers/npm.js';
 
 const SCRIPT = path.join(REPO_ROOT, 'scripts', 'validate-feed.js');
 
@@ -16,28 +17,8 @@ function run(args, env = {}) {
   return spawnSync(process.execPath, [SCRIPT, ...args], { cwd: REPO_ROOT, env: cleanEnv, encoding: 'utf8' });
 }
 
-// npm's own CLI: npm sets npm_execpath while it runs `npm test`; otherwise look for npm on PATH.
-function findNpmCli() {
-  if (process.env.npm_execpath && fs.existsSync(process.env.npm_execpath)) return process.env.npm_execpath;
-  for (const dir of (process.env.PATH || '').split(path.delimiter)) {
-    try {
-      const cli = fs.realpathSync(path.join(dir, 'npm'));
-      if (cli.endsWith('.js')) return cli;
-    } catch {
-      /* not here */
-    }
-  }
-  return null;
-}
-const NPM_CLI = findNpmCli();
-
 /** `npm run validate-feed -- <args>`, typed in `cwd`, the way the agent runs it. */
-function runNpm(args, { cwd = REPO_ROOT, env = {} } = {}) {
-  const cleanEnv = { ...process.env, ...env };
-  for (const key of Object.keys(cleanEnv)) if (/^npm_/i.test(key) || key === 'INIT_CWD') delete cleanEnv[key];
-  const npmArgs = [NPM_CLI, 'run', 'validate-feed', ...(args.length ? ['--', ...args] : [])];
-  return spawnSync(process.execPath, npmArgs, { cwd, env: cleanEnv, encoding: 'utf8' });
-}
+const runNpm = (args, options) => runNpmScript('validate-feed', args, options);
 
 describe('npm run validate-feed', () => {
   let dir;
