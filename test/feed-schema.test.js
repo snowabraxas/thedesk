@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, test } from 'node:test';
 import { SAMPLE_FEED_PATH } from '../server/config.js';
-import { checkFeedFile, validateFeed } from '../server/feed-schema.js';
+import { checkFeedFile, isCalendarDate, isHttpsLink, validateFeed } from '../server/feed-schema.js';
 
 const sample = () => JSON.parse(fs.readFileSync(SAMPLE_FEED_PATH, 'utf8'));
 
@@ -40,6 +40,77 @@ describe('validateFeed', () => {
       feed.articles[0].url = url;
       assert.equal(validateFeed(feed).ok, false, `should reject ${url}`);
     }
+  });
+
+  test('rejects https:// links that are not whole links: no site, or spaces', () => {
+    const bad = {
+      'https://': 'https://',
+      'https:// evil': 'https:// evil',
+      'https://exa mple.com/post': 'https://exa mple.com/post',
+      'https://example.com/a b': 'https://example.com/a b',
+      'https://example.com/a\tb': 'https://example.com/a\\tb',
+      'https://example.com/ ': 'https://example.com/ ',
+      'https://example.com/\u0000x': 'https://example.com/\\u0000x',
+      'https://:443/': 'https://:443/',
+      'https://@/': 'https://@/',
+    };
+    for (const [url, shown] of Object.entries(bad)) {
+      const feed = sample();
+      feed.articles[2].url = url;
+      assert.deepEqual(
+        validateFeed(feed).errors,
+        [`articles[2].url: must be a whole link that starts with https://, with a site name and no spaces (got "${shown}")`],
+        `should reject ${JSON.stringify(url)}`,
+      );
+    }
+  });
+
+  test('accepts whole https:// links, including query, fragment, port and non-English site names', () => {
+    for (const url of ['https://example.com', 'https://example.com/p?q=1&r=a%20b#part', 'https://example.com:8443/x', 'https://bücher.de/', 'https://localhost/x']) {
+      const feed = sample();
+      feed.articles[0].url = url;
+      assert.deepEqual(validateFeed(feed), { ok: true, errors: [] }, url);
+    }
+  });
+
+  test('an http:// link gets one line, not two', () => {
+    const feed = sample();
+    feed.articles[0].url = 'http:// evil';
+    assert.deepEqual(validateFeed(feed).errors, ['articles[0].url: must start with https:// (got "http:// evil")']);
+  });
+
+  test('rejects an edition date that is not on the calendar', () => {
+    for (const edition of ['2026-02-30', '2026-13-45', '2026-02-29', '2026-04-31', '2026-00-10', '2026-01-00', '1900-02-29']) {
+      const feed = sample();
+      feed.edition = edition;
+      assert.deepEqual(validateFeed(feed).errors, [`edition: must be a real calendar date like YYYY-MM-DD (got "${edition}")`], edition);
+    }
+  });
+
+  test('accepts real edition dates, leap days included', () => {
+    for (const edition of ['2026-11-27', '2028-02-29', '2000-02-29', '2026-12-31', '2026-01-01']) {
+      const feed = sample();
+      feed.edition = edition;
+      assert.deepEqual(validateFeed(feed), { ok: true, errors: [] }, edition);
+    }
+  });
+
+  test('rejects an article date that is not on the calendar; an empty date is still fine', () => {
+    const feed = sample();
+    feed.articles[0].date = '2026-13-45';
+    feed.articles[1].date = '2026-02-30';
+    feed.articles[2].date = '';
+    feed.articles[3].date = '2028-02-29';
+    assert.deepEqual(validateFeed(feed).errors, [
+      'articles[0].date: must be a real calendar date like YYYY-MM-DD, or empty (got "2026-13-45")',
+      'articles[1].date: must be a real calendar date like YYYY-MM-DD, or empty (got "2026-02-30")',
+    ]);
+  });
+
+  test('a date in the wrong shape gets the pattern line only', () => {
+    const feed = sample();
+    feed.articles[0].date = '30 Feb 2026';
+    assert.deepEqual(validateFeed(feed).errors, ['articles[0].date: must be a date like YYYY-MM-DD, or empty (got "30 Feb 2026")']);
   });
 
   test('rejects an article missing a required field', () => {
@@ -146,6 +217,29 @@ describe('validateFeed', () => {
     for (const value of [null, [], 'feed', 42, undefined]) {
       assert.deepEqual(validateFeed(value), { ok: false, errors: ['feed: must be a JSON object'] });
     }
+  });
+});
+
+describe('isCalendarDate and isHttpsLink', () => {
+  test('isCalendarDate knows month lengths and leap years', () => {
+    assert.equal(isCalendarDate('2026-11-27'), true);
+    assert.equal(isCalendarDate('2024-02-29'), true);
+    assert.equal(isCalendarDate('2400-02-29'), true);
+    assert.equal(isCalendarDate('2100-02-29'), false);
+    assert.equal(isCalendarDate('2026-06-31'), false);
+    assert.equal(isCalendarDate('2026-6-30'), false);
+    assert.equal(isCalendarDate(''), false);
+    assert.equal(isCalendarDate(20261127), false);
+  });
+
+  test('isHttpsLink wants https, a site name and no spaces', () => {
+    assert.equal(isHttpsLink('https://example.com/post'), true);
+    assert.equal(isHttpsLink('http://example.com/post'), false);
+    assert.equal(isHttpsLink('https://'), false);
+    assert.equal(isHttpsLink('https:// evil'), false);
+    assert.equal(isHttpsLink('https://example.com/\n'), false);
+    assert.equal(isHttpsLink(' https://example.com'), false);
+    assert.equal(isHttpsLink(null), false);
   });
 });
 

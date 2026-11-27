@@ -1,6 +1,7 @@
 // The feed contract: checks a Product Feed edition against data/schema/feed.schema.json,
-// plus the rules JSON Schema can't express: unique article ids, unique theme ids, and every
-// theme an article uses must be in the edition's themes list.
+// plus the rules the schema's patterns don't cover: dates are real calendar days (no 2026-02-30),
+// article links are whole https:// links with a site name and no spaces, article and theme ids
+// are unique, and every theme an article uses must be in the edition's themes list.
 // Used by `npm run validate-feed` (the agent runs it) and by the server before it serves an edition.
 import fs from 'node:fs';
 import Ajv2020Module from 'ajv/dist/2020.js';
@@ -102,6 +103,50 @@ function describe(error, feed) {
   }
 }
 
+const DATE_PARTS = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+/** True for a YYYY-MM-DD that is a day on the calendar: "2028-02-29" yes, "2026-02-30" and "2026-13-45" no. */
+export function isCalendarDate(text) {
+  const m = typeof text === 'string' && DATE_PARTS.exec(text);
+  if (!m) return false;
+  const [year, month, day] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  if (month < 1 || month > 12 || day < 1) return false;
+  const leap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+  return day <= [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1];
+}
+
+/** True for a whole https:// link: it parses, names a site, and has no spaces or control characters. */
+export function isHttpsLink(text) {
+  if (typeof text !== 'string' || !text.startsWith('https://') || /[\s\u0000-\u001f\u007f]/.test(text)) return false;
+  try {
+    const url = new URL(text);
+    return url.protocol === 'https:' && url.hostname !== '';
+  } catch {
+    return false;
+  }
+}
+
+// Only values that already passed the schema's pattern are checked here, so a value is never
+// reported twice (a "27 Nov" edition or an http:// link already has its line).
+function calendarAndLinkErrors(feed) {
+  const errors = [];
+  if (typeof feed.edition === 'string' && DATE_PARTS.test(feed.edition) && !isCalendarDate(feed.edition)) {
+    errors.push(`edition: must be a real calendar date like YYYY-MM-DD (got ${show(feed.edition)})`);
+  }
+  if (!Array.isArray(feed.articles)) return errors;
+  feed.articles.forEach((article, i) => {
+    if (!article || typeof article !== 'object') return;
+    const { date, url } = article;
+    if (typeof date === 'string' && DATE_PARTS.test(date) && !isCalendarDate(date)) {
+      errors.push(`articles[${i}].date: must be a real calendar date like YYYY-MM-DD, or empty (got ${show(date)})`);
+    }
+    if (typeof url === 'string' && url.startsWith('https://') && !isHttpsLink(url)) {
+      errors.push(`articles[${i}].url: must be a whole link that starts with https://, with a site name and no spaces (got ${show(url)})`);
+    }
+  });
+  return errors;
+}
+
 // Names the second (and later) use of an id: "articles[3].id: duplicate id "a1" (also used by articles[0])".
 function duplicateIds(list, listName) {
   if (!Array.isArray(list)) return [];
@@ -149,7 +194,12 @@ export function validateFeed(feed) {
       if (!errors.includes(line)) errors.push(line);
     }
   }
-  errors.push(...duplicateIds(feed.themes, 'themes'), ...duplicateIds(feed.articles, 'articles'), ...unknownThemeErrors(feed));
+  errors.push(
+    ...calendarAndLinkErrors(feed),
+    ...duplicateIds(feed.themes, 'themes'),
+    ...duplicateIds(feed.articles, 'articles'),
+    ...unknownThemeErrors(feed),
+  );
   return { ok: errors.length === 0, errors };
 }
 

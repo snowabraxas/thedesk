@@ -30,6 +30,16 @@ describe('app/style.css', () => {
     };
     for (const [what, selector] of Object.entries(needed)) assert.ok(wraps.has(selector), `${what} (${selector})`);
   });
+
+  test('the feed rise animation lets go of its transform when it ends, so the toast and drawer stay on screen', () => {
+    // A fill that holds the end keyframe keeps #feed the containing block of its position:fixed
+    // children (#toast2, #drawer, #scrim): they would land at the bottom of the page.
+    const css = read('style.css').replace(/\/\*[\s\S]*?\*\//g, '');
+    const feedRules = [...css.matchAll(/(?:^|})\s*\.feed\s*\{([^{}]*)\}/g)].map((m) => m[1]);
+    const animations = feedRules.flatMap((body) => [...body.matchAll(/animation\s*:\s*([^;}]*)/g)].map((m) => m[1]));
+    assert.ok(animations.some((a) => /\brise\b/.test(a)), 'the feed still rises in');
+    for (const a of animations) assert.doesNotMatch(a, /\b(both|forwards)\b/, `.feed animation: ${a}`);
+  });
 });
 
 describe('app/app.js', () => {

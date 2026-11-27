@@ -112,6 +112,27 @@ describe('createFeedLoader', () => {
     assert.match(r.errors[0], /\n {2}- articles\[0\]\.url: must start with https:\/\/ \(got "http:\/\/example\.com\/post"\)/);
   });
 
+  test('an impossible edition date or a link with no site is not served; the last good edition stays', async () => {
+    const h = deskHome();
+    h.writeFeed(edition('2026-11-27'));
+    const r = recorder();
+    const feeds = createFeedLoader(h.home, r);
+    assert.equal((await feeds.load()).source, 'live');
+
+    h.writeFeed(edition('2026-02-30'));
+    let shown = await feeds.load();
+    assert.equal(shown.source, 'last-good');
+    assert.equal(shown.feed.edition, '2026-11-27');
+    assert.match(r.errors[0], /edition: must be a real calendar date like YYYY-MM-DD \(got "2026-02-30"\)/);
+
+    const noSite = edition('2026-11-28');
+    noSite.articles[0].url = 'https://';
+    h.writeFeed(noSite);
+    shown = await feeds.load();
+    assert.equal(shown.source, 'last-good');
+    assert.match(r.errors[1], /articles\[0\]\.url: must be a whole link that starts with https:\/\//);
+  });
+
   test('broken JSON, a file over 1 MB and a folder in its place are refused the same way', async () => {
     const h = deskHome();
     h.writeFeed(edition('2026-11-27'));
