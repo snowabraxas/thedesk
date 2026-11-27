@@ -12,7 +12,13 @@
     "start": "node server/index.js",
     "test": "TZ=America/Toronto node --test 'test/**/*.test.js'",
     "validate-feed": "node scripts/validate-feed.js",
-    "screens": "node scripts/screens.js"
+    "screens": "node scripts/screens.js",
+    "service:install": "node scripts/service.js install",
+    "service:uninstall": "node scripts/service.js uninstall",
+    "service:start": "node scripts/service.js start",
+    "service:stop": "node scripts/service.js stop",
+    "service:restart": "node scripts/service.js restart",
+    "service:status": "node scripts/service.js status"
   },
   "dependencies": {
     "ajv": "^8.20.0"

@@ -11,6 +11,12 @@ export const SAMPLE_FEED_PATH = path.join(REPO_ROOT, 'prototype', 'feed.json');
 export const DEFAULT_PORT = 4321;
 export const HOST = '127.0.0.1';
 
+// The always-on service (scripts/service.js): a per-user launchd agent.
+export const SERVICE_LABEL = 'local.thedesk.server';
+export function servicePlistPath(home = os.homedir()) {
+  return path.join(home, 'Library', 'LaunchAgents', `${SERVICE_LABEL}.plist`);
+}
+
 // Expands a leading "~" so DESK_HOME=~/agent-house works even when no shell expanded it
 // (for example inside a launchd plist).
 export function expandHome(p, home = os.homedir()) {

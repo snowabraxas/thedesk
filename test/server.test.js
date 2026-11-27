@@ -7,7 +7,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, before, describe, test } from 'node:test';
 import { REPO_ROOT } from '../server/config.js';
-import { createServer, isAllowedHost } from '../server/index.js';
+import { createServer, isAllowedHost, portInUseMessage } from '../server/index.js';
 
 // Raw http.request so tests can send any Host header (fetch won't let us).
 function request(port, { method = 'GET', path: urlPath = '/', host = `localhost:${port}`, setHost = true } = {}) {
@@ -202,6 +202,112 @@ describe('running server/index.js', () => {
     } finally {
       if (child.exitCode === null) child.kill('SIGKILL');
       fs.rmSync(deskHome, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('a port that is already taken', () => {
+  test('portInUseMessage says who has it and how to run alongside it', () => {
+    const base = { port: 4321, deskAnswers: false, serviceInstalled: false, isService: false };
+    assert.equal(
+      portInUseMessage({ ...base, deskAnswers: true, serviceInstalled: true }),
+      'Port 4321 is taken: The Desk is already running at http://localhost:4321, as the always-on service or in another Terminal (npm run service:status tells you which). To run this copy alongside it, use another port: PORT=4322 npm run dev',
+    );
+    assert.equal(
+      portInUseMessage({ ...base, deskAnswers: true }),
+      'Port 4321 is taken: The Desk is already running at http://localhost:4321 (npm run dev or npm start in another Terminal?). Stop that one with Ctrl+C, or use another port: PORT=4322 npm run dev',
+    );
+    assert.equal(portInUseMessage(base), 'Port 4321 is taken by another program. To run The Desk anyway, use another port: PORT=4322 npm run dev');
+    assert.match(portInUseMessage({ ...base, port: 5000 }), /PORT=5001 npm run dev/);
+    assert.match(portInUseMessage({ ...base, port: 65535 }), /PORT=65534 npm run dev/);
+    assert.match(
+      portInUseMessage({ ...base, deskAnswers: true, serviceInstalled: true, isService: true }),
+      /^The Desk service can't start: port 4321 is taken by another copy of The Desk \(npm run dev or npm start in a Terminal\?\)\. launchd tries again/,
+    );
+    assert.match(portInUseMessage({ ...base, isService: true }), /taken by another program\. launchd tries again/);
+  });
+
+  const freePort = () =>
+    new Promise((resolve) => {
+      const probe = net.createServer().listen(0, '127.0.0.1', () => {
+        const { port } = probe.address();
+        probe.close(() => resolve(port));
+      });
+    });
+
+  /** Runs server/index.js until it exits; HOME is a temp folder so the real service plist never counts. */
+  function runServer(env, { untilOutput } = {}) {
+    return new Promise((resolve, reject) => {
+      const child = spawn(process.execPath, ['server/index.js'], { cwd: REPO_ROOT, env: { ...process.env, ...env }, stdio: ['ignore', 'pipe', 'pipe'] });
+      let stdout = '';
+      let stderr = '';
+      const timer = setTimeout(() => {
+        child.kill('SIGKILL');
+        reject(new Error(`server did not finish: ${stdout}${stderr}`));
+      }, 10_000);
+      child.stdout.on('data', (d) => {
+        stdout += d;
+        if (untilOutput && stdout.includes(untilOutput)) child.kill('SIGTERM');
+      });
+      child.stderr.on('data', (d) => (stderr += d));
+      child.on('exit', (code) => {
+        clearTimeout(timer);
+        resolve({ code, stdout, stderr });
+      });
+    });
+  }
+
+  test('npm start says The Desk is already running there when it is', async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'the-desk-home-'));
+    const desk = createServer({ deskHome: path.join(home, 'agent-house'), log: { error() {}, info() {} } });
+    const port = await listen(desk);
+    try {
+      const r = await runServer({ PORT: String(port), HOME: home, DESK_HOME: path.join(home, 'agent-house') });
+      assert.equal(r.code, 1);
+      assert.match(r.stderr, new RegExp(`Port ${port} is taken: The Desk is already running at http://localhost:${port} \\(npm run dev or npm start in another Terminal\\?\\)`));
+      assert.match(r.stderr, new RegExp(`PORT=${port + 1} npm run dev`));
+
+      // With the service installed, it says it may be the service.
+      fs.mkdirSync(path.join(home, 'Library', 'LaunchAgents'), { recursive: true });
+      fs.writeFileSync(path.join(home, 'Library', 'LaunchAgents', 'local.thedesk.server.plist'), '<plist/>');
+      const r2 = await runServer({ PORT: String(port), HOME: home, DESK_HOME: path.join(home, 'agent-house') });
+      assert.equal(r2.code, 1);
+      assert.match(r2.stderr, /as the always-on service or in another Terminal \(npm run service:status tells you which\)/);
+    } finally {
+      await new Promise((resolve) => desk.close(resolve));
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test('npm start says another program has the port when it is not The Desk', async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'the-desk-home-'));
+    const other = net.createServer((socket) => socket.resume().end()); // reads, then hangs up
+    const port = await listen(other);
+    try {
+      const r = await runServer({ PORT: String(port), HOME: home, DESK_HOME: path.join(home, 'agent-house') });
+      assert.equal(r.code, 1);
+      assert.match(r.stderr, new RegExp(`Port ${port} is taken by another program\\. To run The Desk anyway, use another port`));
+    } finally {
+      await new Promise((resolve) => other.close(resolve));
+      fs.rmSync(home, { recursive: true, force: true });
+    }
+  });
+
+  test('started with DESK_LOG (as the service is), a log over 5 MB is rotated first', async () => {
+    const home = fs.mkdtempSync(path.join(os.tmpdir(), 'the-desk-home-'));
+    const log = path.join(home, 'the-desk.log');
+    fs.writeFileSync(log, 'z'.repeat(5 * 1024 * 1024 + 1));
+    try {
+      const r = await runServer(
+        { PORT: String(await freePort()), HOME: home, DESK_HOME: path.join(home, 'agent-house'), DESK_LOG: log },
+        { untilOutput: 'running at' },
+      );
+      assert.equal(r.code, 0, r.stderr);
+      assert.match(r.stdout, /the log passed 5 MB, so its older lines moved to .*the-desk\.log\.1/);
+      assert.equal(fs.statSync(log).size, 0);
+      assert.equal(fs.statSync(`${log}.1`).size, 5 * 1024 * 1024 + 1);
+    } finally {
+      fs.rmSync(home, { recursive: true, force: true });
     }
   });
 });

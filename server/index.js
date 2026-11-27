@@ -7,8 +7,10 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { APP_DIR, HOST, SAMPLE_FEED_PATH, resolveDeskHome, resolvePort, statePath } from './config.js';
+import { APP_DIR, HOST, SAMPLE_FEED_PATH, expandHome, resolveDeskHome, resolvePort, servicePlistPath, statePath } from './config.js';
 import { createFeedLoader } from './feed.js';
+import { rotateLog } from './log-file.js';
+import { probeDesk } from './probe.js';
 import { CorruptStateError, MAX_STATE_BYTES, checkState, createStateStore } from './state-store.js';
 
 const MIME = {
@@ -258,7 +260,44 @@ export function createServer({ deskHome = resolveDeskHome(), appDir = APP_DIR, l
   return server;
 }
 
-/** Starts The Desk on 127.0.0.1:PORT (default 4321). Used by `npm start` and `npm run dev`. */
+/**
+ * What to say when PORT is taken. The always-on service (scripts/service.js) runs on 4321, so a
+ * second copy started for development needs another port.
+ * @param {{ port: number, deskAnswers: boolean, serviceInstalled: boolean, isService: boolean }} facts
+ *   deskAnswers: The Desk itself answers on that port; serviceInstalled: the launchd plist exists;
+ *   isService: this process was started by launchd (DESK_SERVICE=1).
+ */
+export function portInUseMessage({ port, deskAnswers, serviceInstalled, isService }) {
+  const otherPort = port < 65535 ? port + 1 : port - 1;
+  const elsewhere = `use another port: PORT=${otherPort} npm run dev`;
+  if (isService) {
+    const holder = deskAnswers ? 'another copy of The Desk (npm run dev or npm start in a Terminal?)' : 'another program';
+    return `The Desk service can't start: port ${port} is taken by ${holder}. launchd tries again every few seconds, so it starts by itself once that one stops.`;
+  }
+  if (deskAnswers && serviceInstalled) {
+    return `Port ${port} is taken: The Desk is already running at http://localhost:${port}, as the always-on service or in another Terminal (npm run service:status tells you which). To run this copy alongside it, ${elsewhere}`;
+  }
+  if (deskAnswers) {
+    return `Port ${port} is taken: The Desk is already running at http://localhost:${port} (npm run dev or npm start in another Terminal?). Stop that one with Ctrl+C, or ${elsewhere}`;
+  }
+  return `Port ${port} is taken by another program. To run The Desk anyway, ${elsewhere}`;
+}
+
+async function explainPortInUse(port, env) {
+  const desk = await probeDesk(port, { timeoutMs: 1500 });
+  let serviceInstalled = false;
+  try {
+    serviceInstalled = fs.existsSync(servicePlistPath());
+  } catch {
+    /* no home folder: no service */
+  }
+  return portInUseMessage({ port, deskAnswers: desk.ok, serviceInstalled, isService: env.DESK_SERVICE === '1' });
+}
+
+/**
+ * Starts The Desk on 127.0.0.1:PORT (default 4321). Used by `npm start`, `npm run dev` and the
+ * always-on service. When DESK_LOG names the service's log file, a log over 5 MB is rotated first.
+ */
 export function start(env = process.env) {
   let port;
   try {
@@ -268,11 +307,16 @@ export function start(env = process.env) {
     process.exit(1);
   }
   const deskHome = resolveDeskHome(env);
+  const logFile = (env.DESK_LOG || '').trim();
+  if (logFile) {
+    const old = rotateLog(path.resolve(expandHome(logFile)));
+    if (old) console.log(`The Desk: the log passed 5 MB, so its older lines moved to ${old}.`);
+  }
   const server = createServer({ deskHome });
 
-  server.on('error', (err) => {
+  server.on('error', async (err) => {
     if (err.code === 'EADDRINUSE') {
-      console.error(`Port ${port} is already in use. Is The Desk already running?`);
+      console.error(await explainPortInUse(port, env));
     } else {
       console.error('The Desk could not start:', err.message);
     }
