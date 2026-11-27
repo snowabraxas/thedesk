@@ -1,0 +1,22 @@
+{
+  "name": "the-desk",
+  "version": "0.1.0",
+  "description": "The illustrated home of Snow's Agent House.",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "dev": "node --watch server/index.js",
+    "start": "node server/index.js",
+    "test": "TZ=America/Toronto node --test 'test/**/*.test.js'",
+    "validate-feed": "node scripts/validate-feed.js"
+  },
+  "dependencies": {
+    "ajv": "^8.20.0"
+  },
+  "devDependencies": {
+    "playwright-core": "^1.65.1"
+  }
+}
