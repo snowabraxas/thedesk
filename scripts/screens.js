@@ -17,8 +17,9 @@
 //                                             (scripts/screens-home.js); a state the Desk can't show is skipped.
 //   <label>-tv-<state>-<phase>-1440-closeup.png        the TV close up, at twice the pixels
 //   <label>-tv-<state>-morning-1440-closeup-focus.png  the same with keyboard focus, so its tag shows
-//   <label>-tv-b-breaking-optionB-<phase>-<width>.png  (+ closeup) the breaking mark's option B, for
-//                                             Snow to choose (a lower third on the screen; see TV_OPTION_B)
+//                                             In every TV shot on the phone, no tag's text may be covered
+//                                             by another tag, a badge, the mark or Wila's orb, and the TV's
+//                                             tag and mark must not touch (also checked on the focus shot).
 //
 // --only=tv (or any of room, feed, news, tv, comma separated) shoots just those sections.
 //
@@ -301,15 +302,6 @@ const contextOptions = vp => ({
 // ---------- the TV in the room (N5) ----------
 
 const TV = '#hotspots .hs.tv';
-// Option B for the breaking mark, for Snow to compare with the one built in style.css (A: a small
-// rosy "on air" badge on the TV's top edge). B is a lower third across the bottom of the screen, the
-// way breaking news looks on TV. Only these shots use it; once Snow picks, the winner lives in
-// style.css and this goes.
-const TV_OPTION_B = `
-.hs.tv .bmark{left:9%;top:61%;width:37%;height:15%;translate:none;aspect-ratio:auto;border-radius:2px 2px 7px 7px;background:var(--rosy-ink);color:var(--beige);box-shadow:0 0 0 1px rgba(243,205,198,.6),0 0 10px rgba(211,150,140,.6)}
-.hs.tv .bmark svg{display:none}
-.hs.tv .bmark::after{content:"BREAKING";font:600 clamp(6px,.62vw,9px)/1 var(--font-display);letter-spacing:.08em}
-@media (max-width:720px){.hs.tv .bmark::after{content:none}}`;
 
 const tvState = page => page.evaluate(sel => {
   const b = document.querySelector(sel);
@@ -332,6 +324,50 @@ async function waitTv(page, want, step) {
   } catch {
     throw new ShotError(`${step}: the TV never showed ${JSON.stringify(want)} (it shows ${JSON.stringify(await tvState(page))}).`);
   }
+}
+
+// The labels must stay readable. allTags (a touch screen, where every tag shows): no tag's text may be
+// covered by another tag, a badge, the TV's mark or Wila's orb (sampled every 2px with
+// elementFromPoint; the transparent hotspot buttons don't count, they hide nothing). Text pushed off
+// the screen's edge is only a warning (N6's label clipping). Always: while the TV's mark and tag both
+// show, they keep at least 2px apart.
+async function checkTagLayout(page, step, { allTags }) {
+  const style = await page.addStyleTag({ content: '#hotspots .hs{pointer-events:none!important}#hotspots .hs .tag,#hotspots .hs .badge,#hotspots .hs .bmark{pointer-events:auto!important}' });
+  let r;
+  try {
+    r = await page.evaluate(({ sel, allTags }) => {
+      const covered = [], clipped = [];
+      if (allTags) for (const tag of document.querySelectorAll('#hotspots .hs .tag')) {
+        const range = document.createRange();
+        range.selectNodeContents(tag);
+        const b = range.getBoundingClientRect();
+        const by = new Set();
+        let off = 0;
+        for (let y = b.top + 2; y < b.bottom - 1; y += 2) for (let x = b.left + 1; x < b.right - 1; x += 2) {
+          if (x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) { off++; continue; }
+          const el = document.elementFromPoint(x, y);
+          if (el && el !== tag && !tag.contains(el) && el.closest('.tag, .badge, .bmark, .wila')) by.add(el.closest('.hs')?.dataset.id || 'Wila');
+        }
+        const id = tag.parentElement.dataset.id;
+        if (by.size) covered.push(`${id} under ${[...by].join(', ')}`);
+        if (off) clipped.push(id);
+      }
+      const tv = document.querySelector(sel);
+      const tag = tv.querySelector('.tag'), mark = tv.querySelector('.bmark');
+      const shows = el => Number(getComputedStyle(el).opacity) > 0.5;
+      let gap = null;
+      if (shows(tag) && shows(mark)) {
+        const t = tag.getBoundingClientRect(), m = mark.getBoundingClientRect();
+        gap = Math.max(m.left - t.right, t.left - m.right, m.top - t.bottom, t.top - m.bottom);
+      }
+      return { covered, clipped, gap };
+    }, { sel: TV, allTags });
+  } finally {
+    await style.evaluate(el => el.remove());
+  }
+  if (r.covered.length) throw new ShotError(`${step}: a tag's text is covered: ${r.covered.join('; ')}.`);
+  if (r.gap !== null && r.gap < 2) throw new ShotError(`${step}: the TV's tag and mark touch (${r.gap.toFixed(1)}px apart).`);
+  if (r.clipped.length) console.warn(`  (warning) ${step}: tag text runs off the screen: ${r.clipped.join(', ')} (N6).`);
 }
 
 // Press the TV, as Snow would; it zooms in and opens the News desk.
@@ -369,22 +405,24 @@ async function shootTv(context, vp, phase, closeups) {
   await page.waitForFunction(() => document.querySelector('#streakChip').textContent.trim() !== '');
   const out = [];
 
-  const shots = async (extra = '') => {
+  const shots = async () => {
     const s = await tvState(page);
     checkTvLabel(s, step);
-    const name = `${label}-tv-${tvStateName(s)}${extra}-${phase}-${vp.width}`;
+    const name = `${label}-tv-${tvStateName(s)}-${phase}-${vp.width}`;
     await settle(page, step, ROOM_FONTS);
     w.check(step);
+    await checkTagLayout(page, `${step} ${tvStateName(s)}`, { allTags: vp.hasTouch });
     out.push(await shoot(page, `${name}.png`));
     if (!closeups) return;
     const r = await page.locator(TV).boundingBox();
     const clip = { x: Math.max(0, r.x - 120), y: Math.max(0, r.y - 100), width: r.width + 240, height: r.height + 170 };
     out.push(await shoot(page, `${name}-closeup.png`, { clip }));
-    if (phase !== 'morning' || extra) return;
+    if (phase !== 'morning') return;
     // Keyboard focus shows the tag (the same words a screen reader hears).
     await page.keyboard.press('Shift');
     await page.locator(TV).focus();
     if (!(await page.locator(TV).evaluate(el => el.matches(':focus-visible')))) throw new ShotError(`${step}: the TV took focus without a visible focus ring.`);
+    await checkTagLayout(page, `${step} ${tvStateName(s)} focus`, { allTags: false });
     out.push(await shoot(page, `${name}-closeup-focus.png`, { clip }));
     await page.evaluate(() => document.activeElement?.blur());
   };
@@ -393,9 +431,6 @@ async function shootTv(context, vp, phase, closeups) {
   if (!s) throw new ShotError(`${step}: the room has no TV (${TV}).`);
   if (s.breaking) {
     await shots();
-    const style = await page.addStyleTag({ content: TV_OPTION_B });
-    await shots('-optionB');
-    await style.evaluate(el => el.remove());
     // Dismiss the banner on the News page, then come back: the mark is gone, the glow stays.
     await openNewsFromTv(page, step);
     await page.locator('#newsDismiss').click();

@@ -7,7 +7,7 @@ import {
   streak as streakOf, themeScores as scoresFor, uid, wilaLine,
 } from './lib.js';
 import { createNewsPage } from './news.js';
-import { readSignals, tvLook } from './tv-lib.js';
+import { createRefresher, readSignals, tvLook } from './tv-lib.js';
 
 /* ================= constants ================= */
 const FEED_URL = '/api/feed';
@@ -100,12 +100,16 @@ let preview = null;
 const phase = () => preview || autoPhase();
 
 /* ================= the room ================= */
-// The TV (News) also has a screen that can glow and a corner for the breaking mark (N5).
-const TV_PARTS = `<span class="screen" aria-hidden="true"></span><span class="bmark" aria-hidden="true">${ICON.onAir}</span>`;
+// The TV (News) also has a screen that can glow and a breaking mark (N5). Its tag has a full label and a
+// short one for touch screens, where every tag shows at once (style.css picks). The mark comes after the
+// tag, so the tag's soft shadow falls behind the mark instead of dimming its icon.
+const TV_SCREEN = '<span class="screen" aria-hidden="true"></span>';
+const TV_TAG = '<span class="tfull"></span><span class="tshort"></span>';
+const TV_MARK = `<span class="bmark" aria-hidden="true">${ICON.onAir}</span>`;
 function buildHotspots() {
   $('#hotspots').innerHTML = OBJECTS.map(o =>
     `<button class="hs${o.id === 'news' ? ' tv' : ''}" data-id="${o.id}" style="left:${o.l}%;top:${o.t}%;width:${o.w}%;height:${o.h}%" aria-label="${esc(o.name)}">
-      <span class="glow"></span>${o.id === 'news' ? TV_PARTS : ''}<span class="tag" ${o.tagIn ? 'style="bottom:auto;top:6%"' : ''}></span></button>`).join('');
+      <span class="glow"></span>${o.id === 'news' ? TV_SCREEN : ''}<span class="tag" ${o.tagIn ? 'style="bottom:auto;top:6%"' : ''}>${o.id === 'news' ? TV_TAG : ''}</span>${o.id === 'news' ? TV_MARK : ''}</button>`).join('');
   $('#hotspots').addEventListener('click', e => {
     const b = e.target.closest('.hs'); if (!b) return;
     const o = OBJECTS.find(x => x.id === b.dataset.id);
@@ -146,7 +150,8 @@ function renderRoom() {
     b.classList.toggle('tv-breaking', isTv && tv.breaking);
     // The tag is also the button's name, so what it says (3 new, breaking story) reaches screen readers.
     const label = isFeed ? (unread ? `${o.name} · ${unread} new` : o.name) : isTv ? tv.tag : locked ? `${o.name} · level ${o.lock}` : o.name;
-    tag.textContent = label;
+    if (isTv) { tag.querySelector('.tfull').textContent = tv.tag; tag.querySelector('.tshort').textContent = tv.short; }
+    else tag.textContent = label;
     b.setAttribute('aria-label', label);
     let badge = b.querySelector('.badge');
     if (isFeed && unread) { if (!badge) { badge = document.createElement('span'); badge.className = 'badge'; b.appendChild(badge); } badge.textContent = unread; }
@@ -176,8 +181,9 @@ function route() {
 }
 // Back in the room (or back to the tab): what was read or dismissed shows at once, then the edition and
 // breaking story are fetched again (a new morning edition, a new breaking story) and the TV redraws.
-// A failed fetch keeps what was there; the room redraws either way.
-function refreshTv() { news.refresh().then(renderRoom, renderRoom); }
+// A failed fetch keeps what was there; the room redraws either way. One refresh at a time: a burst of
+// tab events shares the one running, and an older refresh's answer never draws over a newer one.
+const refreshTv = createRefresher(() => news.refresh(), renderRoom);
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && !$('#room').hidden) refreshTv(); });
 
 /* ================= the feed ================= */

@@ -26,6 +26,20 @@ function rulesFor(css, selector) {
   return out;
 }
 
+/** The inside of the first `@media <query>{...}` block (nested braces counted), or ''. */
+function mediaBlock(css, query) {
+  const clean = stripCssComments(css);
+  const start = clean.indexOf(`@media ${query}{`);
+  if (start < 0) return '';
+  let depth = 0;
+  for (let i = clean.indexOf('{', start); i < clean.length; i++) {
+    if (clean[i] === '{') depth++;
+    else if (clean[i] === '}' && --depth === 0) return clean.slice(clean.indexOf('{', start) + 1, i);
+  }
+  return '';
+}
+const pxOf = (body, prop) => { const m = body.match(new RegExp(`(?:^|;)\\s*${prop}\\s*:\\s*(-?[\\d.]+)px`)); return m ? Number(m[1]) : null; };
+
 const VOID = new Set(['meta', 'link', 'img', 'input', 'br', 'hr', 'source', 'area', 'base', 'col', 'embed', 'param', 'track', 'wbr']);
 /** The chain of ancestors (outermost first) of the element with this id in index.html, each as its simple selectors. */
 function ancestorsOf(html, id) {
@@ -199,6 +213,59 @@ describe('app/style.css', () => {
     assert.deepEqual([...selectorsWith(read('style.css'), /mix-blend-mode/)], []);
   });
 
+  test("on a touch screen, where every tag shows, the TV's tag and Language's grow away from each other", () => {
+    // The TV and Language share an edge (71.5% + 9.5% = 81%). The TV's tag is pinned to its right edge
+    // and grows left, Language's to its left edge and grows right, so they never meet whatever the words.
+    // (scripts/screens.js checks every tag's text with elementFromPoint at 390 in each TV state.)
+    const js = read('app.js');
+    const at = (id) => js.match(new RegExp(`\\{ id: '${id}', name: '[^']+', l: ([\\d.]+), t: [\\d.]+, w: ([\\d.]+)`)).slice(1).map(Number);
+    const [tvL, tvW] = at('news');
+    const [langL] = at('lang');
+    assert.equal(tvL + tvW, langL, 'the TV and Language share an edge');
+    const touch = mediaBlock(read('style.css'), '(hover:none)');
+    assert.ok(touch, 'there is a (hover:none) block');
+    const tvTag = rulesFor(touch, '.hs.tv .tag').join(';');
+    assert.match(tvTag, /left:auto/);
+    assert.ok(pxOf(tvTag, 'right') >= 0, 'pinned to the right edge');
+    assert.match(tvTag, /transform:none/);
+    const langTag = rulesFor(touch, '.hs[data-id=lang] .tag').join(';');
+    assert.ok(pxOf(langTag, 'left') >= 0, 'pinned to the left edge');
+    assert.doesNotMatch(langTag, /translate\(-50%/, 'not centred');
+  });
+
+  test('the TV shows its short label only on a touch screen, and its full label everywhere else', () => {
+    const css = read('style.css');
+    const touch = mediaBlock(css, '(hover:none)');
+    const outside = stripCssComments(css).replace(touch, '');
+    assert.match(rulesFor(outside, '.hs.tv .tag .tshort').join(';'), /display:none/);
+    assert.equal(rulesFor(outside, '.hs.tv .tag .tfull').length, 0, 'the full label shows by default');
+    assert.match(rulesFor(touch, '.hs.tv .tag .tfull').join(';'), /display:none/);
+    assert.match(rulesFor(touch, '.hs.tv .tag .tshort').join(';'), /display:inline/);
+  });
+
+  test("the mark and the TV's tag keep 6px apart, on a laptop and on a phone", () => {
+    const css = read('style.css');
+    const touch = mediaBlock(css, '(hover:none)');
+    const outside = stripCssComments(css).replace(touch, '');
+    // Laptop: the tag shows 4px above the TV (hover or focus); the mark starts 2px below the TV's top.
+    assert.match(rulesFor(outside, '.hs:hover .tag').join(';'), /transform:translate\(-50%,-4px\)/);
+    const mark = rulesFor(outside, '.hs.tv .bmark').join(';');
+    assert.match(mark, /translate:-50% 0/, 'centred sideways only, so `top` is its top edge');
+    assert.ok(pxOf(mark, 'top') + 4 >= 6, `laptop gap ${pxOf(mark, 'top') + 4}px`);
+    // Phone: the tag sits on the TV's top (transform none); the mark starts 6px below it.
+    assert.ok(pxOf(rulesFor(touch, '.hs.tv .bmark').join(';'), 'top') >= 6);
+    // The mark is drawn after the tag, so the tag's soft shadow can't dim its icon.
+    assert.match(read('app.js'), /<span class="tag" [^`]*<\/span>\$\{o\.id === 'news' \? TV_MARK : ''\}<\/button>/);
+  });
+
+  test("the TV's light spill is measured in the room's size, so a phone's 37px TV doesn't light the next plant", () => {
+    const screen = rulesFor(read('style.css'), '.hs.tv .screen').join(';');
+    assert.match(screen, /--fu:min\(1vw,1\.777vh\)/, '1% of the painting, which is min(100vw, 177.7vh) wide');
+    const shadow = screen.match(/box-shadow:([^;]+)/)[1];
+    assert.doesNotMatch(shadow, /\d+px/, `no fixed pixels: ${shadow}`);
+    assert.equal((shadow.match(/var\(--fu\)/g) || []).length, 6, 'blur and spread of all three layers');
+  });
+
   test('News focus rings are outline only (a box-shadow ring paints a bar across wrapped lines)', () => {
     const css = read('style.css');
     const ring = rulesFor(css, '#news :focus-visible').join(';');
@@ -305,7 +372,7 @@ describe('app/app.js', () => {
 
   test('the TV shows the News state: glow, mark and a tag that is also its name', () => {
     const js = read('app.js');
-    assert.match(js, /import \{ readSignals, tvLook \} from '\.\/tv-lib\.js';/);
+    assert.match(js, /import \{ createRefresher, readSignals, tvLook \} from '\.\/tv-lib\.js';/);
     assert.match(js, /const tv = tvLook\(readSignals\(news\.signals\)\);/);
     assert.match(js, /b\.classList\.toggle\('tv-on', isTv && tv\.on\);/);
     assert.match(js, /b\.classList\.toggle\('tv-breaking', isTv && tv\.breaking\);/);
@@ -313,9 +380,11 @@ describe('app/app.js', () => {
     assert.match(js, /b\.classList\.toggle\('new', isFeed && unread > 0\);/);
     // Colour never carries the meaning alone: the tag says it, and screen readers hear the same words.
     assert.match(js, /isTv \? tv\.tag :/);
-    assert.match(js, /tag\.textContent = label;\s*b\.setAttribute\('aria-label', label\);/);
+    assert.match(js, /if \(isTv\) \{ tag\.querySelector\('\.tfull'\)\.textContent = tv\.tag; tag\.querySelector\('\.tshort'\)\.textContent = tv\.short; \}\s*else tag\.textContent = label;\s*b\.setAttribute\('aria-label', label\);/);
     // The screen and the mark are pictures; the button's name says what they mean.
-    assert.match(js, /const TV_PARTS = `<span class="screen" aria-hidden="true"><\/span><span class="bmark" aria-hidden="true">\$\{ICON\.onAir\}<\/span>`;/);
+    assert.match(js, /const TV_SCREEN = '<span class="screen" aria-hidden="true"><\/span>';/);
+    assert.match(js, /const TV_MARK = `<span class="bmark" aria-hidden="true">\$\{ICON\.onAir\}<\/span>`;/);
+    assert.match(js, /const TV_TAG = '<span class="tfull"><\/span><span class="tshort"><\/span>';/);
     assert.match(js, /<button class="hs\$\{o\.id === 'news' \? ' tv' : ''\}"/);
   });
 
@@ -324,7 +393,8 @@ describe('app/app.js', () => {
     assert.match(js, /Promise\.all\(\[loadState\(\), loadFeed\(\), news\.load\(\)\]\)\.then\(\(\) => \{ ready = true; renderAll\(\); \}\);/);
     assert.match(js, /else \{ requestAnimationFrame\(\(\) => requestAnimationFrame\(\(\) => \$\('#frame'\)\.classList\.remove\('zoom'\)\)\); renderRoom\(\); refreshTv\(\); \}/);
     // A failed fetch keeps what was there, and the room redraws either way (never an error in the room).
-    assert.match(js, /function refreshTv\(\) \{ news\.refresh\(\)\.then\(renderRoom, renderRoom\); \}/);
+    // One refresh at a time (tv-lib's createRefresher): a burst of tab events shares the running one.
+    assert.match(js, /const refreshTv = createRefresher\(\(\) => news\.refresh\(\), renderRoom\);/);
     assert.match(js, /document\.addEventListener\('visibilitychange', \(\) => \{ if \(document\.visibilityState === 'visible' && !\$\('#room'\)\.hidden\) refreshTv\(\); \}\);/);
   });
 
