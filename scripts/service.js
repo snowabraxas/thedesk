@@ -235,13 +235,18 @@ export function isDisabled(printDisabledText, label) {
 
 /**
  * Runs a command; resolves { code, stdout, stderr } and never rejects.
- * @param {{ timeoutMs?: number, cwd?: string }} [options] cwd: the folder to run it in
+ * @param {{ timeoutMs?: number, cwd?: string, env?: Record<string, string|undefined> }} [options]
+ *   cwd: the folder to run it in (npm ci depends on it); timeoutMs: stop it after this long;
+ *   env: its environment (default: this process's)
  */
-export function runCommand(cmd, args, { timeoutMs = 20_000, cwd } = {}) {
+export function runCommand(cmd, args, { timeoutMs = 20_000, cwd, env } = {}) {
   return new Promise((resolve) => {
-    execFile(cmd, args, { timeout: timeoutMs, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, ...(cwd ? { cwd } : {}) }, (err, stdout, stderr) => {
+    const options = { timeout: timeoutMs, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, ...(cwd ? { cwd } : {}), ...(env ? { env } : {}) };
+    execFile(cmd, args, options, (err, stdout, stderr) => {
       if (!err) return resolve({ code: 0, stdout, stderr });
-      resolve({ code: typeof err.code === 'number' ? err.code : 1, stdout: stdout || '', stderr: stderr || err.message });
+      const limit = timeoutMs >= 1000 ? `${Math.round(timeoutMs / 1000)} s` : `${timeoutMs} ms`;
+      const timedOut = err.killed && err.signal ? `\n(stopped after ${limit}: it took too long)` : '';
+      resolve({ code: typeof err.code === 'number' ? err.code : 1, stdout: stdout || '', stderr: `${stderr || err.message}${timedOut}` });
     });
   });
 }
@@ -480,13 +485,26 @@ async function bootstrap(cfg, deps) {
   return false;
 }
 
-/** One line about the live copy: which commit it holds, or that it isn't there yet. */
-export function liveCopyLine(cfg, deps) {
-  if (!deps.fs.existsSync(cfg.serverPath)) return `${cfg.runDir} (not there yet: make it with npm run deploy)`;
+/**
+ * Is the live copy ready to run? It needs its code (server/index.js), its packages (node_modules)
+ * and a finished deploy (.deployed.json, written only once packages are in).
+ * @returns {{ ready: true, deployed: object } | { ready: false, there: boolean, missing: string[] }}
+ */
+export function liveCopyState(cfg, deps) {
+  if (!deps.fs.existsSync(cfg.serverPath)) return { ready: false, there: false, missing: ['server/index.js'] };
   const deployed = readDeployed(cfg.runDir, { fsImpl: deps.fs });
-  return deployed
-    ? `${cfg.runDir}, ${describeDeployed(deployed)}${deployed.deployedAt ? `, deployed ${deployed.deployedAt}` : ''}`
-    : `${cfg.runDir} (no deploy recorded: run npm run deploy)`;
+  const missing = [];
+  if (!deps.fs.existsSync(path.join(cfg.runDir, 'node_modules'))) missing.push('node_modules');
+  if (!deployed) missing.push('readable .deployed.json');
+  return missing.length ? { ready: false, there: true, missing } : { ready: true, deployed };
+}
+
+/** One line about the live copy: which commit it holds, or what it still lacks. */
+export function liveCopyLine(cfg, deps) {
+  const live = liveCopyState(cfg, deps);
+  if (live.ready) return `${cfg.runDir}, ${describeDeployed(live.deployed)}${live.deployed.deployedAt ? `, deployed ${live.deployed.deployedAt}` : ''}`;
+  if (!live.there) return `${cfg.runDir} (not there yet: make it with npm run deploy)`;
+  return `${cfg.runDir} (not fully deployed: no ${live.missing.join(' and no ')}; run npm run deploy)`;
 }
 
 /**
@@ -501,7 +519,7 @@ export function dryRunText(cfg, { liveCopy = cfg.runDir } = {}) {
     '',
     `The service will run The Desk from the live copy: ${liveCopy}`,
     '',
-    `1. Check that the live copy has ${cfg.serverPath}. If not, stop and say: run npm run deploy first.`,
+    `1. Check that the live copy has server/index.js, node_modules and .deployed.json (a finished deploy). If not, stop and say: run npm run deploy first.`,
     `2. Check that port ${cfg.port} is free, or held by this service (which is then replaced). Refuse otherwise.`,
     `3. Create the log folder: ${cfg.logDir}`,
     `4. Write ${cfg.plistPath}:`,
@@ -533,9 +551,17 @@ export async function install(cfg, deps, { dryRun = false } = {}) {
     deps.err('The always-on service uses launchd, so it only works on macOS.');
     return 1;
   }
-  if (!deps.fs.existsSync(cfg.serverPath)) {
+  // Before anything touches the running service: a live copy without its code, its packages or a
+  // finished deploy would crash-loop the moment launchd starts it.
+  const live = liveCopyState(cfg, deps);
+  if (!live.ready && !live.there) {
     deps.err(`The live copy isn't there yet (${cfg.runDir}), so nothing was changed.`);
     deps.err('Run npm run deploy first: it makes the live copy from main. Then run npm run service:install again.');
+    return 1;
+  }
+  if (!live.ready) {
+    deps.err(`The live copy isn't fully deployed yet (${cfg.runDir} has no ${live.missing.join(' and no ')}), so nothing was changed.`);
+    deps.err('Run npm run deploy until it gets past installing packages, then run npm run service:install again.');
     return 1;
   }
   const svc = await readService(cfg, deps);
