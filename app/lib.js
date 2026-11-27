@@ -75,7 +75,8 @@ export function fmtDay(iso) {
 
 /* ================= state ================= */
 
-export const blank = () => ({ read: {}, saved: {}, folders: [], notes: [], xp: 0, days: [], badges: {} });
+/** awarded: articles already paid XP for reading ({ id: time }), so un-marking and re-marking never pays twice. */
+export const blank = () => ({ read: {}, saved: {}, folders: [], notes: [], xp: 0, days: [], badges: {}, awarded: {} });
 
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const STATE_TYPES = {
@@ -86,19 +87,42 @@ const STATE_TYPES = {
   xp: (v) => typeof v === 'number' && Number.isFinite(v),
   days: Array.isArray,
   badges: isPlainObject,
+  awarded: isPlainObject,
 };
 
 /**
  * Turns whatever the server sent into a usable state: known keys of the wrong type fall back
  * to blank values, unknown keys are kept so a newer version's data isn't thrown away on save.
+ * A state saved before `awarded` existed counts every article already read as paid, so re-marking
+ * one of them doesn't pay a second time.
  */
 export function normalizeState(raw) {
   const S = blank();
   if (!isPlainObject(raw)) return S;
   for (const [k, v] of Object.entries(raw)) {
+    if (k === '__proto__') continue;
     if (!(k in STATE_TYPES) || STATE_TYPES[k](v)) S[k] = v;
   }
+  if (!isPlainObject(raw.awarded)) S.awarded = { ...S.read };
   return S;
+}
+
+/**
+ * Marks a Product Feed article read, or unread if it was read. Reading pays XP once per article,
+ * ever: the id goes into `awarded` the first time, so un-marking and re-marking never pays twice.
+ * @returns {{ read: boolean, award: boolean }} award: pay the XP now.
+ */
+export function toggleArticleRead(S, id, now = Date.now()) {
+  if (typeof id !== 'string' || id === '' || id === '__proto__') return { read: false, award: false };
+  if (Object.hasOwn(S.read, id)) {
+    delete S.read[id];
+    return { read: false, award: false };
+  }
+  S.read[id] = now;
+  if (!isPlainObject(S.awarded)) S.awarded = {};
+  const award = !Object.hasOwn(S.awarded, id);
+  if (award) S.awarded[id] = now;
+  return { read: true, award };
 }
 
 /**
@@ -111,12 +135,20 @@ export function normalizeState(raw) {
  *   and is retried every retryDelay ms (sooner if something else changes) until a save works,
  *   so a change isn't stuck in memory when the tab sits idle after the server comes back.
  * - flushOnExit() sends whatever is still waiting, with keepalive so it outlives the page.
+ * - merge(local, server), when given, runs just before each PUT with a fresh copy of the server's
+ *   state, so the page can fold in what another tab saved (News: the union of `awarded` and
+ *   `dismissed`). If that copy can't be read, the save counts as failed and is retried: it never
+ *   writes over a state it couldn't read. On leaving the page there is no time for a GET, so it
+ *   merges the last copy it read instead.
+ * - peek() reads the server's copy without changing anything; reload() reads it only when nothing
+ *   is waiting to be saved (idle), for picking up another tab's changes.
  */
 export function createStateClient({
   getState,
   url = '/api/state',
   normalize = normalizeState,
   empty = blank,
+  merge = null,
   fetchFn = (...args) => globalThis.fetch(...args),
   onSaveFail = () => {},
   delay = 600,
@@ -130,6 +162,7 @@ export function createStateClient({
   let pending = false;
   let timer = null;
   let failNoted = false;
+  let lastServer = null; // the last copy read from the server, for merging on exit
 
   // Read the small reply even when only the status matters, so the browser can finish the request.
   const finish = async (r) => {
@@ -140,20 +173,45 @@ export function createStateClient({
     }
   };
 
+  // GET the server's copy, normalized. Throws when it can't be read.
+  async function readServer() {
+    const r = await fetchFn(url, { cache: 'no-store' });
+    if (!r.ok) {
+      await finish(r);
+      throw new Error(`GET ${url} answered ${r.status}`);
+    }
+    const state = normalize(await r.json());
+    if (merge) lastServer = structuredClone(state);
+    return state;
+  }
+
   async function load() {
     try {
-      const r = await fetchFn(url, { cache: 'no-store' });
-      if (!r.ok) {
-        await finish(r);
-        throw new Error(`GET ${url} answered ${r.status}`);
-      }
-      const state = normalize(await r.json());
+      const state = await readServer();
       canSave = true;
       return { ok: true, state };
     } catch (error) {
       canSave = false;
       return { ok: false, state: empty(), error };
     }
+  }
+
+  /** The server's copy as it is now. Only after a good load(); never changes what this client will save. */
+  async function peek() {
+    if (!canSave) return { ok: false };
+    try {
+      return { ok: true, state: await readServer() };
+    } catch (error) {
+      return { ok: false, error };
+    }
+  }
+
+  const idle = () => !dirty && !writing;
+  /** The server's copy, to replace this tab's, but only when nothing is waiting to be saved, before and after the GET. */
+  async function reload() {
+    if (!canSave || !idle()) return { ok: false };
+    const r = await peek();
+    return r.ok && idle() ? r : { ok: false };
   }
 
   function save() {
@@ -180,6 +238,7 @@ export function createStateClient({
     dirty = false;
     let ok = false;
     try {
+      if (merge) merge(getState(), await readServer());
       const r = await fetchFn(url, { method: 'PUT', headers, body: JSON.stringify(getState()) });
       ok = r.ok;
       await finish(r);
@@ -210,6 +269,7 @@ export function createStateClient({
     timer = null;
     pending = false;
     dirty = false;
+    if (merge && lastServer) merge(getState(), structuredClone(lastServer));
     const body = JSON.stringify(getState());
     const keepalive = new TextEncoder().encode(body).length <= keepaliveMax;
     Promise.resolve()
@@ -230,11 +290,17 @@ export function createStateClient({
     save,
     flush,
     flushOnExit,
+    peek,
+    reload,
     get canSave() {
       return canSave;
     },
     get dirty() {
       return dirty;
+    },
+    /** Nothing waiting to be saved and no PUT on its way. */
+    get idle() {
+      return idle();
     },
   };
 }

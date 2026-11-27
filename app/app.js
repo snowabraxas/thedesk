@@ -4,7 +4,7 @@
 import {
   PHASE_LABEL, WEEK_GOAL, BADGES, articlesFor, autoPhase, awardText, blank, cnt, createStateClient, dayKey, esc, fmtDate, fmtDay,
   freshBadges, level as levelFor, mentorLine, moon, moonPath, readsThisWeek as readsSince, safeUrl,
-  streak as streakOf, themeScores as scoresFor, uid, wilaLine,
+  streak as streakOf, themeScores as scoresFor, toggleArticleRead, uid, wilaLine,
 } from './lib.js';
 import { createNewsPage } from './news.js';
 
@@ -69,6 +69,13 @@ async function loadState() {
   const r = await store.load();
   S = r.state;
   if (!r.ok) toast("I couldn't open your saved reads and notes, so changes won't be saved for now. Try reloading in a bit.", 'Reload', () => location.reload());
+}
+// Another tab may have earned XP since this one loaded: pick up the saved state when nothing here
+// is waiting to be saved (the News desk calls this when it opens and before it pays).
+async function reloadState() {
+  if (!ready) return;
+  const r = await store.reload();
+  if (r.ok) S = r.state;
 }
 async function loadFeed() {
   try {
@@ -319,8 +326,8 @@ $('#list').addEventListener('click', e => {
   const t = e.target.closest('button'); if (!t) return;
   if (t.dataset.read) {
     const id = t.dataset.read;
-    if (S.read[id]) { delete S.read[id]; save(); }
-    else { S.read[id] = Date.now(); award(10, 'article read'); }
+    // Pays once per article, ever: un-marking and re-marking doesn't pay again.
+    if (toggleArticleRead(S, id).award) award(10, 'article read'); else save();
     renderFeed(); refocus(attrSel('data-read', id), '#listTitle');
   } else if (t.dataset.notes) openDrawer(t.dataset.notes);
 });
@@ -428,7 +435,7 @@ setInterval(() => { if (!preview) renderRoom(); }, 60e3);
 /* ================= the News desk ================= */
 // Its page lives in news.js. Reading a story pays XP through the same award() as the feed, so XP,
 // level and the streak stay in Product Feed's state.
-const news = createNewsPage({ award, toast, isReady: () => ready, canAward: () => store.canSave });
+const news = createNewsPage({ award, toast, isReady: () => ready, canAward: () => store.canSave, reloadXpState: reloadState });
 
 /* ================= start ================= */
 buildHotspots();

@@ -1,5 +1,5 @@
 // Snow's saved state, one file per desk: $DESK_HOME/desks/<desk>/state.json.
-//   product-feed: reads, saves, folders, notes, XP, the streak's days and badges (GET/PUT /api/state)
+//   product-feed: reads, saves, folders, notes, XP, the streak's days, badges and the articles already paid XP (GET/PUT /api/state)
 //   news:         stories read, breaking stories dismissed, the shelf left open (GET/PUT /api/news/state)
 // Every write goes to a temp file in the same folder, is fsynced, then renamed over state.json
 // (atomic-file.js), so a crash leaves either the old file or the new one, never half of one.
@@ -50,6 +50,8 @@ export const STATE_RULES = {
     xp: ofType('a number', (v) => typeof v === 'number' && Number.isFinite(v)),
     days: ofType('a list', Array.isArray),
     badges: ofType('an object', isPlainObject),
+    // Articles already paid XP for reading: { "<article id>": time }.
+    awarded: ofType('an object', isPlainObject),
   },
   news: {
     read: timesKeyedBy('"<edition>/<story id>", like "2026-12-07/s1"', isStoryKey),

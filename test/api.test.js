@@ -276,6 +276,15 @@ describe('GET and PUT /api/state', () => {
     assert.deepEqual(get.json, STATE);
   });
 
+  test("keeps the articles already paid XP (awarded), and refuses one that isn't an object", async () => {
+    const value = { ...STATE, awarded: { a1: 1764250000000 } };
+    assert.equal((await putState(port, value)).status, 200);
+    assert.deepEqual((await request(port, { path: '/api/state' })).json, value);
+    const bad = await putState(port, { ...STATE, awarded: ['a1'] });
+    assert.equal(bad.status, 400);
+    assert.deepEqual((await request(port, { path: '/api/state' })).json, value, 'the saved state stays');
+  });
+
   test('accepts application/json with a charset, and keeps unknown keys', async () => {
     const value = { xp: 5, later: { anything: true } };
     const put = await putState(port, value, { headers: { 'content-type': 'application/json; charset=utf-8' } });
@@ -864,6 +873,8 @@ describe('the state store', () => {
     assert.deepEqual(checkState(STATE), { ok: true });
     assert.deepEqual(checkState({ xp: '1' }), { ok: false, error: 'xp must be a number' });
     assert.deepEqual(checkState({ folders: {} }), { ok: false, error: 'folders must be a list' });
+    assert.deepEqual(checkState({ awarded: { a1: 1764250000000 } }), { ok: true });
+    assert.deepEqual(checkState({ awarded: [] }), { ok: false, error: 'awarded must be an object' });
     assert.deepEqual(checkState([]), { ok: false, error: 'state must be a JSON object' });
   });
 });

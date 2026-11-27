@@ -4,10 +4,16 @@
 // fetches, keeps the state and wires the buttons. Agent text is set with textContent or through
 // news-html.js, which escapes it.
 // XP and the streak stay in Product Feed's state: reading a story calls app.js's award().
+//
+// Snow keeps The Desk open in more than one place (the Claude app's pane and a browser), and each
+// save sends the whole state. So: every save first folds in the server's copy (mergeNewsState: the
+// union of `awarded` and `dismissed`); opening #news again reloads both states when nothing is
+// waiting to be saved; and before paying for a read, the server's `awarded` is checked, so another
+// tab's payment for the same story counts.
 import { createStateClient } from './lib.js';
 import {
-  READ_XP, blankNewsState, breakingView, buildNewsView, dismissBreaking, editionLine, greeting, isBreakingVisible, newsLine,
-  normalizeNewsState, toggleRead, tvSignals,
+  READ_XP, blankNewsState, breakingView, buildNewsView, dismissBreaking, editionLine, greeting, isBreakingVisible, mergeNewsState, newsLine,
+  normalizeNewsState, readStory, tvSignals,
 } from './news-lib.js';
 import { breakingHtml, glanceHtml, noStoriesHtml, shelfItemHtml, storyCardHtml } from './news-html.js';
 
@@ -30,14 +36,16 @@ async function getJson(url) {
  *   toast: (msg: string, actLabel?: string, act?: () => void) => void,
  *   isReady: () => boolean,     everything (both desks' state, both editions) has loaded
  *   canAward: () => boolean,    Product Feed's state, where XP lives, can be saved
+ *   reloadXpState: () => Promise<void>,  reload Product Feed's state (XP) if nothing is waiting to be saved
  * }} options
  */
-export function createNewsPage({ award, toast, isReady, canAward }) {
+export function createNewsPage({ award, toast, isReady, canAward, reloadXpState = async () => {} }) {
   let news = null; // the edition, or null when it couldn't be loaded
   let breaking = null; // today's breaking story, or null
   let N = blankNewsState();
   let view = buildNewsView(null, N);
   const openItems = new Set(); // shelf items opened in this visit ("m0"); not saved
+  let paying = false; // a read is waiting on the server check before it pays
 
   // Nothing that depends on the News state is drawn until isReady() (its first GET has finished),
   // and the store never saves if that GET failed.
@@ -45,6 +53,7 @@ export function createNewsPage({ award, toast, isReady, canAward }) {
     url: STATE_URL,
     normalize: normalizeNewsState,
     empty: blankNewsState,
+    merge: mergeNewsState,
     getState: () => N,
     onSaveFail: () => toast("I couldn't save that just now. I'll keep it here and keep trying."),
   });
@@ -74,11 +83,15 @@ export function createNewsPage({ award, toast, isReady, canAward }) {
   }
   /** The first load: Snow's News state, the edition and the breaking story. */
   const load = () => Promise.all([loadState(), loadEdition(), loadBreaking()]);
-  /** Opening the page again later in the day: fetch the edition and breaking story again, then redraw. */
+  /**
+   * Opening the page again (later in the day, or after using another tab): fetch the edition and
+   * breaking story again, and both states when nothing is waiting to be saved, then redraw.
+   */
   async function refresh() {
     if (!isReady()) return;
     const before = news?.edition;
-    await Promise.all([loadEdition(), loadBreaking()]);
+    const [state] = await Promise.all([store.reload(), reloadXpState(), loadEdition(), loadBreaking()]);
+    if (state.ok) N = state.state;
     if (news?.edition !== before) openItems.clear(); // opened items are by position: a new edition starts closed
     if (!$('#news').hidden) render();
   }
@@ -130,6 +143,7 @@ export function createNewsPage({ award, toast, isReady, canAward }) {
     $('#newsGlance').innerHTML = g.numbers;
     $('#newsRegions').innerHTML = g.regions;
     $('#newsKinds').innerHTML = g.kinds;
+    $('#newsRegionsHint').hidden = !view.glance.regions.length;
   }
 
   // The greeting doesn't depend on Snow's state, so it shows straight away; the rest waits for isReady().
@@ -151,13 +165,25 @@ export function createNewsPage({ award, toast, isReady, canAward }) {
 
   /* ---------- actions ---------- */
 
-  function markRead(ref) {
+  async function markRead(ref) {
     const s = storyAt(ref);
-    if (!s || !s.key) return;
-    // Pay only when both states can be saved, so a story is never paid twice after a reload.
-    const r = toggleRead(N, s.key, { canAward: store.canSave && canAward() });
+    if (!s || !s.key || paying) return;
+    const { key } = s;
+    const sample = view.sample;
+    // Pay only for a real edition, and only when both states can be saved, so a story is never
+    // paid twice after a reload. Before paying, readStory checks the server's copy (another tab may
+    // have paid for it already) while the latest XP is picked up.
+    const canPay = !sample && store.canSave && canAward();
+    let r;
+    paying = true;
+    try {
+      r = await readStory(() => N, key, { canPay, peek: () => store.peek(), also: reloadXpState });
+    } finally {
+      paying = false;
+    }
     store.save();
     if (r.award) award(READ_XP, 'story read');
+    else if (r.read && sample) toast('Sample story: marked read, no XP.');
     render();
   }
 

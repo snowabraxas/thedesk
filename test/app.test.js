@@ -202,6 +202,16 @@ describe('app/style.css', () => {
     assert.match(ph, /var\(--font-sans\)/);
   });
 
+  test("the top stories heading leaves room for its focus ring when the rail scrolls to it", () => {
+    const m = rulesFor(read('style.css'), '#newsTopTitle').join(';').match(/scroll-margin-top\s*:\s*(\d+)px/);
+    assert.ok(m && Number(m[1]) >= 16, 'scroll-margin-top of at least 16px (ring: 3px wide, 4px out)');
+  });
+
+  test("the TV's warm-up glow stays soft enough for 4.5:1 at night (reviewer's measured stops)", () => {
+    const glow = rulesFor(read('style.css'), '.backdrop[data-view=news]::after').join(';');
+    assert.match(glow, /rgba\(var\(--tv-glow\),\.3\),rgba\(var\(--tv-glow\),\.06\) 45%,rgba\(var\(--tv-glow\),0\) 80%/);
+  });
+
   test('buttons are at least 44px tall', () => {
     const css = read('style.css');
     const px = (body, prop) => { const m = body.match(new RegExp(`(?:^|;)\\s*${prop}\\s*:\\s*(\\d+)px`)); return m ? Number(m[1]) : 0; };
@@ -274,12 +284,29 @@ describe('app/app.js', () => {
 
   test('reading a News story pays through the same award() as the feed, once everything has loaded', () => {
     const js = read('app.js');
-    assert.match(js, /const news = createNewsPage\(\{ award, toast, isReady: \(\) => ready, canAward: \(\) => store\.canSave \}\);/);
+    assert.match(js, /const news = createNewsPage\(\{ award, toast, isReady: \(\) => ready, canAward: \(\) => store\.canSave, reloadXpState: reloadState \}\);/);
     assert.match(js, /Promise\.all\(\[loadState\(\), loadFeed\(\), news\.load\(\)\]\)\.then\(\(\) => \{ ready = true; renderAll\(\); \}\);/);
     const nj = read('news.js');
-    assert.match(nj, /const r = toggleRead\(N, s\.key, \{ canAward: store\.canSave && canAward\(\) \}\);\s*store\.save\(\);\s*if \(r\.award\) award\(READ_XP, 'story read'\);/);
-    assert.match(nj, /url: STATE_URL,\s*normalize: normalizeNewsState,\s*empty: blankNewsState,/);
+    assert.match(nj, /r = await readStory\(\(\) => N, key, \{ canPay, peek: \(\) => store\.peek\(\), also: reloadXpState \}\);[\s\S]*?store\.save\(\);\s*if \(r\.award\) award\(READ_XP, 'story read'\);\s*else if \(r\.read && sample\) toast\('Sample story: marked read, no XP\.'\);/);
+    assert.match(nj, /const canPay = !sample && store\.canSave && canAward\(\);/, 'no XP for the sample, or when a state cannot be saved');
+    assert.match(nj, /url: STATE_URL,\s*normalize: normalizeNewsState,\s*empty: blankNewsState,\s*merge: mergeNewsState,/);
     assert.match(nj, /const STATE_URL = '\/api\/news\/state';/);
+  });
+
+  test("two tabs: before paying, News checks the server's awarded and the latest XP; opening #news reloads both states", () => {
+    const nj = read('news.js');
+    assert.match(nj, /const \[state\] = await Promise\.all\(\[store\.reload\(\), reloadXpState\(\), loadEdition\(\), loadBreaking\(\)\]\);\s*if \(state\.ok\) N = state\.state;/);
+    assert.match(read('app.js'), /async function reloadState\(\) \{\s*if \(!ready\) return;\s*const r = await store\.reload\(\);\s*if \(r\.ok\) S = r\.state;\s*\}/);
+  });
+
+  test('the Product Feed pays once per article: un-marking and re-marking does not pay again', () => {
+    assert.match(read('app.js'), /if \(toggleArticleRead\(S, id\)\.award\) award\(10, 'article read'\); else save\(\);/);
+    assert.doesNotMatch(read('app.js'), /S\.read\[id\] = Date\.now\(\)/);
+  });
+
+  test('the "where it happened" hint hides when there are no stories', () => {
+    assert.match(read('index.html'), /<p class="hint" id="newsRegionsHint">US and China weighted highest; others by relevance\.<\/p>/);
+    assert.match(read('news.js'), /\$\('#newsRegionsHint'\)\.hidden = !view\.glance\.regions\.length;/);
   });
 
   test('news.js puts agent text in the page only through textContent or news-html.js', () => {

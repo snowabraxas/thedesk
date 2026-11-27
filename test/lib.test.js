@@ -8,7 +8,7 @@ import { REPO_ROOT } from '../server/config.js';
 import { isHttpsLink } from '../server/schema-common.js';
 import {
   articlesFor, autoPhase, awardText, blank, createStateClient, dayKey, esc, fmtDate, fmtDay, freshBadges, level, mentorLine,
-  moon, normalizeState, readsThisWeek, safeUrl, streak, sunTimes, themeScores, wilaLine,
+  moon, normalizeState, readsThisWeek, safeUrl, streak, sunTimes, themeScores, toggleArticleRead, wilaLine,
 } from '../app/lib.js';
 
 const MIN = 60e3;
@@ -235,6 +235,29 @@ describe('state and progress', () => {
     assert.deepEqual(S.badges, {});
     assert.deepEqual(S.later, { x: 1 });
     assert.deepEqual(S.folders, []);
+  });
+
+  test('a state saved before "awarded" existed counts every read article as already paid', () => {
+    assert.deepEqual(normalizeState({ read: { a1: 1, a2: 2 } }).awarded, { a1: 1, a2: 2 });
+    assert.deepEqual(normalizeState({ read: { a1: 1 }, awarded: ['a1'] }).awarded, { a1: 1 }, 'a broken awarded is rebuilt the same way');
+    assert.deepEqual(normalizeState({ read: { a1: 1, a2: 2 }, awarded: { a1: 1 } }).awarded, { a1: 1 }, 'a saved awarded is kept as it is');
+    assert.deepEqual(normalizeState({}).awarded, {});
+    const S = normalizeState(JSON.parse('{"__proto__": {"xp": 999}}'));
+    assert.equal(Object.getPrototypeOf(S), Object.prototype);
+  });
+
+  test('toggleArticleRead pays once per article, ever', () => {
+    const S = blank();
+    assert.deepEqual(toggleArticleRead(S, 'a1', 1), { read: true, award: true });
+    assert.deepEqual([S.read, S.awarded], [{ a1: 1 }, { a1: 1 }]);
+    assert.deepEqual(toggleArticleRead(S, 'a1', 2), { read: false, award: false });
+    assert.deepEqual([S.read, S.awarded], [{}, { a1: 1 }]);
+    assert.deepEqual(toggleArticleRead(S, 'a1', 3), { read: true, award: false }, 're-marking does not pay again');
+    assert.deepEqual(toggleArticleRead(S, 'a2', 4), { read: true, award: true });
+    const old = normalizeState({ read: { a1: 1 } });
+    toggleArticleRead(old, 'a1');
+    assert.equal(toggleArticleRead(old, 'a1').award, false, 'an article read before the fix is not paid again');
+    for (const bad of ['', '__proto__', null, 7]) assert.deepEqual(toggleArticleRead(blank(), bad), { read: false, award: false }, String(bad));
   });
 
   test('level goes up every 100 XP', () => {
@@ -629,6 +652,142 @@ describe('createStateClient', () => {
       await settle();
       assert.equal(client.flushOnExit(), false);
       assert.equal(srv.putCalls().length, 0);
+    });
+  });
+
+  describe('merging with the server before each save, and reading its copy (two tabs)', () => {
+    // A tiny server in memory: GET answers its copy, PUT replaces it. down: answer GETs with 500.
+    function memoryServer(value = {}) {
+      const srv = { value, gets: 0, puts: 0, down: false };
+      srv.fetchFn = async (url, opts = {}) => {
+        if (opts.method === 'PUT') {
+          srv.puts++;
+          srv.value = JSON.parse(opts.body);
+          return { ok: true, status: 200, text: async () => '' };
+        }
+        srv.gets++;
+        if (srv.down) return { ok: false, status: 500, text: async () => '' };
+        return { ok: true, status: 200, json: async () => structuredClone(srv.value) };
+      };
+      return srv;
+    }
+    const union = (local, server) => {
+      for (const [k, v] of Object.entries(server.awarded || {})) if (!(k in local.awarded)) local.awarded[k] = v;
+    };
+    const normalize = (raw) => ({ awarded: {}, ...raw });
+    const client = (srv, S, extra = {}) => createStateClient({ getState: () => S.value, fetchFn: srv.fetchFn, normalize, empty: () => ({ awarded: {} }), merge: union, ...extra });
+
+    test("each save first folds in the server's copy, so a stale tab keeps another tab's award", async () => {
+      const srv = memoryServer({ awarded: {} });
+      const A = { value: null };
+      const a = client(srv, A);
+      A.value = (await a.load()).state;
+      srv.value = { awarded: { s1: 1 } }; // another tab paid for s1 meanwhile
+      A.value.shelfOpen = true;
+      a.save();
+      await a.flush();
+      assert.deepEqual(srv.value, { awarded: { s1: 1 }, shelfOpen: true });
+      assert.deepEqual(A.value.awarded, { s1: 1 }, 'this tab now knows too');
+    });
+
+    test("if the server's copy can't be read, nothing is written; it is retried and tells Snow once", async (t) => {
+      t.mock.timers.enable({ apis: ['setTimeout'] });
+      const srv = memoryServer({ awarded: { s1: 1 } });
+      const A = { value: null };
+      let told = 0;
+      const a = client(srv, A, { onSaveFail: () => told++ });
+      A.value = (await a.load()).state;
+      srv.down = true;
+      a.save();
+      await a.flush();
+      assert.equal(srv.puts, 0);
+      assert.equal(told, 1);
+      assert.equal(a.dirty, true);
+      srv.down = false;
+      t.mock.timers.tick(15_000);
+      await settle();
+      assert.equal(srv.puts, 1, 'retried once the copy can be read');
+    });
+
+    test('a client whose first GET failed never merges or saves', async (t) => {
+      t.mock.timers.enable({ apis: ['setTimeout'] });
+      const srv = memoryServer({ awarded: { s1: 1 } });
+      srv.down = true;
+      const A = { value: null };
+      const a = client(srv, A);
+      A.value = (await a.load()).state;
+      srv.down = false;
+      a.save();
+      t.mock.timers.tick(60_000);
+      await a.flush();
+      assert.equal(a.flushOnExit(), false);
+      assert.deepEqual([srv.gets, srv.puts], [1, 0]);
+      assert.deepEqual(await a.peek(), { ok: false });
+      assert.deepEqual(await a.reload(), { ok: false });
+      assert.equal(srv.gets, 1, 'peek and reload do not even ask');
+    });
+
+    test('peek reads the server copy without changing what will be saved', async () => {
+      const srv = memoryServer({ awarded: { s1: 1 } });
+      const A = { value: null };
+      const a = client(srv, A);
+      A.value = (await a.load()).state;
+      srv.value = { awarded: { s1: 1, s2: 2 } };
+      const r = await a.peek();
+      assert.deepEqual(r, { ok: true, state: { awarded: { s1: 1, s2: 2 } } });
+      assert.deepEqual(A.value.awarded, { s1: 1 });
+      assert.equal(a.idle, true);
+    });
+
+    test('reload only when nothing is waiting to be saved, before and after the GET', async () => {
+      const srv = memoryServer({ awarded: {} });
+      const A = { value: null };
+      const a = client(srv, A);
+      A.value = (await a.load()).state;
+      a.save();
+      assert.equal(a.idle, false);
+      assert.deepEqual(await a.reload(), { ok: false }, 'a change is waiting');
+      await a.flush();
+      assert.equal(a.idle, true);
+      srv.value = { awarded: { s9: 9 } };
+      assert.deepEqual(await a.reload(), { ok: true, state: { awarded: { s9: 9 } } });
+      // A change made while the GET is on its way wins over the reloaded copy.
+      const slow = memoryServer({ awarded: {} });
+      const B = { value: null };
+      let release;
+      const b = client(slow, B, { fetchFn: async (url, opts = {}) => { if (!opts.method && release === null) await new Promise((r) => (release = r)); return slow.fetchFn(url, opts); } });
+      release = undefined;
+      B.value = (await b.load()).state;
+      release = null;
+      const pending = b.reload();
+      await settle();
+      b.save();
+      release();
+      assert.deepEqual(await pending, { ok: false });
+    });
+
+    test('leaving the page merges the last copy it read (no time for a GET)', async () => {
+      const srv = memoryServer({ awarded: { s1: 1 } });
+      const A = { value: null };
+      const a = client(srv, A);
+      A.value = (await a.load()).state;
+      A.value.awarded = {}; // as if this tab never knew
+      a.save();
+      assert.equal(a.flushOnExit(), true);
+      await settle();
+      assert.equal(srv.gets, 1, 'no GET on the way out');
+      assert.deepEqual(srv.value.awarded, { s1: 1 });
+    });
+
+    test('without merge, saving works as before (one PUT, no GET)', async () => {
+      const srv = memoryServer({ xp: 1 });
+      const S = { value: null };
+      const c = createStateClient({ getState: () => S.value, fetchFn: srv.fetchFn });
+      S.value = (await c.load()).state;
+      S.value.xp = 2;
+      c.save();
+      await c.flush();
+      assert.deepEqual([srv.gets, srv.puts, srv.value.xp], [1, 1, 2]);
     });
   });
 
