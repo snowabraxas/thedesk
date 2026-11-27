@@ -94,20 +94,27 @@ function keepFocus(draw) {
   draw();
   if (key && !document.contains(a)) refocus(attrSel('data-' + key, a.dataset[key]));
 }
-// A tab can't be clicked before it is shown or focused: catch it up first, so a tab that sat in
-// the background acts on the latest reads, folders, notes and XP. Not while a folder is being
-// renamed or the notes drawer is open (nothing there should move under Snow's hands).
-let syncing = false;
-async function syncTab() {
-  if (!ready || syncing) return;
-  syncing = true;
-  try {
-    const busy = editing !== null || !$('#drawer').hidden;
-    const [feedChanged] = await Promise.all([busy ? false : reloadState(), news.sync()]);
-    if (!feedChanged) return;
-    if (!$('#feed').hidden) keepFocus(renderFeed); else if (!$('#room').hidden) renderRoom();
-  } finally { syncing = false; }
+// A tab can't be clicked before it is shown or focused: catch it up first, so a tab that sat in the
+// background acts on the latest reads, folders, notes and XP, and the TV shows the latest edition and
+// breaking story. One round: Product Feed's state (not while a folder is being renamed or the notes
+// drawer is open: nothing there should move under Snow's hands), News's state, and, unless the Product
+// Feed is showing, the edition and breaking story (the room's TV and the News page show them); then
+// one redraw of what's showing (news.refresh redraws the News page itself). One round at a time
+// (createRefresher): a tab return fires visibilitychange and focus, and the second shares the first;
+// opening the room starts a fresh round (force) and the older round's answer is dropped. news.js and
+// the state client also use only the newest answer when fetches overlap, so a slow old answer can't
+// bring back a mark Snow just cleared.
+async function catchUpRound() {
+  const busy = editing !== null || !$('#drawer').hidden;
+  const [feedChanged] = await Promise.all([busy ? false : reloadState(), $('#feed').hidden ? news.refresh({ xp: false }) : news.sync()]);
+  return feedChanged;
 }
+function drawCaughtUp(feedChanged) {
+  if (!$('#feed').hidden) { if (feedChanged) keepFocus(renderFeed); }
+  else if (!$('#room').hidden) renderRoom();
+}
+const catchUp = createRefresher(catchUpRound, drawCaughtUp);
+function syncTab() { if (ready) catchUp(); }
 async function loadFeed() {
   try {
     const r = await fetch(FEED_URL, { cache: 'no-store' });
@@ -215,14 +222,11 @@ function route() {
     if (ready) { renderFeed(); reloadState().then(changed => { if (changed && !$('#feed').hidden) keepFocus(renderFeed); }); }
   }
   else if (view === 'news') { renderScene(); news.render(); news.refresh(); window.scrollTo(0, 0); }
-  else { requestAnimationFrame(() => requestAnimationFrame(() => $('#frame').classList.remove('zoom'))); renderRoom(); refreshTv(); }
+  // Back in the room: what was read or dismissed shows at once, then a fresh catch-up round fetches the
+  // edition and breaking story again (a new morning edition, a new breaking story) and the TV redraws.
+  // A failed fetch keeps what was there; the room redraws either way.
+  else { requestAnimationFrame(() => requestAnimationFrame(() => $('#frame').classList.remove('zoom'))); renderRoom(); if (ready) catchUp({ force: true }); }
 }
-// Back in the room (or back to the tab): what was read or dismissed shows at once, then the edition and
-// breaking story are fetched again (a new morning edition, a new breaking story) and the TV redraws.
-// A failed fetch keeps what was there; the room redraws either way. One refresh at a time: a burst of
-// tab events shares the one running, and an older refresh's answer never draws over a newer one.
-const refreshTv = createRefresher(() => news.refresh(), renderRoom);
-document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible' && !$('#room').hidden) refreshTv(); });
 
 /* ================= the feed ================= */
 let shelf = 'all', editing = null, confirming = null, openArticle = null;

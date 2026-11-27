@@ -135,6 +135,13 @@ describe('createRefresher (one room refresh at a time)', () => {
     assert.deepEqual([runs, draws], [2, 2]);
   });
 
+  test('the draw gets the answer (app.js redraws the feed only if it changed), or nothing when the work failed', async () => {
+    const got = [];
+    await createRefresher(() => Promise.resolve(true), (a) => got.push(a))();
+    await createRefresher(() => Promise.reject(new Error('offline')), (...a) => got.push(a.length))();
+    assert.deepEqual(got, [true, 0]);
+  });
+
   test('a failed refresh still draws (the room keeps what it had), and never rejects', async () => {
     let draws = 0;
     const refresh = createRefresher(() => Promise.reject(new Error('offline')), () => { draws++; });

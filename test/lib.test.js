@@ -9,7 +9,7 @@ import { isHttpsLink } from '../server/schema-common.js';
 import { checkState } from '../server/state-store.js';
 import {
   articlesFor, autoPhase, awardText, blank, createStateClient, dayKey, esc, fmtDate, fmtDay, freshBadges, level, mentorLine,
-  markArticleRead, mergeFeedState, moon, normalizeState, readArticle, readsThisWeek, safeUrl, streak, sunTimes, themeScores, toggleArticleRead, wilaLine,
+  markArticleRead, mergeFeedState, moon, newestAnswer, normalizeState, readArticle, readsThisWeek, safeUrl, streak, sunTimes, themeScores, toggleArticleRead, wilaLine,
 } from '../app/lib.js';
 
 const MIN = 60e3;
@@ -470,6 +470,40 @@ describe("mentorLine (Wila's note on the Product Feed)", () => {
   });
 });
 
+describe('newestAnswer (overlapping fetches of the same thing, N5)', () => {
+  test('an older answer arriving after a newer one has been used is dropped', () => {
+    const order = newestAnswer();
+    const first = order.start();
+    const second = order.start();
+    assert.equal(second(), true);
+    assert.equal(first(), false);
+  });
+
+  test('answers arriving in order are all used', () => {
+    const order = newestAnswer();
+    const first = order.start();
+    const second = order.start();
+    assert.equal(first(), true);
+    assert.equal(second(), true);
+  });
+
+  test('an older answer arriving first is used: it is newer than what was there', () => {
+    const order = newestAnswer();
+    const a = order.start(), b = order.start(), c = order.start();
+    assert.equal(b(), true);
+    assert.equal(a(), false);
+    assert.equal(c(), true);
+  });
+
+  test('each list keeps its own order', () => {
+    const edition = newestAnswer(), breaking = newestAnswer();
+    const e1 = edition.start(), b1 = breaking.start(), e2 = edition.start();
+    assert.equal(e2(), true);
+    assert.equal(b1(), true, 'the breaking story has no newer fetch');
+    assert.equal(e1(), false);
+  });
+});
+
 describe('createStateClient', () => {
   const settle = () => new Promise((resolve) => setImmediate(resolve));
   const okResponse = (value = {}) => ({ ok: true, status: 200, json: async () => value });
@@ -887,6 +921,77 @@ describe('createStateClient', () => {
       hold();
       assert.deepEqual(await pending, { ok: false });
       assert.deepEqual(A.S.notes, [{ id: 'mine' }], 'not replaced');
+    });
+
+    // GETs held until released one by one, so their answers can arrive in any order.
+    function heldGets(srv) {
+      const held = [];
+      const fetchFn = (url, opts = {}) => {
+        if (opts.method) return srv.fetchFn(url, opts);
+        const value = structuredClone(srv.value); // what the server had when the GET arrived
+        return new Promise((resolve) => held.push(() => resolve({ ok: true, status: 200, json: async () => value })));
+      };
+      return { held, fetchFn };
+    }
+
+    test('N5: a change made while the GET was out still wins even if its save has already landed', async () => {
+      // The answer was read before the change, so applying it would undo the change here (a dismissed
+      // breaking story coming back on the TV) until the next reload.
+      const srv = memoryServer({ xp: 0, notes: [] });
+      const gets = heldGets(srv);
+      const A = tab(srv, { fetchFn: gets.fetchFn });
+      const loading = A.client.load();
+      gets.held.shift()();
+      A.S = (await loading).state;
+      const pending = A.client.reload((fresh) => { A.S = fresh; });
+      await settle();
+      A.S.notes.push({ id: 'mine' });
+      A.client.save();
+      await A.client.flush(); // the PUT lands: the client is idle again before the GET answers
+      assert.equal(A.client.dirty, false);
+      gets.held.shift()(); // the old answer, read before the note
+      assert.deepEqual(await pending, { ok: false });
+      assert.deepEqual(A.S.notes.map((n) => n.id), ['mine'], 'the change made while the GET was out stays');
+    });
+
+    test('N5: two overlapping reloads: an older answer arriving last never replaces a newer one', async () => {
+      const srv = memoryServer({ xp: 0, notes: [] });
+      const gets = heldGets(srv);
+      const A = tab(srv, { fetchFn: gets.fetchFn });
+      const loading = A.client.load();
+      gets.held.shift()();
+      A.S = (await loading).state;
+      const apply = (fresh) => { A.S = fresh; };
+      const older = A.client.reload(apply); // the server has no notes yet
+      srv.value = { ...srv.value, notes: [{ id: 'from-the-other-tab' }] };
+      const newer = A.client.reload(apply);
+      await settle();
+      gets.held[1](); // the newer answer first
+      assert.equal((await newer).ok, true);
+      assert.deepEqual(A.S.notes.map((n) => n.id), ['from-the-other-tab']);
+      gets.held[0](); // then the older one
+      assert.deepEqual(await older, { ok: false });
+      assert.deepEqual(A.S.notes.map((n) => n.id), ['from-the-other-tab'], 'not set back');
+    });
+
+    test('N5: overlapping reloads answering in order both apply, the newer last', async () => {
+      const srv = memoryServer({ xp: 0, notes: [] });
+      const gets = heldGets(srv);
+      const A = tab(srv, { fetchFn: gets.fetchFn });
+      const loading = A.client.load();
+      gets.held.shift()();
+      A.S = (await loading).state;
+      const seen = [];
+      const apply = (fresh) => { A.S = fresh; seen.push(fresh.notes.length); };
+      const older = A.client.reload(apply);
+      srv.value = { ...srv.value, notes: [{ id: 'n1' }] };
+      const newer = A.client.reload(apply);
+      await settle();
+      gets.held[0]();
+      assert.equal((await older).ok, true);
+      gets.held[1]();
+      assert.equal((await newer).ok, true);
+      assert.deepEqual(seen, [0, 1]);
     });
 
     test('after a failed read, leaving the page sends nothing and keeps the change waiting', async () => {

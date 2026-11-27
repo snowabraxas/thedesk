@@ -408,11 +408,33 @@ describe('app/app.js', () => {
   test('the room learns the News state on load, on coming back from a desk, and when the tab comes back', () => {
     const js = read('app.js');
     assert.match(js, /Promise\.all\(\[loadState\(\), loadFeed\(\), news\.load\(\)\]\)\.then\(\(\) => \{ ready = true; renderAll\(\); \}\);/);
-    assert.match(js, /else \{ requestAnimationFrame\(\(\) => requestAnimationFrame\(\(\) => \$\('#frame'\)\.classList\.remove\('zoom'\)\)\); renderRoom\(\); refreshTv\(\); \}/);
-    // A failed fetch keeps what was there, and the room redraws either way (never an error in the room).
-    // One refresh at a time (tv-lib's createRefresher): a burst of tab events shares the running one.
-    assert.match(js, /const refreshTv = createRefresher\(\(\) => news\.refresh\(\), renderRoom\);/);
-    assert.match(js, /document\.addEventListener\('visibilitychange', \(\) => \{ if \(document\.visibilityState === 'visible' && !\$\('#room'\)\.hidden\) refreshTv\(\); \}\);/);
+    // Back in the room: drawn at once from what is in memory, then a fresh catch-up round.
+    assert.match(js, /else \{ requestAnimationFrame\(\(\) => requestAnimationFrame\(\(\) => \$\('#frame'\)\.classList\.remove\('zoom'\)\)\); renderRoom\(\); if \(ready\) catchUp\(\{ force: true \}\); \}/);
+    // The tab coming back goes through the same round (syncTab), and the room redraws once after it,
+    // whether the round worked or failed (never an error in the room).
+    assert.match(js, /const catchUp = createRefresher\(catchUpRound, drawCaughtUp\);/);
+    assert.match(js, /function syncTab\(\) \{ if \(ready\) catchUp\(\); \}/);
+    assert.match(js, /function drawCaughtUp\(feedChanged\) \{\s*if \(!\$\('#feed'\)\.hidden\) \{ if \(feedChanged\) keepFocus\(renderFeed\); \}\s*else if \(!\$\('#room'\)\.hidden\) renderRoom\(\);\s*\}/);
+  });
+
+  test('one tab-return path: one listener each for visibilitychange and focus, both through syncTab', () => {
+    const js = read('app.js');
+    assert.equal((js.match(/addEventListener\('visibilitychange'/g) || []).length, 1, 'one visibilitychange listener');
+    assert.equal((js.match(/addEventListener\('focus'/g) || []).length, 1, 'one focus listener');
+    assert.doesNotMatch(js, /refreshTv/, 'no separate room refresh');
+    assert.doesNotMatch(js, /let syncing/, 'the in-flight guard is createRefresher, not a flag that drops the second event');
+    // One round: Product Feed's state (unless busy), and News's state with (outside the feed) the
+    // edition and breaking story, without reloading Product Feed's state a second time.
+    assert.match(js, /const \[feedChanged\] = await Promise\.all\(\[busy \? false : reloadState\(\), \$\('#feed'\)\.hidden \? news\.refresh\(\{ xp: false \}\) : news\.sync\(\)\]\);/);
+    assert.match(read('news.js'), /async function refresh\(\{ xp = true \} = \{\}\) \{/);
+  });
+
+  test('overlapping fetches use only the newest answer: the edition, the breaking story and both states', () => {
+    const nj = read('news.js');
+    assert.match(nj, /import \{ createStateClient, newestAnswer \} from '\.\/lib\.js';/);
+    assert.match(nj, /const take = editionAnswers\.start\(\);\s*try \{\s*const d = await getJson\(NEWS_URL\);\s*if \(take\(\)\) news = /);
+    assert.match(nj, /const take = breakingAnswers\.start\(\);\s*try \{\s*const d = await getJson\(BREAKING_URL\);\s*if \(take\(\)\) breaking = /);
+    assert.doesNotMatch(nj.replace(/if \(take\(\)\) (news|breaking) = /g, ''), /^\s*(news|breaking) = /m, 'no other place sets them after a fetch');
   });
 
   test('reading a News story pays through the same award() as the feed, once everything has loaded', () => {
@@ -429,7 +451,7 @@ describe('app/app.js', () => {
 
   test('two tabs: opening #news reloads both states, applied only if nothing changed while the reload was out', () => {
     const nj = read('news.js');
-    assert.match(nj, /await Promise\.all\(\[store\.reload\(applyState\), reloadXpState\(\), loadEdition\(\), loadBreaking\(\)\]\);/);
+    assert.match(nj, /await Promise\.all\(\[store\.reload\(applyState\), xp \? reloadXpState\(\) : null, loadEdition\(\), loadBreaking\(\)\]\);/);
     assert.match(nj, /function applyState\(fresh\) \{\s*N = fresh;\s*\}/);
     assert.doesNotMatch(nj, /N = state\.state/, 'never replaced after the await, only inside reload');
     assert.match(read('app.js'), /async function reloadState\(\) \{\s*if \(!ready\) return false;\s*const before = JSON\.stringify\(S\);\s*await store\.reload\(\(fresh\) => \{ S = fresh; \}\);/);
@@ -446,7 +468,7 @@ describe('app/app.js', () => {
   test('a tab catches up before it can act: on becoming visible, on focus, and when the feed opens', () => {
     const js = read('app.js');
     assert.match(js, /window\.addEventListener\('focus', syncTab\);/);
-    assert.match(js, /const \[feedChanged\] = await Promise\.all\(\[busy \? false : reloadState\(\), news\.sync\(\)\]\);/);
+    assert.match(js, /const \[feedChanged\] = await Promise\.all\(\[busy \? false : reloadState\(\), \$\('#feed'\)\.hidden \? news\.refresh\(\{ xp: false \}\) : news\.sync\(\)\]\);/);
     assert.match(js, /if \(ready\) \{ renderFeed\(\); reloadState\(\)\.then\(changed => \{ if \(changed && !\$\('#feed'\)\.hidden\) keepFocus\(renderFeed\); \}\); \}/);
   });
 

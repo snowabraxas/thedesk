@@ -37,15 +37,16 @@ export function readSignals(ask) {
 }
 
 /**
- * One refresh at a time. `run` starts the work (news.refresh: fetch the edition and breaking story
- * again) and `apply` draws the result (renderRoom), whether the work succeeded or failed.
- * - While a refresh is running, refresh() hands back that same promise, so a burst of tab events
- *   starts one pair of fetches, not one per event.
+ * One refresh at a time. `run` does the work (app.js's catch-up: reload both states, fetch the edition
+ * and breaking story again) and `apply` draws the result: apply(answer) when it worked, apply() when
+ * it failed (the room keeps what it had and still redraws).
+ * - While a refresh is running, refresh() hands back that same promise, so a tab return (which fires
+ *   visibilitychange and focus) or a burst of events starts one round of fetches, not one per event.
  * - Every refresh that starts gets a number, and only the newest may apply: refresh({ force: true })
- *   starts a new one even while another runs, and the older one's answer is then dropped, so it can
- *   never draw last. (Nothing forces yet; N4's tab-return path will.)
+ *   starts a new one even while another runs (opening the room does), and the older one's answer is
+ *   then dropped, so it can never draw last.
  * @param {() => unknown} run
- * @param {() => void} apply
+ * @param {(answer?: unknown) => void} apply
  * @returns {(options?: { force?: boolean }) => Promise<void>}
  */
 export function createRefresher(run, apply) {
@@ -54,8 +55,8 @@ export function createRefresher(run, apply) {
   return function refresh({ force = false } = {}) {
     if (running && !force) return running;
     const mine = ++latest;
-    const settle = () => {
-      if (mine === latest) apply();
+    const settle = (...answer) => {
+      if (mine === latest) apply(...answer);
     };
     let work;
     try {
@@ -63,7 +64,7 @@ export function createRefresher(run, apply) {
     } catch (e) {
       work = Promise.reject(e);
     }
-    const done = work.then(settle, settle).finally(() => {
+    const done = work.then((answer) => settle(answer), () => settle()).finally(() => {
       if (running === done) running = null;
     });
     running = done;

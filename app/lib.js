@@ -193,6 +193,27 @@ export async function readArticle(getState, id, { canPay = true, peek, also = as
   return markArticleRead(getState(), id, { canAward: pay });
 }
 
+/**
+ * Keeps overlapping fetches of the same thing in order. start() is called as a fetch goes out and
+ * returns take(), to call when its answer arrives: true if the answer may be used, that is if no fetch
+ * that started later has had its answer used yet. So an older answer that arrives last never replaces
+ * a newer one, and an older one that arrives first is still used (it is newer than what was there).
+ */
+export function newestAnswer() {
+  let started = 0;
+  let used = 0;
+  return {
+    start() {
+      const mine = ++started;
+      return () => {
+        if (mine < used) return false;
+        used = mine;
+        return true;
+      };
+    },
+  };
+}
+
 /** An id for this page load (letters, digits and dashes), so the server can tell its saves apart. */
 function randomTabId() {
   const c = globalThis.crypto;
@@ -246,6 +267,8 @@ export function createStateClient({
   let lastReadOk = false;
   let base = {}; // counters as last synced with the server
   let running = null; // the flush on its way, if any
+  let edits = 0; // save() calls so far: a reload that went out before one never applies its answer
+  const reloads = newestAnswer(); // overlapping reloads: an older answer never replaces a newer one
 
   // Read the small reply even when only the status matters, so the browser can finish the request.
   const finish = async (r) => {
@@ -310,12 +333,16 @@ export function createStateClient({
   const idle = () => !dirty && !writing;
   /**
    * The server's copy, handed to apply(state) to replace this tab's, but only when nothing is
-   * waiting to be saved, before the GET and in the instant it is applied.
+   * waiting to be saved, before the GET and in the instant it is applied; only when nothing changed
+   * here while the GET was out (not even a change already saved: the answer wouldn't have it); and
+   * only when no reload that went out later has applied its answer.
    */
   async function reload(apply = () => {}) {
     if (!canSave || !idle()) return { ok: false };
+    const take = reloads.start();
+    const editsBefore = edits;
     const r = await peek();
-    if (!r.ok || !idle()) return { ok: false };
+    if (!r.ok || !idle() || edits !== editsBefore || !take()) return { ok: false };
     base = countersOf(r.state);
     apply(r.state);
     return r;
@@ -323,6 +350,7 @@ export function createStateClient({
 
   function save() {
     if (!canSave) return;
+    edits++;
     dirty = true;
     clearTimeout(timer);
     timer = setTimeout(flush, delay);
