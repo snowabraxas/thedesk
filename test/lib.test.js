@@ -1,8 +1,11 @@
 // app/lib.js: the front end's pure logic. npm test runs with TZ=America/Toronto.
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import fs from 'node:fs';
+import path from 'node:path';
 import { describe, test } from 'node:test';
 import { REPO_ROOT } from '../server/config.js';
+import { isHttpsLink } from '../server/schema-common.js';
 import {
   articlesFor, autoPhase, awardText, blank, createStateClient, dayKey, esc, fmtDate, fmtDay, freshBadges, level, mentorLine,
   moon, normalizeState, readsThisWeek, safeUrl, streak, sunTimes, themeScores, wilaLine,
@@ -121,6 +124,74 @@ describe('safeUrl', () => {
     for (const u of ['http://example.com', 'javascript:alert(1)', 'data:text/html,hi', ' https://example.com', 'HTTPS://example.com', 'https://', '//example.com', '', null, undefined, 42, {}]) {
       assert.equal(safeUrl(u), null, String(u));
     }
+  });
+
+  // The server's rules from N2 (isHttpsLink in server/schema-common.js), link for link.
+  const GOOD = [
+    'https://example.com',
+    'https://example.com/',
+    'https://www.example.com/a/b?x=1&y=2#top',
+    'https://Example.COM/path',
+    'https://example.com:8443/x',
+    'https://example.com:/x',
+    'https://example.com./x',
+    'https://my_bucket.s3.amazonaws.com/report.pdf',
+    'https://xn--bcher-kva.de/',
+    'https://example.com/@snow',
+    'https://example.com/?by=a@b',
+    'https://example.com/%E2%80%8C',
+    'https://digital-strategy.ec.europa.eu/en/policies/ai-office',
+  ];
+  const BAD = {
+    'a user name': 'https://user@example.com/',
+    'a user name and password': 'https://user:pw@example.com/',
+    'only a password': 'https://:pw@example.com/',
+    'empty user info': 'https://@example.com/',
+    'empty user info after an extra slash': 'https:///@example.com/',
+    'a password with a raw slash': 'https://id:a/b@example.com/',
+    'a space': 'https://example.com/a b',
+    'a tab': 'https://exa\tmple.com/',
+    'a newline': 'https://example.com/\n',
+    'a backslash': 'https://example.com\\@evil.com/',
+    'a zero-width joiner': 'https://exa‍mple.com/',
+    'a right-to-left override': 'https://example.com/‮fdp.exe',
+    'a soft hyphen': 'https://exam­ple.com/',
+    'a byte-order mark': 'https://example.com/﻿',
+    'a control character': 'https://example.com/\u0007',
+    'a division slash lookalike': 'https://example.com∕evil.com/',
+    'a fullwidth site': 'https://ｅｘａｍｐｌｅ.com/',
+    'a non-ASCII site': 'https://bücher.de/',
+    'a percent-encoded site': 'https://ex%61mple.com/',
+    'an IPv4 address': 'https://127.0.0.1/',
+    'a public IPv4 address': 'https://8.8.8.8/',
+    'a numeric IPv4 form': 'https://2130706433/',
+    'a hex IPv4 form': 'https://0x7f.1/',
+    'a short IPv4 form': 'https://127.1/',
+    'an IPv6 address': 'https://[::1]/',
+    'localhost': 'https://localhost/',
+    'a localhost subdomain': 'https://desk.localhost/',
+    'a one-word site': 'https://intranet/',
+    'no site': 'https:///path',
+    'a port too large': 'https://example.com:99999/',
+    'http': 'http://example.com/',
+  };
+
+  test('keeps links that pass the server rules', () => {
+    for (const u of GOOD) assert.equal(safeUrl(u), u, u);
+  });
+
+  for (const [what, u] of Object.entries(BAD)) {
+    test(`refuses a link with ${what}`, () => assert.equal(safeUrl(u), null, JSON.stringify(u)));
+  }
+
+  test('agrees with the server contract on every link above', () => {
+    for (const u of [...GOOD, ...Object.values(BAD)]) assert.equal(safeUrl(u) !== null, isHttpsLink(u), JSON.stringify(u));
+  });
+
+  test('every link in the Product Feed sample still passes', () => {
+    const feed = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'prototype/feed.json'), 'utf8'));
+    assert.ok(feed.articles.length > 0);
+    for (const a of feed.articles) assert.equal(safeUrl(a.url), a.url, a.url);
   });
 });
 
@@ -516,6 +587,49 @@ describe('createStateClient', () => {
     assert.deepEqual(JSON.parse(srv.puts[0].body), { xp: 5 });
     t.mock.timers.tick(600);
     assert.equal(srv.puts.length, 1, 'the debounced save was cancelled');
+  });
+
+  describe('for another desk (News: its own endpoint, normalizer and blank state)', () => {
+    const newsBlank = () => ({ read: {}, shelfOpen: false });
+    const newsNormalize = (raw) => ({ ...newsBlank(), ...(raw && typeof raw === 'object' ? raw : {}) });
+    const newsClient = (srv, S = {}) =>
+      createStateClient({ url: '/api/news/state', normalize: newsNormalize, empty: newsBlank, getState: () => S, fetchFn: srv.fetchFn });
+
+    test('loads from its endpoint through its own normalizer', async () => {
+      const srv = fakeServer(okResponse({ read: { '2026-12-07/s1': 1 } }));
+      const r = await newsClient(srv).load();
+      assert.equal(r.ok, true);
+      assert.deepEqual(r.state, { read: { '2026-12-07/s1': 1 }, shelfOpen: false });
+      assert.equal(srv.calls[0].url, '/api/news/state');
+      assert.equal('xp' in r.state, false, "no Product Feed keys in News's state");
+    });
+
+    test('saves to its endpoint', async (t) => {
+      t.mock.timers.enable({ apis: ['setTimeout'] });
+      const srv = fakeServer(okResponse({}));
+      const S = { read: {}, shelfOpen: true };
+      const client = newsClient(srv, S);
+      await client.load();
+      client.save();
+      t.mock.timers.tick(600);
+      assert.equal(srv.putCalls().length, 1);
+      assert.equal(srv.putCalls()[0].url, '/api/news/state');
+      assert.deepEqual(JSON.parse(srv.putCalls()[0].body), S);
+    });
+
+    test('a failed GET gives its own blank state and never saves', async (t) => {
+      t.mock.timers.enable({ apis: ['setTimeout'] });
+      const srv = fakeServer({ ok: false, status: 500, json: async () => ({}) });
+      const client = newsClient(srv, { read: {} });
+      const r = await client.load();
+      assert.equal(r.ok, false);
+      assert.deepEqual(r.state, newsBlank());
+      client.save();
+      t.mock.timers.tick(60_000);
+      await settle();
+      assert.equal(client.flushOnExit(), false);
+      assert.equal(srv.putCalls().length, 0);
+    });
   });
 
   test('a state too big for keepalive is still sent, without keepalive', async (t) => {

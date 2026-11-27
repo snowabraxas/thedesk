@@ -10,14 +10,46 @@ export const PHASE_LABEL = { morning: 'Daylight', golden: 'Golden hour', night: 
 export const esc = (v) =>
   String(v ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 
-/** Returns the URL only if it is a well-formed https:// link, otherwise null. */
+// The same link rules as the server's contract (isHttpsLink in server/schema-common.js), kept
+// here too so a link that somehow got past the server still never becomes a link on the page.
+// No spaces, backslashes (a browser reads \ as /) or hidden characters: controls, format and
+// invisible characters, by Unicode property.
+const LINK_UNSAFE = /[\s\\\p{Cc}\p{Cf}\p{Cs}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}]/u;
+// The site as written: plain ASCII letters, digits, dots, dashes and underscores (xn-- punycode
+// covers other alphabets), with an optional port, which may be empty ("example.com:/x").
+const PLAIN_SITE = /^([A-Za-z0-9._-]+)(?::\d{0,5})?$/;
+// The URL parser writes every IPv4 form (0x7f.1, 2130706433, 127.1) as four decimal numbers.
+const IPV4_HOST = /^\d+\.\d+\.\d+\.\d+$/;
+
+/**
+ * Returns the link only if The Desk may show it as a link, otherwise null:
+ * - it starts with https:// and parses;
+ * - no user name or password before the site (https://user:pw@host), even an empty one;
+ * - the site is written in plain ASCII and is exactly the site the browser opens
+ *   (so no lookalike characters, percent-encoding or numeric forms);
+ * - not an IP address, localhost or a one-word site with no dot;
+ * - no spaces, backslashes or hidden characters anywhere.
+ */
 export function safeUrl(u) {
-  if (typeof u !== 'string' || !u.startsWith('https://')) return null;
+  if (typeof u !== 'string' || !u.startsWith('https://') || LINK_UNSAFE.test(u)) return null;
+  const rest = u.slice('https://'.length);
+  // User info as the browser finds it: past any extra slashes, before the site part ends at / ? or #.
+  const site = rest.replace(/^\/+/, '');
+  const siteEnd = site.search(/[/?#]/);
+  if ((siteEnd === -1 ? site : site.slice(0, siteEnd)).includes('@')) return null;
+  let url;
   try {
-    return new URL(u).protocol === 'https:' ? u : null;
+    url = new URL(u);
   } catch {
     return null;
   }
+  if (url.protocol !== 'https:' || url.username !== '' || url.password !== '') return null;
+  const end = rest.search(/[/?#]/);
+  const written = PLAIN_SITE.exec(end === -1 ? rest : rest.slice(0, end));
+  if (!written || written[1].toLowerCase() !== url.hostname) return null;
+  const host = url.hostname.replace(/\.$/, '');
+  if (IPV4_HOST.test(url.hostname) || !host.includes('.') || host === 'localhost' || host.endsWith('.localhost')) return null;
+  return u;
 }
 
 export const cnt = (o) => Object.keys(o || {}).length;
@@ -70,7 +102,9 @@ export function normalizeState(raw) {
 }
 
 /**
- * Loads and saves Snow's state through the server (GET and PUT /api/state).
+ * Loads and saves one desk's state through the server: GET and PUT on `url` (Product Feed's
+ * /api/state by default, News's /api/news/state). `normalize` turns what the GET answered into a
+ * usable state and `empty` makes the blank one; both default to Product Feed's.
  * - Nothing is saved until load() has succeeded, so a blank state can never overwrite the saved one.
  * - save() is debounced; only one PUT is in flight at a time, and changes made meanwhile follow it.
  * - A failed PUT keeps the state in memory, calls onSaveFail once (until a save works again),
@@ -81,6 +115,8 @@ export function normalizeState(raw) {
 export function createStateClient({
   getState,
   url = '/api/state',
+  normalize = normalizeState,
+  empty = blank,
   fetchFn = (...args) => globalThis.fetch(...args),
   onSaveFail = () => {},
   delay = 600,
@@ -111,12 +147,12 @@ export function createStateClient({
         await finish(r);
         throw new Error(`GET ${url} answered ${r.status}`);
       }
-      const state = normalizeState(await r.json());
+      const state = normalize(await r.json());
       canSave = true;
       return { ok: true, state };
     } catch (error) {
       canSave = false;
-      return { ok: false, state: blank(), error };
+      return { ok: false, state: empty(), error };
     }
   }
 
