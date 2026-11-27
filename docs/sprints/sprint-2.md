@@ -11,7 +11,7 @@ Update this table the moment a story changes state (Not started, In progress, In
 
 | Story | Owner | Status | Note |
 | --- | --- | --- | --- |
-| L1 Lotus theme on The Desk and Product Feed | Lead dev | In review | Snow approved; tester re-check, then live on 4321 |
+| L1 Lotus theme on The Desk and Product Feed | Lead dev | Done | Live on 4321 since 27 Nov. Tester leftovers (theme map label contrast, title focus ring, two small Undo fixes) moved to N6 |
 | N1 Live copy separate from work in progress | Developer | Not started | Snow's OK to install |
 | N2 News contract: schemas and validator | Developer, tester | Not started | |
 | N3 News server routes | Developer, tester | Not started | |
