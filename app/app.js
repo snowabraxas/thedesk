@@ -4,7 +4,7 @@
 import {
   PHASE_LABEL, WEEK_GOAL, BADGES, articlesFor, autoPhase, awardText, blank, cnt, createStateClient, dayKey, esc, fmtDate, fmtDay,
   freshBadges, level as levelFor, mentorLine, moon, moonPath, readsThisWeek as readsSince, safeUrl,
-  readArticle, streak as streakOf, themeScores as scoresFor, uid, wilaLine,
+  feedOps, readArticle, streak as streakOf, themeScores as scoresFor, uid, wilaLine,
 } from './lib.js';
 import { createNewsPage } from './news.js';
 
@@ -322,19 +322,19 @@ $('#shelfList').addEventListener('click', e => {
   else if (t.dataset.edit) { editing = t.dataset.edit; confirming = null; renderShelves(); }
   else if (t.dataset.del) { confirming = t.dataset.del; editing = null; renderShelves(); refocus('[data-del-no]'); }
   else if (t.dataset.delYes) {
-    const f = S.folders.find(x => x.id === t.dataset.delYes); if (!f) return;
-    const snapshot = JSON.parse(JSON.stringify(S.saved));
-    S.folders = S.folders.filter(x => x.id !== f.id);
-    Object.keys(S.saved).forEach(k => { S.saved[k] = S.saved[k].filter(id => id !== f.id); if (!S.saved[k].length) delete S.saved[k]; });
+    // Every change to notes, folders, saved items and reads goes through feedOps, which tells the
+    // state client what changed: the server merges by item, so a delete must be said out loud.
+    const undo = feedOps.deleteFolder(S, store, t.dataset.delYes); if (!undo) return;
+    const f = undo.folder;
     if (shelf === 'f:' + f.id) shelf = 'all';
     confirming = null; save(); renderFeed(); refocus('#folderName');
-    toast(`Deleted “${f.name}”.`, 'Undo', () => { S.folders.push(f); S.saved = snapshot; save(); renderFeed(); });
+    toast(`Deleted “${f.name}”.`, 'Undo', () => { feedOps.restoreFolder(S, store, undo); save(); renderFeed(); });
   } else if ('delNo' in t.dataset) { const id = confirming; confirming = null; renderShelves(); refocus(attrSel('data-del', id)); }
 });
 function finishRename(inp, keep) {
   const id = inp.dataset.rename;
   const f = S.folders.find(x => x.id === id); const v = inp.value.trim();
-  if (keep && f && v) { f.name = v; save(); }
+  if (keep && f && v && feedOps.renameFolder(S, store, id, v)) save();
   editing = null; renderFeed(); refocus(attrSel('data-edit', id));
 }
 // Enter or Escape ends a rename. finishRename moves focus to the pencil button during this key press,
@@ -349,7 +349,7 @@ $('#folderForm').addEventListener('submit', e => {
   e.preventDefault(); if (!ready) return;
   const v = $('#folderName').value.trim(); if (!v) return;
   const first = !S.folders.length;
-  S.folders.push({ id: uid(), name: v }); $('#folderName').value = '';
+  feedOps.addFolder(S, store, { id: uid(), name: v }); $('#folderName').value = '';
   first ? award(5, 'folder made') : save();
   renderFeed();
 });
@@ -359,6 +359,7 @@ $('#folderForm').addEventListener('submit', e => {
 let reads = Promise.resolve();
 async function readOne(id) {
   const r = await readArticle(() => S, id, { canPay: store.canSave, peek: () => store.peek(), also: reloadState });
+  feedOps.read(store, id, r.read);
   if (r.award) award(10, 'article read'); else save();
   renderFeed(); refocus(attrSel('data-read', id), '#listTitle');
 }
@@ -369,13 +370,12 @@ $('#list').addEventListener('click', e => {
 });
 $('#list').addEventListener('change', e => {
   const c = e.target.closest('[data-save]'); if (!c) return;
-  const a = c.dataset.save; const cur = new Set(S.saved[a] || []); const wasSaved = cur.size > 0;
-  c.checked ? cur.add(c.value) : cur.delete(c.value);
-  if (cur.size) S.saved[a] = [...cur]; else delete S.saved[a];
-  (!wasSaved && cur.size) ? award(5, 'saved to a folder') : save();
+  const a = c.dataset.save; const wasSaved = (S.saved[a] || []).length > 0;
+  const size = feedOps.setSaved(S, store, a, c.value, c.checked);
+  (!wasSaved && size) ? award(5, 'saved to a folder') : save();
   const open = c.closest('details'); renderShelves(); renderStats(); renderBadges(); drawMap();
   const sum = open && open.querySelector('summary');
-  if (sum) { sum.querySelector('.slbl').textContent = cur.size ? 'Saved' : 'Save'; sum.classList.toggle('on', cur.size > 0); }
+  if (sum) { sum.querySelector('.slbl').textContent = size ? 'Saved' : 'Save'; sum.classList.toggle('on', size > 0); }
 });
 document.addEventListener('click', e => { document.querySelectorAll('details.savebox[open]').forEach(d => { if (!d.contains(e.target)) d.open = false; }); });
 // Escape closes an open Save menu and returns to its button.
@@ -438,14 +438,14 @@ function renderNotes() {
 }
 $('#noteSave').addEventListener('click', () => {
   const v = $('#noteText').value.trim(); if (!v || !ready) return;
-  S.notes.push({ id: uid(), a: openArticle, text: v.slice(0, 4000), ts: Date.now() });
+  feedOps.addNote(S, store, { id: uid(), a: openArticle, text: v.slice(0, 4000), ts: Date.now() });
   $('#noteText').value = ''; award(15, 'note saved'); renderNotes();
 });
 $('#noteList').addEventListener('click', e => {
   const b = e.target.closest('[data-dn]'); if (!b) return;
-  const gone = S.notes.find(n => n.id === b.dataset.dn); if (!gone) return;
-  S.notes = S.notes.filter(n => n.id !== b.dataset.dn); save(); renderNotes(); $('#noteText').focus({ preventScroll: true });
-  toast('Note deleted.', 'Undo', () => { S.notes.push(gone); save(); renderNotes(); });
+  const gone = feedOps.deleteNote(S, store, b.dataset.dn); if (!gone) return;
+  save(); renderNotes(); $('#noteText').focus({ preventScroll: true });
+  toast('Note deleted.', 'Undo', () => { feedOps.restoreNote(S, store, gone); save(); renderNotes(); });
 });
 $('#dClose').addEventListener('click', closeDrawer);
 $('#scrim').addEventListener('click', closeDrawer);

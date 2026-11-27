@@ -8,7 +8,7 @@ import { REPO_ROOT } from '../server/config.js';
 import { isHttpsLink } from '../server/schema-common.js';
 import { checkState } from '../server/state-store.js';
 import {
-  articlesFor, autoPhase, awardText, blank, createStateClient, dayKey, esc, fmtDate, fmtDay, freshBadges, level, mentorLine,
+  articlesFor, autoPhase, awardText, blank, createStateClient, feedOps, dayKey, esc, fmtDate, fmtDay, freshBadges, level, mentorLine,
   markArticleRead, mergeFeedState, moon, normalizeState, readArticle, readsThisWeek, safeUrl, streak, sunTimes, themeScores, toggleArticleRead, wilaLine,
 } from '../app/lib.js';
 
@@ -261,6 +261,43 @@ describe('state and progress', () => {
     assert.deepEqual(S.days, ['2026-11-26', '2026-11-28']);
     assert.equal(S.xp, 0);
     assert.equal(checkState(S, 'product-feed', { now: () => now }).ok, true, 'the server accepts it');
+  });
+
+  test('normalizeState keeps ISO times with a zone, reads a zoneless one as UTC, and gives old notes and folders an id', () => {
+    const now = Date.parse('2026-11-27T15:00:00Z');
+    const S = normalizeState({
+      badges: { a: '2026-11-27T10:00:00-05:00', b: '2026-11-27T10:00:00', c: 'soon' },
+      notes: [{ text: 'no id' }, { id: 'n1', text: 'one' }, { id: 'n1', text: 'same id' }, null],
+      folders: [{ name: 'no id' }],
+    }, now);
+    assert.deepEqual(S.badges, { a: '2026-11-27T10:00:00-05:00', b: '2026-11-27T10:00:00Z', c: now });
+    assert.equal(S.notes.length, 3, 'every note kept');
+    assert.equal(new Set(S.notes.map((n) => n.id)).size, 3, 'each with its own id');
+    assert.equal(S.notes[1].id, 'n1');
+    assert.ok(S.folders[0].id);
+    assert.equal(checkState(S, 'product-feed', { now: () => now }).ok, true);
+  });
+
+  test('feedOps change the state and list each change for the server', () => {
+    const calls = [];
+    const store = { added: (k, id) => calls.push(['add', k, id]), removed: (k, id) => calls.push(['remove', k, id]) };
+    const S = blank();
+    feedOps.addFolder(S, store, { id: 'f1', name: 'Evals' });
+    feedOps.setSaved(S, store, 'a1', 'f1', true);
+    feedOps.renameFolder(S, store, 'f1', 'Evals reading');
+    feedOps.addNote(S, store, { id: 'n1', a: 'a1', text: 'x', ts: 1 });
+    const gone = feedOps.deleteNote(S, store, 'n1');
+    feedOps.restoreNote(S, store, gone);
+    const undo = feedOps.deleteFolder(S, store, 'f1');
+    assert.deepEqual([S.folders, S.saved], [[], {}]);
+    feedOps.restoreFolder(S, store, undo);
+    assert.deepEqual(S.saved, { a1: ['f1'] });
+    feedOps.read(store, 'a1', false);
+    assert.deepEqual(calls, [
+      ['add', 'folders', 'f1'], ['add', 'saved', ['a1', 'f1']], ['add', 'folders', 'f1'], ['add', 'notes', 'n1'], ['remove', 'notes', 'n1'], ['add', 'notes', 'n1'],
+      ['remove', 'folders', 'f1'], ['remove', 'saved', ['a1', 'f1']], ['add', 'folders', 'f1'], ['add', 'saved', ['a1', 'f1']], ['remove', 'read', 'a1'],
+    ]);
+    assert.equal(S.folders[0].name, 'Evals reading');
   });
 
   test('toggleArticleRead pays once per article, ever', () => {
@@ -946,6 +983,92 @@ describe('createStateClient', () => {
       assert.equal(A.client.flushOnExit(), false);
       assert.equal(srv.puts.length, 0);
       assert.equal(A.client.canSave, false);
+    });
+
+    test('each PUT lists the items added and removed since the last save that landed, then clears them', async () => {
+      const srv = memoryServer({ xp: 0 });
+      const A = tab(srv);
+      A.S = (await A.client.load()).state;
+      A.client.added('read', 'a1');
+      A.client.removed('notes', 'n1');
+      A.client.added('saved', ['a1', 'f1']);
+      A.client.removed('read', 'a2');
+      A.client.added('read', 'a2'); // the latest change to an item wins
+      A.client.save();
+      await A.client.flush();
+      assert.deepEqual(srv.puts[0]._added, { read: ['a1', 'a2'], saved: [['a1', 'f1']] });
+      assert.deepEqual(srv.puts[0]._removed, { notes: ['n1'] });
+      assert.equal(A.client.changesWaiting, 0);
+      A.client.save();
+      await A.client.flush();
+      assert.equal('_added' in srv.puts[1] || '_removed' in srv.puts[1], false, 'nothing listed twice');
+    });
+
+    test('a change made while a PUT is out waits for the next one; a failed PUT keeps its lists', async (t) => {
+      t.mock.timers.enable({ apis: ['setTimeout'] });
+      const srv = memoryServer({ xp: 0 });
+      let release;
+      let fail = true;
+      const fetchFn = (url, opts = {}) => {
+        if (opts.method === 'PUT' && fail) return new Promise((r) => (release = () => r({ ok: false, status: 500, text: async () => '' })));
+        return srv.fetchFn(url, opts);
+      };
+      const A = tab(srv, { fetchFn });
+      A.S = (await A.client.load()).state;
+      A.client.removed('notes', 'n1');
+      A.client.save();
+      const flushing = A.client.flush();
+      A.client.added('notes', 'n2'); // while the PUT is out
+      release();
+      await flushing;
+      assert.equal(A.client.changesWaiting, 2, 'the failed PUT kept n1, and n2 waits');
+      fail = false;
+      t.mock.timers.tick(15_000);
+      await settle();
+      const last = srv.puts.at(-1);
+      assert.deepEqual([last._removed, last._added], [{ notes: ['n1'] }, { notes: ['n2'] }]);
+      assert.equal(A.client.changesWaiting, 0);
+    });
+
+    test('leaving the page sends the lists too', async () => {
+      const srv = memoryServer({ xp: 0 });
+      const A = tab(srv);
+      A.S = (await A.client.load()).state;
+      A.client.removed('folders', 'f1');
+      A.client.save();
+      assert.equal(A.client.flushOnExit(), true);
+      await settle();
+      assert.deepEqual(srv.puts[0]._removed, { folders: ['f1'] });
+    });
+
+    test('a window switch while a PUT is out (nothing new waiting) does not send it again when it fails', async (t) => {
+      t.mock.timers.enable({ apis: ['setTimeout'] });
+      const srv = memoryServer({ xp: 0 });
+      let puts = 0;
+      let release;
+      const failed = { ok: false, status: 500, text: async () => '' };
+      const fetchFn = (url, opts = {}) => {
+        if (opts.method === 'PUT') {
+          puts++;
+          if (puts === 1) return new Promise((r) => (release = () => r(failed))); // the first is held, then fails
+          return Promise.resolve(failed); // any other fails at once
+        }
+        return srv.fetchFn(url, opts);
+      };
+      const A = tab(srv, { fetchFn });
+      A.S = (await A.client.load()).state;
+      A.client.save();
+      const flushing = A.client.flush();
+      A.client.flush(); // blur: nothing new
+      A.client.flush(); // visibilitychange: nothing new
+      release();
+      await flushing;
+      await settle();
+      assert.equal(puts, 1, 'no second PUT straight away');
+      t.mock.timers.tick(15_000);
+      await settle();
+      assert.equal(puts, 2, 'just the usual retry');
+      A.client.dispose();
     });
 
     test('a client whose first GET failed never reads, reloads or saves', async (t) => {

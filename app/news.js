@@ -196,6 +196,8 @@ export function createNewsPage({ award, toast, isReady, canAward, reloadXpState 
     // have paid for it already) while the latest XP is picked up.
     const canPay = !sample && store.canSave && canAward();
     const r = await readStory(() => N, key, { canPay, peek: () => store.peek(), also: reloadXpState });
+    // The server merges reads by item: a read is an addition, an un-mark a removal it passes on to every tab.
+    store[r.read ? 'added' : 'removed']('read', key);
     store.save();
     if (r.award) award(READ_XP, 'story read');
     else if (r.read && sample) toast('Sample story: marked read, no XP.');
