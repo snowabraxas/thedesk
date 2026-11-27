@@ -22,10 +22,11 @@ The Desk is an illustrated study that follows Snow's real day. Every object in t
 
 ## Working with the lead PM
 
-The lead PM (Claude in the Claude desktop app) can see this folder on the Mac mini and may write specs straight into `docs/`. This GitHub repo (`snowabraxas/thedesk`) stays the source of truth: anything the lead PM writes here, you commit and push with your next change.
+The lead PM (Claude in the Claude desktop app) and you meet right here, in this folder on the Mac mini (`~/Documents/Projects/the-desk`). Both of you can read and write it.
 
-- **Start of a session:** `git pull`, then `git status`. The lead PM may have pushed new specs, or written them straight into `docs/` without committing.
-- **End of a session:** update `docs/status.md` (what's done, what's next, any question for the lead PM, five lines or fewer), commit, and push.
+- **Start of a session:** read `docs/lead-pm-brief.md` for your next task, and `git status` to see what the lead PM changed since your last commit. Snow starts you with: "Read docs/lead-pm-brief.md and do it."
+- **End of a session:** update `docs/status.md` (what's done, what's next, any question for the lead PM, five lines or fewer). Then commit everything, the lead PM's edits included, and push.
+- GitHub (`snowabraxas/thedesk`) is the backup and history, not the meeting place.
 - Work on a branch per story and merge to `main` when the tester passes it. Snow reviews before anything big merges.
 - If a spec in `docs/` and the live plan disagree, ask Snow rather than guessing.
 
