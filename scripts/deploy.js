@@ -282,10 +282,17 @@ export async function deploy(cfg, deps, { dryRun = false } = {}) {
     oldSha = now.code === 0 && SHA.test(now.stdout.trim()) ? now.stdout.trim() : null;
   }
 
-  // A deploy cut off between its two renames leaves the live copy's packages in the staging folder
-  // as node_modules.old: put them back before the staging folder goes. A deploy cut off while it wrote
-  // .deployed.json leaves its temp file.
-  const restore = leftover && exists && !lexists(deps.fs, liveModules) && lexists(deps.fs, asideModules);
+  // The last deploy that went all the way through (.deployed.json). Its commit is where any rollback
+  // goes: an earlier deploy cut off after its checkout (Ctrl+C, a crash, a failed rollback) leaves HEAD
+  // on a commit that never went live, and going "back" to HEAD would keep the broken one.
+  const installed = exists ? readDeployed(live, { fsImpl: deps.fs }) : null;
+  const goodSha = installed?.sha ?? oldSha;
+  const cutOff = exists && installed !== null && oldSha !== installed.sha;
+
+  // Leftovers of an interrupted deploy. staging/node_modules.old only exists between a deploy's swap
+  // and its end, so it holds the packages from before that deploy: they always go back. The rest of
+  // the staging folder, and a .deployed.json temp file, are removed.
+  const restore = leftover && exists && lexists(deps.fs, asideModules);
   let tmpRecords = [];
   if (exists) {
     try {
@@ -297,7 +304,8 @@ export async function deploy(cfg, deps, { dryRun = false } = {}) {
   if (!dryRun && (leftover || tmpRecords.length)) {
     try {
       if (restore) {
-        out("Putting back the live copy's packages, which an interrupted deploy had moved aside…");
+        out("Putting back the live copy's packages from before an interrupted deploy…");
+        if (lexists(deps.fs, liveModules)) deps.fs.rmSync(liveModules, { recursive: true, force: true });
         deps.fs.renameSync(asideModules, liveModules);
       }
       if (leftover) {
@@ -313,16 +321,21 @@ export async function deploy(cfg, deps, { dryRun = false } = {}) {
     }
   }
 
+  if (cutOff) {
+    out(`(An earlier deploy was cut off: the live copy holds ${oldSha ? short(oldSha) : 'an unknown commit'}, but the last deploy that finished is ${describeDeployed(installed)}. If anything goes wrong now, deploy goes back to ${short(installed.sha)}.)`);
+  }
+
   // Do the packages need installing? Every package the live copy's package.json names must be in its
   // node_modules (the install guard checks the same). The base for the lockfile is the last deploy that
-  // went all the way through (.deployed.json): its packages are the ones in the live copy.
-  const installed = exists ? readDeployed(live, { fsImpl: deps.fs }) : null;
+  // went all the way through (.deployed.json): its packages are the ones in the live copy, unless an
+  // earlier deploy was cut off and nothing says whose packages are in.
   const modulesDir = dryRun && restore ? asideModules : liveModules; // a dry run judges what it would put back
   let why = null;
   if (!exists) why = 'a new live copy';
   else if (!deps.fs.existsSync(modulesDir)) why = 'node_modules is missing';
   else if (!isComplete(missingPackages(live, deps.fs, modulesDir))) why = 'node_modules is incomplete';
   else if (!installed) why = 'no earlier deploy is recorded';
+  else if (cutOff && !restore) why = "an earlier deploy was cut off, so whose packages are in can't be told";
   else if (installed.sha !== sha) {
     const d = await git(['-C', repo, 'diff', '--quiet', installed.sha, sha, '--', 'package-lock.json']);
     if (d.code !== 0) why = d.code === 1 ? 'package-lock.json changed' : "git couldn't tell whether package-lock.json changed";
@@ -330,7 +343,7 @@ export async function deploy(cfg, deps, { dryRun = false } = {}) {
   // Every file can be in place and still not load (ajv without fast-deep-equal): the same load check
   // as the install guard, so deploy repairs what the guard refuses.
   if (!why && exists && !(dryRun && restore)) {
-    const load = await loadCheck(live, cfg.service.nodePath, deps);
+    const load = await loadCheck(live, cfg.service, deps);
     if (!load.ok) why = `its server doesn't load: ${load.error}`;
   }
 
@@ -340,9 +353,13 @@ export async function deploy(cfg, deps, { dryRun = false } = {}) {
   const showArgs = (file) => ['-C', repo, 'show', `${sha}:${file}`];
   const moveArgs = !exists ? ['-C', repo, 'worktree', 'add', '--detach', live, sha] : ['-C', live, 'checkout', '--quiet', '--detach', sha];
   const moves = !exists || oldSha !== sha;
+  const verify = moves || why || cutOff; // anything new, or never checked, is load-checked before it goes live
 
   if (dryRun) {
-    if (restore) say(`Put the live copy's packages back, which an interrupted deploy had moved aside: mv ${shellQuote(asideModules)} ${shellQuote(liveModules)}`);
+    if (restore) {
+      const clear = lexists(deps.fs, liveModules) ? `rm -rf ${shellQuote(liveModules)} && ` : '';
+      say(`Put back the live copy's packages from before an interrupted deploy: ${clear}mv ${shellQuote(asideModules)} ${shellQuote(liveModules)}`);
+    }
     if (leftover) say(`Remove a staging folder left by an interrupted deploy: rm -rf ${shellQuote(staging)}`);
     if (tmpRecords.length) say(`Remove ${tmpRecords.length === 1 ? 'a temp file' : `${tmpRecords.length} temp files`} left by an interrupted deploy: ${tmpRecords.map((n) => shellQuote(path.join(live, n))).join(' ')}`);
     if (why) {
@@ -359,12 +376,42 @@ export async function deploy(cfg, deps, { dryRun = false } = {}) {
     else say(`The live copy is on ${oldSha ? short(oldSha) : 'an unknown commit'} and has no changes of its own. Move it to ${ref}:`);
     if (moves) out(`   ${commandLine(GIT, moveArgs)}`);
     if (why) {
-      say('Swap the new packages in, then remove the staging folder:');
+      say('Swap the new packages in (the old ones wait in the staging folder until the new code loads):');
       if (exists && (restore || lexists(deps.fs, liveModules))) out(`   mv ${shellQuote(liveModules)} ${shellQuote(asideModules)}`);
       out(`   mv ${shellQuote(path.join(staging, 'node_modules'))} ${shellQuote(liveModules)}`);
-      out(`   rm -rf ${shellQuote(staging)}`);
+    }
+    if (verify) {
+      say(`Check that the new code loads: ${shellQuote(cfg.service.nodePath)} imports server/index.js in the live copy, with the service's environment.`);
+      out(
+        exists && goodSha
+          ? `   If it doesn't, put ${short(goodSha)}${installed ? ' (the last deploy that finished)' : ''} and its packages back, check that loads, and stop without a restart: The Desk keeps running ${short(goodSha)}.`
+          : "   If it doesn't, stop without recording or restarting anything.",
+      );
+      if (why) out(`   Then remove the staging folder: rm -rf ${shellQuote(staging)}`);
     }
   } else {
+    // Puts the live copy back on the last finished deploy: the packages this run moved aside (if any),
+    // then its commit, then a load check. Reports what the copy actually holds afterwards.
+    const rollBack = async () => {
+      let packagesBack = true;
+      try {
+        if (lexists(deps.fs, asideModules)) {
+          if (lexists(deps.fs, liveModules)) deps.fs.rmSync(liveModules, { recursive: true, force: true });
+          deps.fs.renameSync(asideModules, liveModules);
+        }
+      } catch {
+        packagesBack = false;
+      }
+      if (goodSha && (await headOf(live)) !== goodSha) await git(['-C', live, 'checkout', '--quiet', '--detach', goodSha]);
+      const at = await headOf(live); // judged by HEAD: a hook may fail after the move
+      if (packagesBack) removeStaging(); // otherwise the old packages wait there for the next run
+      const load = at ? await loadCheck(live, cfg.service, deps) : { ok: false, error: "git can't read which commit it holds" };
+      const holds = at ? `${short(at)}${installed && at === installed.sha ? ' (the last deploy that finished)' : ''}` : 'an unknown commit';
+      if (packagesBack && load.ok) return `The live copy is back on ${holds} with its packages, and it loads. The Desk keeps running it (no restart).`;
+      const why = packagesBack ? load.error : "its old packages couldn't be put back";
+      return `The live copy holds ${holds}, but it doesn't load (${why}). The Desk keeps running in memory, but it can't start again (after a crash, a login or a reboot) until a deploy works.`;
+    };
+
     // 1. Packages first, in a staging folder beside the live copy, from the new commit's own
     // package.json and package-lock.json. npm ci empties node_modules before it installs, so it
     // never runs inside the live copy: if it fails, the live copy hasn't changed at all.
@@ -402,69 +449,61 @@ export async function deploy(cfg, deps, { dryRun = false } = {}) {
       out(`The live copy already holds ${ref} @ ${short(sha)}.`);
     }
     // git can fail after it has moved HEAD (a post-checkout hook that exits 1, say). So ask where the
-    // live copy is now: at the target, carry on; anywhere else, put it back on the old commit.
+    // live copy is now: at the target, carry on; anywhere else, roll back to the last finished deploy.
     if (moves) {
       const r = await git(moveArgs);
       if (r.code !== 0) {
         const at = deps.fs.existsSync(live) ? await headOf(live) : null;
         if (at === sha) {
           out(`Warning: git moved the live copy to ${short(sha)} but then said: ${gitError(r)}. Carrying on.`);
-        } else {
-          let back = exists && at !== null && at === oldSha;
-          if (exists && oldSha && at !== oldSha) {
-            await git(['-C', live, 'checkout', '--quiet', '--detach', oldSha]);
-            back = (await headOf(live)) === oldSha;
-          }
+        } else if (!exists) {
           removeStaging();
-          const where = !exists
-            ? 'The Desk was not restarted, so it keeps running what it had.'
-            : back
-              ? `The live copy is on ${short(oldSha)} as before, with its packages. The Desk was not restarted.`
-              : `The live copy is at ${at ? short(at) : 'an unknown commit'}, and The Desk was not restarted. Run npm run deploy again.`;
           return fail(
-            `git couldn't ${exists ? `move the live copy to ${ref}` : 'make the live copy'}: ${gitError(r)}`,
-            ...(exists ? [] : ['If it says the folder is a missing but already registered worktree, run git worktree prune, then npm run deploy again.']),
-            where,
+            `git couldn't make the live copy: ${gitError(r)}`,
+            'If it says the folder is a missing but already registered worktree, run git worktree prune, then npm run deploy again.',
+            'The Desk was not restarted, so it keeps running what it had.',
           );
+        } else {
+          return fail(`git couldn't move the live copy to ${ref}: ${gitError(r)}`, await rollBack(), 'Run npm run deploy again once that is sorted.');
         }
       }
     }
 
-    // 3. Swap the new packages in with renames (same disk, so each is instant), then tidy up.
-    // If the second rename fails, put everything back as it was: the old packages, the old commit.
+    // 3. Swap the new packages in with renames (same disk, so each is instant). The old ones wait in
+    // the staging folder until the load check below.
+    // If the second rename fails, roll back to the last finished deploy.
     if (why) {
-      let movedAside = false;
       try {
-        if (lexists(deps.fs, liveModules)) {
-          deps.fs.renameSync(liveModules, asideModules);
-          movedAside = true;
-        }
+        if (lexists(deps.fs, liveModules)) deps.fs.renameSync(liveModules, asideModules);
         deps.fs.renameSync(path.join(staging, 'node_modules'), liveModules);
       } catch (err) {
-        let restored = exists;
-        if (movedAside && !lexists(deps.fs, liveModules)) {
-          try {
-            deps.fs.renameSync(asideModules, liveModules);
-          } catch {
-            restored = false;
-          }
-        }
-        if (exists && moves && oldSha) {
-          await git(['-C', live, 'checkout', '--quiet', '--detach', oldSha]);
-          if ((await headOf(live)) !== oldSha) restored = false; // checked by HEAD: a hook may fail after the move
-        }
-        if (restored) removeStaging(); // otherwise the old packages wait there for the next run
-        return fail(
-          `Couldn't move the new packages into the live copy (${err.code || err.message}), so The Desk was not restarted.`,
-          restored ? `The live copy is back on ${oldSha ? short(oldSha) : 'its commit'} with its old packages.` : 'Run npm run deploy again: it repairs the live copy.',
-        );
+        const first = `Couldn't move the new packages into the live copy (${err.code || err.message}), so The Desk was not restarted.`;
+        if (!exists) return fail(first, 'Run npm run deploy again: it repairs the live copy.');
+        return fail(first, await rollBack(), 'Run npm run deploy again.');
       }
+    }
+
+    // 4. Does the new code load, the way the service will run it? If not, it never goes live: back to
+    // the last finished deploy (rollBack), and The Desk keeps running.
+    if (verify) {
+      const load = await loadCheck(live, cfg.service, deps);
+      if (!load.ok) {
+        const first = `The new code doesn't load, so it wasn't put live: ${load.error}`;
+        if (!exists) {
+          removeStaging();
+          return fail(first, 'Nothing was recorded or restarted. Fix main, then run npm run deploy again.');
+        }
+        return fail(first, await rollBack(), 'Fix main, then run npm run deploy again.');
+      }
+    }
+    if (why) {
       const left = removeStaging();
       if (left) out(`(Couldn't remove ${staging} (${left.code || left.message}). It's left for the next deploy to tidy.)`);
     }
   }
 
-  // 4. Remember what's deployed. Written last, so it only ever names a commit whose packages are in.
+  // 5. Remember what's deployed. Written last, so it only ever names a commit whose packages are in
+  // and whose code loads.
   // A deploy that changed nothing keeps the record (and its time) as it was.
   const unchanged = !why && !moves && installed !== null && installed.sha === sha;
   const record = unchanged ? installed : deployedRecord({ sha, subject, ref, deployedAt: localTimestamp(new Date(deps.now())) });
@@ -478,7 +517,7 @@ export async function deploy(cfg, deps, { dryRun = false } = {}) {
     writeFileAtomic(deps.fs, cfg.deployedFile, recordText);
   }
 
-  // 5. The service: it must run from the live copy before a restart means anything.
+  // 6. The service: it must run from the live copy before a restart means anything.
   const svc = cfg.service;
   const plist = readInstalledPlist(svc, deps);
   const moved = plist.installed && plist.runDir !== null && path.resolve(plist.runDir) === live;
@@ -521,17 +560,16 @@ export async function deploy(cfg, deps, { dryRun = false } = {}) {
 }
 
 /** The whole CLI, with everything outside injected. Returns the exit code. */
-export async function main(argv, { env = process.env, deps = realDeps(), cfg } = {}) {
+export async function main(argv, { env = process.env, deps: given, cfg } = {}) {
   const args = parseArgs(argv, env);
-  if (args.error) {
-    deps.err(`${args.error}\n\n${USAGE}`);
-    return 2;
+  if (args.error || args.help) {
+    const deps = given || realDeps();
+    if (args.error) deps.err(`${args.error}\n\n${USAGE}`);
+    else deps.out(USAGE);
+    return args.error ? 2 : 0;
   }
-  if (args.help) {
-    deps.out(USAGE);
-    return 0;
-  }
-  return deploy(cfg || deployConfig({ env }), deps, { dryRun: args.dryRun });
+  const config = cfg || deployConfig({ env });
+  return deploy(config, given || realDeps(config.service), { dryRun: args.dryRun }); // the launchctl guard checks this config
 }
 
 function runDirectly() {
