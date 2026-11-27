@@ -87,11 +87,12 @@ export function breakingHtml(b) {
     <button type="button" class="nbx" id="newsDismiss" aria-label="Dismiss breaking news">${ICON.close}</button>`;
 }
 
-/** The glance tiles' insides: the two numbers, the regions with bars, the kinds with counts. */
+/** The glance tiles' insides: three numbers (stories, sources, regions), the regions with bars, the kinds with counts. */
 export function glanceHtml(g) {
   const none = '<li class="nnone">No stories yet</li>';
+  const stat = (n, one, many) => `<p><b>${num(n)}</b><span>${n === 1 ? one : many}</span></p>`;
   return {
-    numbers: `<p><b>${num(g.stories)}</b><span>${g.stories === 1 ? 'story' : 'stories'}</span></p><p><b>${num(g.sources)}</b><span>${g.sources === 1 ? 'source' : 'sources'}</span></p>`,
+    numbers: stat(g.stories, 'story', 'stories') + stat(g.sources, 'source', 'sources') + stat(g.regions.length, 'region', 'regions'),
     regions: g.regions.length
       ? g.regions.map((r) => `<li><span class="nrname">${esc(r.label)}</span><span class="nrcount">${num(r.count)}</span><span class="nbar" aria-hidden="true"><span class="${regionClass(r.region)}" style="width:${num(Math.round(Math.min(1, Math.max(0, r.share)) * 100))}%"></span></span></li>`).join('')
       : none,
@@ -101,5 +102,7 @@ export function glanceHtml(g) {
 
 /** No top stories: a friendly card (N7 brings the full set of friendly states). */
 export function noStoriesHtml(hasEdition) {
-  return `<div class="empty-state frost"><p><strong>No top stories yet.</strong> ${hasEdition ? 'This edition came without any.' : 'Wila will let you know when the edition lands.'}</p></div>`;
+  return hasEdition
+    ? '<div class="empty-state frost"><p><strong>No top stories in this edition.</strong> The News desk sent it without any.</p></div>'
+    : '<div class="empty-state frost"><p><strong>Today’s edition is still being written.</strong> Wila will let you know when it lands.</p></div>';
 }

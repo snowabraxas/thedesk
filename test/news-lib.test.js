@@ -481,6 +481,7 @@ describe('markup (news-html.js)', () => {
     const g = glanceHtml(view.glance);
     for (const part of Object.values(g)) assertSafeMarkup(part, []);
     assert.match(g.numbers, /<b>10<\/b><span>stories<\/span>/);
+    assert.match(g.numbers, /<b>\d<\/b><span>regions?<\/span>/);
     assert.match(g.kinds, /&lt;img/);
   });
 
@@ -489,13 +490,15 @@ describe('markup (news-html.js)', () => {
     assert.match(g.regions, /<span class="nrname">United States<\/span>/);
     assert.match(g.regions, /style="width:100%"/);
     assert.match(g.kinds, /<li class="pill">Policy · \d+<\/li>/);
+    assert.match(g.numbers, /<b>5<\/b><span>regions<\/span>/);
     const empty = glanceHtml(buildNewsView(null, {}).glance);
     assert.match(empty.numbers, /<b>0<\/b><span>stories<\/span>/);
+    assert.match(empty.numbers, /<b>0<\/b><span>regions<\/span>/);
     assert.match(empty.regions, /No stories yet/);
   });
 
   test('the no-stories card', () => {
-    assert.match(noStoriesHtml(true), /This edition came without any/);
-    assert.match(noStoriesHtml(false), /Wila will let you know/);
+    assert.match(noStoriesHtml(true), /No top stories in this edition\.<\/strong> The News desk sent it without any\./);
+    assert.match(noStoriesHtml(false), /Today’s edition is still being written\.<\/strong> Wila will let you know when it lands\./);
   });
 });

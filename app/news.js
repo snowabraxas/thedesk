@@ -94,9 +94,9 @@ export function createNewsPage({ award, toast, isReady, canAward }) {
   function renderCapsule() {
     $('#newsDate').textContent = editionLine(view.edition);
     $('#newsSample').hidden = !view.sample;
-    $('#newsLine').textContent = news ? newsLine(view) : 'Today’s edition isn’t here yet. I’ll keep an eye out for it.';
+    $('#newsLine').textContent = news ? newsLine(view) : 'Today’s edition hasn’t landed yet. I’ll tell you when it does.';
     $('#newsNote').hidden = !view.note;
-    $('#newsNote').textContent = view.note ? `Note from the News desk: ${view.note}` : '';
+    $('#newsNote').textContent = view.note ? `From the News desk: ${view.note}` : '';
     $('#newsProgress').hidden = !view.total;
     $('#newsProgressText').textContent = `${view.readCount} of ${view.total} read`;
     $('#newsProgressFill').style.width = view.total ? `${Math.round((view.readCount / view.total) * 100)}%` : '0';

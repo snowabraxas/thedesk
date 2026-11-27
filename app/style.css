@@ -53,6 +53,19 @@ TYPE: Fredoka for names, headings and numbers; Inter for reading; Caveat for Sno
   /* Extra veil behind a desk page in the two bright lights: the laptop corner of the morning and
      golden plates is light enough to pull glass text under 4.5:1 with room-veil alone. */
   --veil-boost:rgba(16,86,102,.42);
+  /* The News desk (accent rosy brown). The breaking banner: rosy glass, near solid so its dark text
+     keeps 4.5:1 over the darkest night plate. */
+  --breaking-tint:rgba(211,150,140,.94);
+  --breaking-edge:rgba(245,222,216,.85);
+  --breaking-shadow:0 10px 30px rgba(110,50,42,.28);
+  /* Region tags on frost (dark-green text on each is over 10:1); EU uses --moss-chip, elsewhere --chip. */
+  --region-us:#CFE3E6;
+  --region-china:#F1D6D0;
+  --region-global:#ECE6DC;
+  /* Region bars on glass ("Where it happened"): light enough to see on the glass, never the only cue. */
+  --bar-us:#9FD0DA;
+  /* The TV's warm-up glow behind the glass when the News desk opens (rosy-light, as r,g,b). */
+  --tv-glow:243,205,198;
   /* Wila's orb. */
   --orb:radial-gradient(circle at 38% 35%,var(--beige),var(--rosy-light) 45%,var(--rosy-brown) 100%);
   --orb-glow:0 0 18px 6px rgba(211,150,140,.6);
@@ -90,8 +103,13 @@ svg.ic{width:22px;height:22px;flex:none;fill:none;stroke:currentColor;stroke-wid
 .bd[data-phase=night]{background-image:url(assets/plate-night.webp)}
 /* Product Feed's corner: the laptop on the desk. At least as tall as the screen, so a phone is covered too. */
 .backdrop[data-view=feed] .bd{background-size:max(155%,190vh) auto;background-position:44% 66%}
-/* The News desk's corner: the TV and its low cabinet. */
-.backdrop[data-view=news] .bd{background-size:max(155%,190vh) auto;background-position:80% 54%}
+/* The News desk's corner: the TV, its low cabinet and the record player, with the bright window out of frame. */
+.backdrop[data-view=news] .bd{background-size:max(220%,200vh) auto;background-position:95% 62%}
+/* The News desk's one motion: the TV warms up. When the desk opens, a soft rosy glow opens behind the
+   glass like an old screen (a line, then the full picture) and settles, in 0.9 s. It is invisible at
+   rest, so with reduced motion (no animation) it simply never shows. */
+.backdrop[data-view=news]::after{content:"";position:absolute;inset:0;opacity:0;pointer-events:none;background:radial-gradient(ellipse 58% 44% at 54% 42%,rgba(var(--tv-glow),.5),rgba(var(--tv-glow),.16) 50%,rgba(var(--tv-glow),0) 74%);transform-origin:54% 42%;animation:tvwarm .9s cubic-bezier(.25,.7,.3,1) both}
+@keyframes tvwarm{0%{opacity:0;transform:scale(.92,.04)}30%{opacity:1;transform:scale(1,.4)}100%{opacity:0;transform:scale(1.08,1.04)}}
 .veil{position:absolute;inset:0;background:linear-gradient(180deg,rgba(10,51,35,.28),rgba(10,51,35,0) 55%),var(--room-veil)}
 .backdrop[data-view=feed][data-phase=morning] .veil,.backdrop[data-view=feed][data-phase=golden] .veil,.backdrop[data-view=news][data-phase=morning] .veil,.backdrop[data-view=news][data-phase=golden] .veil{background:linear-gradient(180deg,rgba(10,51,35,.28),rgba(10,51,35,0) 55%),linear-gradient(var(--veil-boost),var(--veil-boost)),var(--room-veil)}
 .view{position:relative;z-index:1}
@@ -344,34 +362,63 @@ svg.ic{width:22px;height:22px;flex:none;fill:none;stroke:currentColor;stroke-wid
 .notes li.none{background:none;border:0;padding:0}
 .tiny{font-size:13px;color:var(--ink-muted);margin:0}
 
-/* ---------- the News desk (N4: plain layout from version C; the designer polishes it) ---------- */
+/* ---------- the News desk (Lotus glass, version C) ----------
+   Its corner: the TV. Its accent: rosy brown, only on the current rail circle, the progress fill,
+   the breaking banner and China's region bar (about 4 to 6% of the first screen). Its signature:
+   the ranked edition (1, 2, 3) under the breaking banner. Its motion: the TV warm-up glow (with the
+   backdrop, above). Its voice: calm, factual, newsroom. */
 .news{min-height:100vh;color:var(--beige)}
-.nsample{color:var(--rosy-light)}
-.nprog{display:inline-flex;align-items:center;gap:10px;min-height:40px;margin:0;padding:0 16px;border-radius:var(--radius-pill);font-size:14px}
-.nprog .bar{display:inline-block;width:64px;height:7px;border-radius:4px;background:rgba(255,255,255,.2);overflow:hidden}
-.nprog .bar span{display:block;height:100%;width:0;background:var(--rosy-brown)}
+/* Focus: one ring drawn with outline only (a box-shadow ring paints a bar across wrapped lines).
+   Beige on glass and the room, dark on frost and on the rosy banner. */
+#news :focus-visible{outline:3px solid var(--beige);outline-offset:3px;box-shadow:none}
+#news .frost :focus-visible{outline-color:var(--midnight-green)}
+#news .nbreaking :focus-visible{outline-color:var(--dark-green)}
+
+/* the rail: Lenses is a dashed promise for Phase 2, not a button */
+#newsRail .rb[aria-current]:hover{background:var(--rosy-light)}
+.rb.soon{border:1.5px dashed rgba(252,251,243,.55);color:var(--on-glass-muted);cursor:default}
+.rb.soon:hover{background:transparent}
+
+/* the top capsule */
+/* "Sample stories": a small marker pill, darker than the glass so rosy-light text keeps 4.5:1 at golden hour. */
+.nsample{display:inline-block;padding:0 8px;border-radius:var(--radius-pill);background:rgba(10,51,35,.34);color:var(--rosy-light);font-weight:600;white-space:nowrap}
+.nprog{display:inline-flex;align-items:center;gap:10px;min-height:40px;margin:0;padding:0 16px;border-radius:var(--radius-pill);font-size:14px;white-space:nowrap}
+.nprog .bar{display:inline-block;flex:none;width:64px;height:7px;border-radius:4px;background:rgba(255,255,255,.2);overflow:hidden}
+.nprog .bar span{display:block;height:100%;width:0;border-radius:4px;background:var(--rosy-brown);transition:width .6s ease}
 .nnote{margin:0;padding:10px 20px;border-radius:var(--radius-lg);font-size:14px}
-.nbreaking{display:flex;flex-wrap:wrap;gap:14px;align-items:center;padding:8px 8px 8px 10px;border-radius:var(--radius-lg);background:var(--rosy-light);color:var(--dark-green);border:1px solid var(--frost-edge);box-shadow:var(--shadow-frost)}
-.nblabel{margin:0;font:600 13px/1 var(--font-display);letter-spacing:.08em;text-transform:uppercase;background:var(--dark-green);color:var(--rosy-light);padding:10px 14px;border-radius:var(--radius-pill)}
-.nbhead{margin:0;flex:1 1 320px;font-weight:500}
-.nbreaking a{color:var(--dark-green);font-weight:600;padding:10px 4px}
+
+/* the breaking banner: the rosy pill */
+.nbreaking{display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center;padding:8px 8px 8px 10px;border-radius:var(--radius-pill);background:var(--breaking-tint);-webkit-backdrop-filter:blur(20px) saturate(1.2);backdrop-filter:blur(20px) saturate(1.2);border:1px solid var(--breaking-edge);box-shadow:var(--breaking-shadow);color:var(--dark-green);color-scheme:light}
+.nblabel{flex:none;margin:0;font:600 13px/1 var(--font-display);letter-spacing:.08em;text-transform:uppercase;background:var(--dark-green);color:var(--rosy-light);padding:10px 14px;border-radius:var(--radius-pill)}
+.nbhead{margin:0;flex:1 1 320px;font-weight:500;line-height:1.4}
+.nbreaking a{flex:none;display:inline-flex;align-items:center;min-height:44px;padding:0 14px;border-radius:var(--radius-pill);color:var(--dark-green);font-weight:600;text-decoration:underline;text-decoration-thickness:1.5px;text-underline-offset:3px}
+.nbreaking a:hover{background:rgba(10,51,35,.1)}
+.nbsrc{flex:none;padding:0 6px;font-size:13px;font-weight:500}
 .nbx{flex:none;width:44px;height:44px;border:0;border-radius:50%;background:rgba(10,51,35,.12);color:var(--dark-green);display:grid;place-items:center;padding:0}
 .nbx:hover{background:rgba(10,51,35,.22)}
+.nbx svg.ic{width:18px;height:18px;stroke-width:2}
+
+/* the columns: the edition, and the glance tiles beside it */
 .ncols{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:20px;align-items:start}
 .nmain,.ntop,.nstories,.nside{display:flex;flex-direction:column;gap:16px}
-.nh2{margin:0 0 0 8px;font:600 20px/1.2 var(--font-display);color:var(--beige)}
+.nh2{margin:0 0 0 8px;font:600 20px/1.2 var(--font-display);color:var(--beige);text-shadow:0 1px 10px rgba(6,30,24,.6)}
 .nh2:focus{outline:none}
-.nh2:focus-visible{outline:3px solid var(--beige);outline-offset:4px;border-radius:6px}
+#news .nh2:focus-visible{outline:3px solid var(--beige);outline-offset:4px;border-radius:6px}
+
+/* the story cards (frost) */
 .nstory{border-radius:var(--radius-lg);padding:22px 24px;display:flex;flex-direction:column;gap:14px}
-.nstory.read,.nitem.read{background:var(--frost-quiet)}
-.nstory h3{margin:0;font:600 21px/1.3 var(--font-display);color:var(--dark-green)}
+.nstory h3{margin:0;font:600 21px/1.3 var(--font-display);color:var(--dark-green);text-wrap:balance}
 .nstory p,.nitem p{margin:0}
 .nmeta{display:flex;flex-wrap:wrap;gap:10px;align-items:center}
-.nrank{width:38px;height:38px;border-radius:50%;display:grid;place-items:center;background:var(--midnight-green);color:var(--beige);font:600 18px/1 var(--font-display)}
+.nrank{flex:none;width:38px;height:38px;border-radius:50%;display:grid;place-items:center;background:var(--midnight-green);color:var(--beige);font:600 18px/1 var(--font-display)}
 .ntag{font-size:12px;font-weight:600;line-height:1.3;padding:4px 10px;border-radius:var(--radius-pill);background:var(--chip);color:var(--dark-green)}
+.ntag.region-us{background:var(--region-us)}
+.ntag.region-china{background:var(--region-china)}
+.ntag.region-eu{background:var(--moss-chip)}
+.ntag.region-global{background:var(--region-global)}
 .nmins{margin-left:auto;font-size:13px;color:var(--ink-muted)}
 .nboxes{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}
-.nboxes>div{border-radius:var(--radius-md);padding:12px 14px;font-size:14px}
+.nboxes>div{border-radius:var(--radius-md);padding:12px 14px;font-size:14px;line-height:1.5}
 .nwhy{background:var(--moss-tint)}
 .nskeptic{background:var(--rosy-tint)}
 .nboxes .lbl{margin:0 0 4px;font-size:12px;font-weight:600;letter-spacing:.06em;text-transform:uppercase}
@@ -380,37 +427,61 @@ svg.ic{width:22px;height:22px;flex:none;fill:none;stroke:currentColor;stroke-wid
 .nrow{display:flex;flex-wrap:wrap;gap:8px;align-items:center}
 .nsrclbl{font-size:13px;color:var(--ink-muted)}
 .nsrcs{display:flex;flex-wrap:wrap;gap:8px;list-style:none;margin:0;padding:0}
-.nsrcs a,.nsrc-plain{display:inline-flex;align-items:center;min-height:32px;font-size:13px;padding:5px 11px;border-radius:var(--radius-pill);background:rgba(255,255,255,.7);border:1px solid rgba(10,51,35,.14);color:var(--midnight-green)}
-.nsrcs a{text-decoration:none}
-.nsrcs a:hover{text-decoration:underline}
-.nsrc-plain{color:var(--ink-muted)}
+/* Source pills are links, so they are 44px tall like every tap target. A refused link shows its name dashed, as plain text. */
+.nsrcs a,.nsrc-plain{display:inline-flex;align-items:center;gap:5px;min-height:44px;padding:0 14px;font-size:13px;line-height:1.3;border-radius:var(--radius-pill);border:1px solid rgba(10,51,35,.14)}
+.nsrcs a{background:rgba(255,255,255,.7);color:var(--midnight-green);font-weight:500;text-decoration:none}
+.nsrcs a::after{content:"\2197";content:"\2197"/"";font-size:12px}
+.nsrcs a:hover{border-color:var(--midnight-green);text-decoration:underline;text-underline-offset:3px}
+.nsrc-plain{border-style:dashed;color:var(--ink-muted)}
 .nread{margin-left:auto}
+.ab.nread{border-color:var(--midnight-green);background:rgba(255,255,255,.5);color:var(--midnight-green);font-weight:600}
+.ab.nread:hover{background:rgba(255,255,255,.9)}
+.ab.nread.on{background:var(--midnight-green);color:var(--beige)}
+.ab.nread.on:hover{background:#0D4855}
+/* A read story steps back: thinner frost and a muted headline. The filled "Read" button says so in words. */
+.nstory.read,.nitem.read{background:var(--frost-quiet);box-shadow:inset 0 1px 0 rgba(255,255,255,.5),0 8px 22px rgba(6,30,24,.16)}
+.nstory.read h3{color:var(--ink-muted)}
+.nstory.read .nwhy,.nitem.read .nwhy{background:rgba(131,153,88,.16)}
+
+/* the "More stories" shelf (glass), with compact frost items that open to the full story */
 .nshelf{border-radius:var(--radius-lg);padding:6px 8px}
-.nshelf h2{margin:0}
-#newsMoreBtn{width:100%;min-height:54px;border:0;background:none;color:var(--beige);display:flex;align-items:center;justify-content:space-between;gap:12px;padding:0 16px;border-radius:var(--radius-lg);font:600 17px var(--font-display);text-align:left}
+.nshelf h2{margin:0;font:inherit}
+#newsMoreBtn{width:100%;min-height:54px;border:0;background:none;color:var(--beige);display:flex;align-items:center;justify-content:space-between;gap:12px;padding:0 10px 0 16px;border-radius:var(--radius-lg);font:600 17px/1.2 var(--font-display);text-align:left}
+#newsMoreBtn:hover .nmorelabel{background:rgba(255,255,255,.24)}
 .nmorecount{font:500 14px var(--font-sans);color:var(--on-glass-muted)}
-.nmorelabel{font:500 14px var(--font-sans);padding:6px 14px;border-radius:var(--radius-pill)}
-.nmore{list-style:none;margin:0;padding:0 8px 10px;display:flex;flex-direction:column;gap:8px}
+.nmorelabel{flex:none;font:500 14px/1 var(--font-sans);padding:9px 16px;border-radius:var(--radius-pill)}
+.nmore{list-style:none;margin:0;padding:2px 8px 10px;display:flex;flex-direction:column;gap:8px}
 .nitem{border-radius:var(--radius-md);padding:4px 6px}
 .nitem h3{margin:0;font:inherit}
 .nitembtn{width:100%;min-height:44px;display:flex;flex-wrap:wrap;gap:6px 10px;align-items:center;border:0;background:none;color:var(--dark-green);text-align:left;padding:8px;border-radius:var(--radius-sm)}
-.nitemtitle{flex:1 1 280px;font-weight:500}
+.nitembtn:hover .nitemtitle{text-decoration:underline;text-decoration-color:var(--midnight-green);text-underline-offset:3px}
+.nitemtitle{flex:1 1 280px;font-weight:500;line-height:1.4}
 .nitemmeta{font-size:13px;color:var(--ink-muted)}
+.nitembtn svg.ic{width:20px;height:20px;color:var(--midnight-green)}
 .nitembtn[aria-expanded=true] svg.ic{transform:rotate(180deg)}
 .nitembody{display:flex;flex-direction:column;gap:12px;padding:4px 8px 12px}
-.nglance{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
+
+/* the glance tiles (glass) */
+.nside .card{padding:20px 22px;gap:12px}
+.nglance{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
 .nglance p{margin:0;padding:12px;border-radius:var(--radius-md);background:var(--pill-tint);border:1px solid var(--glass-edge);display:flex;flex-direction:column;gap:4px}
 .nglance b{font:600 26px/1 var(--font-display)}
-.nglance span{font-size:12px;color:var(--on-glass-muted)}
+.nglance span{font-size:13px;color:var(--beige)}
 .nregions,.nkinds{list-style:none;margin:0;padding:0;display:flex;flex-wrap:wrap;gap:8px}
-.nregions{flex-direction:column}
-.nregions li{display:grid;grid-template-columns:1fr auto;gap:4px;font-size:14px}
-.nrcount{color:var(--on-glass-muted)}
+.nregions{flex-direction:column;gap:10px}
+.nregions li{display:grid;grid-template-columns:1fr auto;gap:4px 8px;font-size:14px}
+.nrcount{color:var(--on-glass-muted);font-variant-numeric:tabular-nums}
 .nbar{grid-column:1/-1;height:8px;border-radius:4px;background:rgba(255,255,255,.16);overflow:hidden}
-.nbar span{display:block;height:100%;border-radius:4px;background:var(--rosy-brown)}
+.nbar span{display:block;height:100%;border-radius:4px;background:rgba(252,251,243,.55)}
+.nbar .region-us{background:var(--bar-us)}
+.nbar .region-china{background:var(--rosy-brown)}
+.nbar .region-eu{background:var(--moss-light)}
+.nbar .region-global{background:var(--beige)}
 .nkinds li{font-size:13px;padding:5px 12px;border-radius:var(--radius-pill)}
 .nnone{font-size:14px;color:var(--on-glass-muted)}
-.nsoon{border-style:dashed}
+.nsoon{border:1.5px dashed rgba(252,251,243,.45)}
+.nside .nsoon{gap:6px}
+.nsoon h2{font-size:16px;color:var(--beige)}
 .nsoon p{margin:0;font-size:14px;color:var(--on-glass-muted)}
 
 /* Agent and note text can hold a very long word or link: break it anywhere rather than widen the page. */
@@ -420,6 +491,8 @@ svg.ic{width:22px;height:22px;flex:none;fill:none;stroke:currentColor;stroke-wid
 @media (max-width:1199px){
   .capsule{border-radius:var(--radius-lg)}
   .ncols{grid-template-columns:minmax(0,1fr)}
+  /* Under the edition, the glance tiles sit two by two. */
+  .nside{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));align-items:start}
   .cols{grid-template-columns:264px minmax(0,1fr);grid-template-rows:auto 1fr}
   .shelves{grid-column:1;grid-row:1}
   .list{grid-column:2;grid-row:1 / span 2}
@@ -436,6 +509,8 @@ svg.ic{width:22px;height:22px;flex:none;fill:none;stroke:currentColor;stroke-wid
 @media (max-width:760px){
   /* The phone crop puts the brightest part of the plate behind the glance tiles. */
   .backdrop{--veil-boost:rgba(16,86,102,.5)}
+  /* News on a phone: the TV in the middle of the screen. */
+  .backdrop[data-view=news] .bd{background-position:84% 66%}
   /* Keyboard focus scrolls into view above the bottom bar, never under it. */
   html:has(#feed:not([hidden])),html:has(#news:not([hidden])){scroll-padding-bottom:calc(96px + env(safe-area-inset-bottom))}
   .fwrap{grid-template-columns:minmax(0,1fr);gap:16px;padding:14px 12px calc(104px + env(safe-area-inset-bottom))}
@@ -455,9 +530,23 @@ svg.ic{width:22px;height:22px;flex:none;fill:none;stroke:currentColor;stroke-wid
   .badges{grid-template-columns:repeat(2,minmax(0,1fr))}
   .fig{height:250px}
   #feed:not([hidden]) ~ .toast,#news:not([hidden]) ~ .toast{bottom:calc(92px + env(safe-area-inset-bottom))}
+  /* News on a phone: capsule, banner, stories, shelf, then the glance tiles, in one column. */
+  .nprog{flex:1 1 100%;justify-content:space-between}
+  .nprog .bar{flex:1 1 auto;max-width:180px}
+  /* The banner on a phone: the label, Read and dismiss on one row, the headline under it. Only the
+     headline moves (it isn't focusable), so Read still comes before dismiss for the keyboard. */
+  .nbreaking{border-radius:var(--radius-lg);padding:6px 6px 12px 8px;gap:4px 6px}
+  .nbhead{order:1;flex-basis:100%;padding:0 6px;font-size:14px}
+  .nbreaking a,.nbsrc,.nbx{margin-left:auto}
+  .nbreaking :is(a,.nbsrc) + .nbx{margin-left:0}
+  .nside{display:flex}
   .nboxes{grid-template-columns:minmax(0,1fr)}
-  .nstory{padding:18px 18px 16px}
+  .nstory{padding:18px 18px 16px;gap:12px}
   .nstory h3{font-size:19px}
-  .nbreaking{border-radius:var(--radius-lg)}
+  .nshelf{padding:4px 6px}
+  #newsMoreBtn{padding:0 6px 0 12px}
+  .nmore{padding:2px 4px 8px}
+  .nitembtn{padding:8px 6px}
+  .nitembody{padding:4px 6px 10px}
 }
 @media (prefers-reduced-motion:reduce){*,*::before,*::after{animation:none!important;transition:none!important;scroll-behavior:auto!important}}
