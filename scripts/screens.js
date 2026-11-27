@@ -39,7 +39,9 @@
 // emulates a touch screen, so hover-only details look as they do on a phone.
 //
 // The shots never change the Desk they look at: saves (PUT /api/state, PUT /api/news/state) are
-// answered by the script and never reach the server, so marking a story read pays no real XP.
+// answered by the script and never reach the server, so marking a story read pays no real XP. The
+// page's later reads of the same state (the catch-up when a desk or the room opens) get back what it
+// saved, as they would from the real server, so a dismissed banner stays dismissed.
 //
 // Exits 1 with a clear message if the page doesn't load, a console error or page error happens,
 // a same-origin request fails, a font or image fails, or the room or a desk page never renders.
@@ -214,13 +216,25 @@ async function showPhase(page, phase, step) {
   }
 }
 
-// Saves are answered here and never reach the server (see the header).
+// Saves are answered here and never reach the server (see the header). Each page keeps its own last
+// save of each state (without the `_sync` the server reads and drops) and answers that page's next
+// GET of it with it; until it saves, GETs go to the server.
 const SAVE_PATH = /^\/api\/(news\/)?state$/;
 async function keepDataUntouched(page) {
-  await page.route(url => url.origin === base.origin && SAVE_PATH.test(url.pathname), route => (
-    route.request().method() === 'PUT'
-      ? route.fulfill({ status: 200, contentType: 'application/json', body: '{"ok":true}' })
-      : route.continue()));
+  const saved = new Map();
+  await page.route(url => url.origin === base.origin && SAVE_PATH.test(url.pathname), route => {
+    const { pathname } = new URL(route.request().url());
+    if (route.request().method() === 'PUT') {
+      try {
+        const { _sync, ...state } = JSON.parse(route.request().postData() || '{}');
+        saved.set(pathname, JSON.stringify(state));
+      } catch { /* not JSON: the real server would refuse it too; keep what was saved */ }
+      return route.fulfill({ status: 200, contentType: 'application/json', body: '{"ok":true}' });
+    }
+    return saved.has(pathname)
+      ? route.fulfill({ status: 200, contentType: 'application/json', headers: { 'Cache-Control': 'no-store' }, body: saved.get(pathname) })
+      : route.continue();
+  });
 }
 
 // A desk page in one light: open the room (where the Preview chip lives), pick the light, then
