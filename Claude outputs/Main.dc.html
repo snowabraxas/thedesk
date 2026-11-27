@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>News desk morning edition</title>
+<title>Product Feed, Lotus</title>
 <script src="./support.js"></script>
 </head>
 <body>
@@ -11,221 +11,221 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fredoka:wght@500;600&amp;family=Inter:wght@400;500;600&amp;display=swap">
 <style>
-body{margin:0;background:#f6ebd3}
-a{color:#27504d}a:hover{color:#152e2c}
-button{font:inherit;cursor:pointer}
+body{margin:0;background:#0A3323}
+a{color:#105666}a:hover{color:#0A3323}
+button,input{font:inherit}
+button{cursor:pointer}
+.plate{position:absolute;inset:0;background-size:155%;background-position:44% 66%;filter:blur(3px) saturate(1.05)}
+.plate.morning{background-image:url(/_blob/c13077b1153723e39651cea16e320275)}
+.plate.golden{background-image:url(/_blob/20e72faf89c7739e53d8e5583c9ccd53)}
+.plate.night{background-image:url(/_blob/09e9da9085657c86ae6aedf1d1b9a6b4)}
+.glass{background:rgba(16,86,102,.48);-webkit-backdrop-filter:blur(26px) saturate(1.4);backdrop-filter:blur(26px) saturate(1.4);border:1px solid rgba(255,255,255,.22);box-shadow:inset 0 1px 0 rgba(255,255,255,.18),0 16px 40px rgba(6,30,24,.28)}
+.frost{background:rgba(253,252,245,.92);-webkit-backdrop-filter:blur(30px) saturate(1.3);backdrop-filter:blur(30px) saturate(1.3);border:1px solid rgba(255,255,255,.6);box-shadow:inset 0 1px 0 rgba(255,255,255,.7),0 14px 34px rgba(6,30,24,.22)}
+.pill{background:rgba(255,255,255,.14);border:1px solid rgba(255,255,255,.22)}
+input::placeholder{color:#dfe3c8}
 </style>
 </helmet>
-<div style="min-height: 100vh; background: #f6ebd3; color: #1c2826; font-family: Inter, system-ui, sans-serif; font-size: 15px; line-height: 1.55; display: flex; flex-wrap: wrap; align-items: stretch">
+<div style="position: relative; min-height: 100vh; overflow: hidden; color: #0A3323; font-family: Inter, system-ui, sans-serif; font-size: 15px; line-height: 1.55">
+<div class="plate {{ plate }}" aria-hidden="true"></div>
+<div aria-hidden="true" style="position: absolute; inset: 0; background: linear-gradient(180deg, rgba(10,51,35,.15), rgba(16,86,102,.4))"></div>
 
-<nav aria-label="Desks" style="flex: 1 1 220px; max-width: 100%; background: #152e2c; color: #fbf4e4; padding: 28px 20px; display: flex; flex-direction: column; gap: 28px; box-sizing: border-box">
-<a href="#" style="display: flex; align-items: center; gap: 10px; color: #ffd98a; text-decoration: none; font: 600 22px/1 Fredoka, sans-serif">
-<svg width="28" height="28" viewBox="0 0 28 28" fill="none" stroke="#ffd98a" stroke-width="2" aria-hidden="true"><rect x="3" y="7" width="22" height="16" rx="4"></rect><path d="M10 3l4 4 4-4"></path><circle cx="20" cy="15" r="1.5"></circle></svg>
-The News desk
-</a>
-<div style="display: flex; flex-direction: column; gap: 4px">
-<a href="#" aria-current="page" style="display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 0 14px; border-radius: 12px; background: rgba(242,184,75,.18); color: #ffd98a; text-decoration: none; font-weight: 600">Today’s edition</a>
-<a href="#" style="display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 0 14px; border-radius: 12px; color: #e6ded0; text-decoration: none">Past editions</a>
-<a href="#" style="display: flex; align-items: center; gap: 10px; min-height: 44px; padding: 0 14px; border-radius: 12px; color: #e6ded0; text-decoration: none">Sources</a>
-<span style="display: flex; align-items: center; justify-content: space-between; min-height: 44px; padding: 0 14px; border-radius: 12px; color: #a9b8b0">Lenses <span style="font-size: 12px; border: 1px dashed #a9b8b0; border-radius: 999px; padding: 2px 8px">Phase 2</span></span>
-</div>
-<div style="margin-top: auto; display: flex; flex-direction: column; gap: 12px">
-<div style="background: rgba(251,244,228,.08); border-radius: 16px; padding: 14px; display: flex; gap: 12px; align-items: flex-start">
-<span aria-hidden="true" style="flex: 0 0 auto; width: 26px; height: 26px; border-radius: 50%; background: radial-gradient(circle at 38% 35%, #fffbe9, #ffe3a1 45%, #f2b84b 100%); box-shadow: 0 0 14px 4px rgba(255,214,130,.45)"></span>
-<p style="margin: 0; font-size: 14px; color: #f3ead8"><strong style="font: 600 14px Fredoka, sans-serif; color: #ffd98a">Wila</strong><br>Chips and open models lead today. Three stories, about five minutes.</p>
-</div>
-<a href="#" style="display: flex; align-items: center; justify-content: center; min-height: 44px; border-radius: 12px; border: 1.5px solid rgba(255,217,138,.45); color: #fbf4e4; text-decoration: none; font-size: 14px">← Back to the room</a>
-</div>
+<div style="position: relative; display: flex; flex-wrap: wrap; align-items: flex-start; gap: 22px; padding: 26px clamp(16px, 2.4vw, 36px) 48px; box-sizing: border-box">
+
+<nav aria-label="Desk sections" class="glass" style="flex: 0 1 84px; border-radius: 999px; padding: 14px 10px; display: flex; flex-direction: column; align-items: center; gap: 8px">
+<a href="#" aria-label="Back to the room" style="width: 52px; height: 52px; border-radius: 50%; display: grid; place-items: center; background: rgba(255,255,255,.14)">
+<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#FCFBF3" stroke-width="1.8" aria-hidden="true"><path d="M4 11l8-7 8 7v9H4z"></path><path d="M10 20v-5h4v5"></path></svg></a>
+<a href="#" aria-label="Today’s edition" aria-current="page" style="width: 52px; height: 52px; border-radius: 50%; display: grid; place-items: center; background: #839958">
+<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#0A3323" stroke-width="1.8" aria-hidden="true"><rect x="3" y="5" width="18" height="12" rx="2"></rect><path d="M2 20h20"></path></svg></a>
+<a href="#" aria-label="Theme map" style="width: 52px; height: 52px; border-radius: 50%; display: grid; place-items: center">
+<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#FCFBF3" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="12" r="2.5"></circle><circle cx="5" cy="6" r="2"></circle><circle cx="19" cy="7" r="2"></circle><circle cx="17" cy="19" r="2"></circle><path d="M7 7l3 3M17 8l-3 2.5M16 17l-2.5-3"></path></svg></a>
+<a href="#" aria-label="My notes" style="width: 52px; height: 52px; border-radius: 50%; display: grid; place-items: center">
+<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#FCFBF3" stroke-width="1.8" aria-hidden="true"><path d="M5 4h10l4 4v12H5z"></path><path d="M8 12h8M8 16h5"></path></svg></a>
+<a href="#" aria-label="Badges" style="width: 52px; height: 52px; border-radius: 50%; display: grid; place-items: center">
+<svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#FCFBF3" stroke-width="1.8" aria-hidden="true"><circle cx="12" cy="9" r="5"></circle><path d="M9 13.5L7.5 21l4.5-2.5 4.5 2.5L15 13.5"></path></svg></a>
 </nav>
 
-<main style="flex: 999 1 560px; min-width: 0; padding: 32px clamp(20px, 3vw, 44px) 56px; box-sizing: border-box; display: flex; flex-direction: column; gap: 24px">
+<div style="flex: 999 1 600px; min-width: 0; display: flex; flex-direction: column; gap: 20px">
 
-<header style="display: flex; flex-wrap: wrap; align-items: flex-end; justify-content: space-between; gap: 16px">
-<div>
-<p style="margin: 0 0 4px; font-size: 13px; letter-spacing: .08em; text-transform: uppercase; color: #5d6a63">Monday 7 December · Morning edition · <span style="color: #8a4f1c">Sample stories</span></p>
-<h1 style="margin: 0; font: 600 clamp(28px, 3vw, 38px)/1.15 Fredoka, sans-serif; color: #152e2c">Good morning, Snow</h1>
+<header class="glass" style="border-radius: 999px; padding: 10px 12px 10px 14px; display: flex; flex-wrap: wrap; align-items: center; gap: 14px; color: #FCFBF3">
+<span aria-hidden="true" style="flex: 0 0 auto; width: 40px; height: 40px; border-radius: 50%; background: radial-gradient(circle at 38% 35%, #fffbe9, #f3d2cb 45%, #D3968C 100%); box-shadow: 0 0 18px 6px rgba(211,150,140,.6)"></span>
+<div style="flex: 1 1 240px">
+<h1 style="margin: 0; font: 600 20px/1.2 Fredoka, sans-serif; color: #FCFBF3">Product Feed</h1>
+<p style="margin: 0; font-size: 13px; color: #f1f2e6">Product, AI and PM · picked for your goals · Edition of 26 Nov</p>
 </div>
-<div style="display: flex; gap: 10px; flex-wrap: wrap">
-<span style="display: inline-flex; align-items: center; gap: 8px; min-height: 40px; padding: 0 14px; border-radius: 999px; background: #fbf4e4; border: 1px solid rgba(28,40,38,.14); font-size: 14px">
-<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#27504d" stroke-width="1.6" aria-hidden="true"><circle cx="8" cy="8" r="6.5"></circle><path d="M8 4.5V8l2.5 1.5"></path></svg>About 5 min</span>
-<span style="display: inline-flex; align-items: center; gap: 10px; min-height: 40px; padding: 0 14px; border-radius: 999px; background: #152e2c; color: #fbf4e4; font-size: 14px">{{readCount}} of 3 read
-<span aria-hidden="true" style="display: inline-block; width: 64px; height: 7px; border-radius: 4px; background: rgba(255,255,255,.18); overflow: hidden"><span style="display: block; height: 100%; width: {{readPct}}; background: #f2b84b"></span></span>
-</span>
+<p class="pill" style="margin: 0; flex: 1 1 300px; border-radius: 999px; padding: 9px 16px; font-size: 14px"><strong style="font-family: Fredoka, sans-serif; font-weight: 600; color: #f3cdc6">Wila</strong> · Two evals pieces today. Start with Lenny’s, it pairs with Braintrust.</p>
+<div class="pill" style="display: inline-flex; align-items: center; gap: 12px; padding: 6px 16px 6px 6px; border-radius: 999px">
+<svg width="44" height="44" viewBox="0 0 44 44" role="img" aria-label="{{ ringLabel }}">
+<circle cx="22" cy="22" r="18" fill="none" stroke="rgba(255,255,255,.2)" stroke-width="5"></circle>
+<circle cx="22" cy="22" r="18" fill="none" stroke="#a9bd7e" stroke-width="5" stroke-linecap="round" stroke-dasharray="{{ ringDash }}" transform="rotate(-90 22 22)"></circle>
+<text x="22" y="26" text-anchor="middle" font-family="Fredoka, sans-serif" font-size="12" font-weight="600" fill="#FCFBF3">{{ weekReads }}/5</text>
+</svg>
+<span style="display: flex; flex-direction: column; line-height: 1.2"><strong style="font: 600 18px Fredoka, sans-serif">{{ xp }} XP</strong><span style="font-size: 12px; color: #f1f2e6">Level 1 · {{ toNext }} to next</span></span>
 </div>
 </header>
 
-<sc-if value="{{ isLate }}" hint-placeholder-val="{{ false }}">
-<section aria-label="Edition status" style="display: flex; gap: 16px; align-items: center; padding: 18px 20px; border-radius: 18px; background: #fbf4e4; border: 1.5px dashed #b9773a">
-<svg width="32" height="32" viewBox="0 0 32 32" fill="none" stroke="#8a4f1c" stroke-width="2" aria-hidden="true"><path d="M6 26h20M9 26V12h14v14M12 12V7h8v5"></path></svg>
-<p style="margin: 0"><strong style="font-family: Fredoka, sans-serif; font-weight: 600">Today’s edition is still being written.</strong> Wila will let you know when it lands. Yesterday’s top 3 are below in the meantime.</p>
-</section>
+<div style="display: flex; flex-wrap: wrap; gap: 20px; align-items: flex-start">
+
+<aside aria-label="Shelves" class="glass" style="flex: 1 1 220px; max-width: 100%; border-radius: 28px; padding: 18px; display: flex; flex-direction: column; gap: 14px; color: #FCFBF3">
+<h2 style="margin: 0 0 0 6px; font: 600 17px Fredoka, sans-serif; color: #f3cdc6">Shelves</h2>
+<div style="display: flex; flex-direction: column; gap: 4px">
+<sc-for list="{{ shelves }}" as="sh" hint-placeholder-count="4">
+<button type="button" onClick="{{ sh.pick }}" aria-pressed="{{ sh.on }}" style="min-height: 44px; display: flex; align-items: center; justify-content: space-between; padding: 0 14px; border-radius: 999px; border: 0; background: {{ sh.bg }}; color: {{ sh.fg }}; font-weight: 500; text-align: left">{{ sh.name }}<span style="font-size: 13px">{{ sh.count }}</span></button>
+</sc-for>
+</div>
+<div style="border-top: 1px solid rgba(255,255,255,.18); padding-top: 12px; display: flex; flex-direction: column; gap: 8px">
+<p style="margin: 0 0 0 6px; font-size: 12px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: #f1f2e6">Folders</p>
+<p style="margin: 0 0 0 6px; font-size: 14px; color: #f1f2e6">No folders yet</p>
+<label for="newFolder" style="margin: 4px 0 0 6px; font-size: 13px; color: #f1f2e6">New folder</label>
+<div style="display: flex; gap: 8px">
+<input id="newFolder" type="text" placeholder="e.g. Evals reading" class="pill" style="flex: 1 1 auto; min-width: 0; min-height: 44px; border-radius: 999px; padding: 0 14px; color: #FCFBF3">
+<button type="button" style="min-height: 44px; padding: 0 16px; border-radius: 999px; border: 0; background: #839958; color: #0A3323; font-weight: 600">Add</button>
+</div>
+</div>
+</aside>
+
+<section aria-label="Today’s edition" style="flex: 999 1 460px; min-width: 0; display: flex; flex-direction: column; gap: 16px">
+<div style="display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 8px; margin: 0 8px">
+<h2 style="margin: 0; font: 600 20px/1.2 Fredoka, sans-serif; color: #FCFBF3; text-shadow: 0 1px 10px rgba(6,30,24,.5)">{{ shelfTitle }}</h2>
+<span style="font-size: 13px; color: #f1f2e6; text-shadow: 0 1px 8px rgba(6,30,24,.6)">Sample picks from real articles</span>
+</div>
+<sc-if value="{{ empty }}" hint-placeholder-val="{{ false }}">
+<div class="frost" style="border-radius: 28px; padding: 22px 24px"><p style="margin: 0"><strong style="font-family: Fredoka, sans-serif; font-weight: 600">Nothing here yet.</strong> Save or note an article and it lands on this shelf.</p></div>
 </sc-if>
-
-<sc-if value="{{ showBanner }}" hint-placeholder-val="{{ true }}">
-<section aria-label="Breaking news" style="display: flex; flex-wrap: wrap; gap: 14px; align-items: center; padding: 14px 16px 14px 20px; border-radius: 18px; background: #f2b84b; color: #1c2826; box-shadow: 0 6px 18px rgba(138,79,28,.18)">
-<span style="font: 600 13px/1 Fredoka, sans-serif; letter-spacing: .08em; text-transform: uppercase; background: #1c2826; color: #ffd98a; padding: 7px 10px; border-radius: 8px">Breaking · 12:04</span>
-<p style="margin: 0; flex: 1 1 320px; font-weight: 500">[Sample] A major regulator votes through new rules for frontier AI models.</p>
-<a href="#" style="color: #1c2826; font-weight: 600">Read</a>
-<button type="button" aria-label="Dismiss breaking news" onClick="{{ dismiss }}" style="width: 44px; height: 44px; border: 0; border-radius: 12px; background: rgba(28,40,38,.1); display: grid; place-items: center">
-<svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="#1c2826" stroke-width="2" aria-hidden="true"><path d="M3 3l10 10M13 3L3 13"></path></svg>
-</button>
-</section>
-</sc-if>
-
-<div style="display: flex; flex-wrap: wrap; gap: 24px; align-items: flex-start">
-
-<section aria-label="Top 3 stories" style="flex: 999 1 520px; min-width: 0; display: flex; flex-direction: column; gap: 18px">
-<h2 style="margin: 0; font: 600 20px/1.2 Fredoka, sans-serif; color: #152e2c">Today’s top 3</h2>
-<sc-for list="{{ top }}" as="s" hint-placeholder-count="3">
-<article style="background: #fbf4e4; border-radius: 22px; padding: 22px 24px; box-shadow: 0 1px 0 rgba(28,40,38,.06), 0 10px 26px rgba(21,46,44,.07); display: flex; flex-direction: column; gap: 14px">
-<div style="display: flex; flex-wrap: wrap; gap: 10px; align-items: center">
-<span style="font: 600 28px/1 Fredoka, sans-serif; color: #b9773a; min-width: 28px">{{ s.rank }}</span>
-<span style="font-size: 12px; font-weight: 600; padding: 4px 10px; border-radius: 999px; background: {{ s.regionBg }}; color: #1c2826">{{ s.region }}</span>
-<span style="font-size: 12px; font-weight: 600; padding: 4px 10px; border-radius: 999px; background: #efe0c0; color: #1c2826">{{ s.kind }}</span>
-<span style="font-size: 13px; color: #5d6a63; margin-left: auto">{{ s.minutes }} min</span>
+<sc-for list="{{ articles }}" as="a" hint-placeholder-count="5">
+<article class="frost" style="border-radius: 28px; padding: 22px 24px; display: flex; flex-direction: column; gap: 12px">
+<p style="margin: 0; font-size: 13px; color: #4B5E52">{{ a.meta }}</p>
+<h3 style="margin: 0; font: 600 21px/1.3 Fredoka, sans-serif; color: #0A3323">{{ a.title }}</h3>
+<p style="margin: 0; color: #1f3d31">{{ a.summary }}</p>
+<div style="display: flex; flex-wrap: wrap; gap: 8px">
+<sc-for list="{{ a.themes }}" as="t" hint-placeholder-count="1">
+<span style="font-size: 12px; font-weight: 600; padding: 4px 10px; border-radius: 999px; background: #dfe5c6; color: #0A3323">{{ t }}</span>
+</sc-for>
 </div>
-<h3 style="margin: 0; font: 600 21px/1.3 Fredoka, sans-serif; color: #152e2c">{{ s.headline }}</h3>
-<p style="margin: 0; color: #2c3a37">{{ s.summary }}</p>
-<div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px">
-<div style="background: #e9f0e1; border-radius: 14px; padding: 12px 14px">
-<p style="margin: 0 0 4px; font-size: 12px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: #3e5f1f">Why it matters</p>
-<p style="margin: 0; font-size: 14px">{{ s.why }}</p>
-</div>
-<div style="background: #f3e2d3; border-radius: 14px; padding: 12px 14px">
-<p style="margin: 0 0 4px; font-size: 12px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: #8a4f1c">The skeptic’s view</p>
-<p style="margin: 0; font-size: 14px">{{ s.skeptic }}</p>
-</div>
+<div style="background: rgba(131,153,88,.22); border-radius: 18px; padding: 12px 14px">
+<p style="margin: 0 0 4px; font-size: 12px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: #4a5c2c">Why for you</p>
+<p style="margin: 0; font-size: 14px">{{ a.why }}</p>
 </div>
 <div style="display: flex; flex-wrap: wrap; gap: 8px; align-items: center">
-<span style="font-size: 13px; color: #5d6a63">Sources</span>
-<sc-for list="{{ s.sources }}" as="src" hint-placeholder-count="2">
-<a href="#" style="font-size: 13px; padding: 5px 10px; border-radius: 999px; border: 1px solid rgba(28,40,38,.18); text-decoration: none; color: #27504d">{{ src }} ↗</a>
-</sc-for>
-<button type="button" onClick="{{ s.toggle }}" aria-pressed="{{ s.isRead }}" style="margin-left: auto; min-height: 44px; padding: 0 16px; border-radius: 12px; border: 1.5px solid #27504d; background: {{ s.btnBg }}; color: {{ s.btnFg }}; font-weight: 600; font-size: 14px">{{ s.btnLabel }}</button>
+<button type="button" onClick="{{ a.toggleRead }}" aria-pressed="{{ a.read }}" style="min-height: 44px; padding: 0 18px; border-radius: 999px; border: 1.5px solid #105666; background: {{ a.readBg }}; color: {{ a.readFg }}; font-weight: 600; font-size: 14px">{{ a.readLabel }}</button>
+<button type="button" onClick="{{ a.toggleSave }}" aria-pressed="{{ a.saved }}" style="min-height: 44px; padding: 0 18px; border-radius: 999px; border: 1.5px solid rgba(10,51,35,.2); background: {{ a.saveBg }}; color: #0A3323; font-weight: 500; font-size: 14px">{{ a.saveLabel }}</button>
+<button type="button" style="min-height: 44px; padding: 0 18px; border-radius: 999px; border: 1.5px solid rgba(10,51,35,.2); background: rgba(255,255,255,.6); color: #0A3323; font-weight: 500; font-size: 14px">Notes</button>
+<span style="margin-left: auto; font-size: 13px; color: #4B5E52">{{ a.minutes }} min</span>
 </div>
 </article>
 </sc-for>
+</section>
 
-<section aria-label="More stories" style="background: #efe0c0; border-radius: 22px; padding: 6px 8px">
-<button type="button" onClick="{{ toggleShelf }}" aria-expanded="{{ shelfOpen }}" style="width: 100%; min-height: 52px; border: 0; background: none; display: flex; align-items: center; justify-content: space-between; padding: 0 16px; font: 600 17px Fredoka, sans-serif; color: #152e2c">
-<span>More stories <span style="font: 500 14px Inter, sans-serif; color: #5d6a63">· 5 more today</span></span>
-<span style="font-size: 14px; font-family: Inter, sans-serif; color: #27504d">{{ shelfLabel }}</span>
-</button>
-<sc-if value="{{ shelfOpen }}" hint-placeholder-val="{{ false }}">
-<ul style="list-style: none; margin: 0; padding: 0 8px 10px; display: flex; flex-direction: column; gap: 8px">
-<sc-for list="{{ more }}" as="m" hint-placeholder-count="5">
-<li style="background: #fbf4e4; border-radius: 14px; padding: 12px 14px; display: flex; flex-wrap: wrap; gap: 10px; align-items: center">
-<span style="font-size: 12px; font-weight: 600; padding: 3px 9px; border-radius: 999px; background: {{ m.regionBg }}">{{ m.region }}</span>
-<a href="#" style="flex: 1 1 280px; color: #1c2826; text-decoration: none; font-weight: 500">{{ m.headline }}</a>
-<span style="font-size: 13px; color: #5d6a63">{{ m.kind }} · 2 sources</span>
-</li>
+<aside aria-label="Your map and progress" style="flex: 1 1 300px; display: flex; flex-direction: column; gap: 16px; color: #FCFBF3">
+<section class="glass" style="border-radius: 28px; padding: 18px 20px; display: flex; flex-direction: column; gap: 6px">
+<div style="display: flex; justify-content: space-between; align-items: baseline; gap: 8px"><h2 style="margin: 0; font: 600 17px Fredoka, sans-serif; color: #f3cdc6">Theme map</h2><span style="font-size: 12px; color: #f1f2e6">grows as you read</span></div>
+<svg viewBox="0 0 300 230" width="100%" role="img" aria-label="Theme map: your six themes around you, larger as you read more">
+<sc-for list="{{ nodes }}" as="n" hint-placeholder-count="6">
+<line x1="150" y1="115" x2="{{ n.x }}" y2="{{ n.y }}" stroke="rgba(252,251,243,.28)" stroke-width="1.5" stroke-dasharray="{{ n.dash }}"></line>
 </sc-for>
-</ul>
-</sc-if>
-</section>
-</section>
-
-<aside aria-label="Edition at a glance" style="flex: 1 1 280px; display: flex; flex-direction: column; gap: 18px">
-<section style="background: #152e2c; color: #fbf4e4; border-radius: 22px; padding: 20px 22px; display: flex; flex-direction: column; gap: 14px">
-<h2 style="margin: 0; font: 600 17px Fredoka, sans-serif; color: #ffd98a">Today at a glance</h2>
-<div style="display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px">
-<div><p style="margin: 0; font: 600 26px/1 Fredoka, sans-serif">8</p><p style="margin: 2px 0 0; font-size: 12px; color: #c9d4cc">stories</p></div>
-<div><p style="margin: 0; font: 600 26px/1 Fredoka, sans-serif">19</p><p style="margin: 2px 0 0; font-size: 12px; color: #c9d4cc">sources</p></div>
-<div><p style="margin: 0; font: 600 26px/1 Fredoka, sans-serif">0</p><p style="margin: 2px 0 0; font-size: 12px; color: #c9d4cc">paywalls</p></div>
-</div>
-<p style="margin: 0; font-size: 12px; color: #c9d4cc">Sample numbers</p>
+<sc-for list="{{ nodes }}" as="n" hint-placeholder-count="6">
+<circle cx="{{ n.x }}" cy="{{ n.y }}" r="{{ n.r }}" fill="{{ n.fill }}" stroke="#a9bd7e" stroke-width="1.5" stroke-dasharray="{{ n.dash }}"></circle>
+<text x="{{ n.x }}" y="{{ n.ly }}" text-anchor="middle" font-family="Inter, sans-serif" font-size="11" fill="#FCFBF3">{{ n.name }}</text>
+</sc-for>
+<circle cx="150" cy="115" r="16" fill="#D3968C"></circle>
+<circle cx="150" cy="115" r="24" fill="none" stroke="rgba(211,150,140,.5)" stroke-width="1.5"></circle>
+<text x="150" y="150" text-anchor="middle" font-family="Fredoka, sans-serif" font-size="12" font-weight="600" fill="#FCFBF3">you</text>
+</svg>
 </section>
 
-<section style="background: #fbf4e4; border-radius: 22px; padding: 20px 22px; display: flex; flex-direction: column; gap: 12px">
-<h2 style="margin: 0; font: 600 17px Fredoka, sans-serif; color: #152e2c">Where it happened</h2>
-<sc-for list="{{ regions }}" as="r" hint-placeholder-count="4">
-<div style="display: flex; flex-direction: column; gap: 4px">
-<div style="display: flex; justify-content: space-between; font-size: 14px"><span>{{ r.name }}</span><span style="color: #5d6a63">{{ r.count }}</span></div>
-<div aria-hidden="true" style="height: 8px; border-radius: 4px; background: #efe0c0; overflow: hidden"><div style="height: 100%; width: {{ r.pct }}; background: {{ r.color }}; border-radius: 4px"></div></div>
+<section class="glass" style="border-radius: 28px; padding: 18px 20px; display: flex; flex-direction: column; gap: 12px">
+<div style="display: flex; justify-content: space-between; align-items: baseline; gap: 8px"><h2 style="margin: 0; font: 600 17px Fredoka, sans-serif; color: #f3cdc6">Badges</h2><span style="font-size: 12px; color: #f1f2e6">{{ badgeCount }} of 6</span></div>
+<div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px">
+<sc-for list="{{ badges }}" as="b" hint-placeholder-count="6">
+<div class="pill" style="border-radius: 18px; padding: 10px 12px; display: flex; gap: 10px; align-items: flex-start; background: {{ b.bg }}">
+<span aria-hidden="true" style="flex: 0 0 auto; width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; background: {{ b.dot }}">
+<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="{{ b.icon }}" stroke-width="2" aria-hidden="true"><path d="M12 3l2.6 5.5 6 .8-4.4 4.2 1.1 6L12 16.6 6.7 19.5l1.1-6L3.4 9.3l6-.8z"></path></svg></span>
+<span style="display: flex; flex-direction: column; line-height: 1.3"><strong style="font-size: 13px">{{ b.name }}</strong><span style="font-size: 12px; color: #f1f2e6">{{ b.how }}</span></span>
 </div>
 </sc-for>
-<p style="margin: 4px 0 0; font-size: 13px; color: #5d6a63">US and China weighted highest; others by relevance.</p>
-</section>
-
-<section style="background: #fbf4e4; border-radius: 22px; padding: 20px 22px; display: flex; flex-direction: column; gap: 10px">
-<h2 style="margin: 0; font: 600 17px Fredoka, sans-serif; color: #152e2c">What kind of news</h2>
-<div style="display: flex; flex-wrap: wrap; gap: 8px">
-<span style="font-size: 13px; padding: 5px 11px; border-radius: 999px; background: #efe0c0">Launch · 3</span>
-<span style="font-size: 13px; padding: 5px 11px; border-radius: 999px; background: #efe0c0">Policy · 3</span>
-<span style="font-size: 13px; padding: 5px 11px; border-radius: 999px; background: #efe0c0">Research · 1</span>
-<span style="font-size: 13px; padding: 5px 11px; border-radius: 999px; background: #efe0c0">Deal · 1</span>
 </div>
-</section>
-
-<section style="border: 1.5px dashed rgba(28,40,38,.28); border-radius: 22px; padding: 18px 22px; display: flex; flex-direction: column; gap: 6px">
-<h2 style="margin: 0; font: 600 16px Fredoka, sans-serif; color: #5d6a63">Lenses arrive in Phase 2</h2>
-<p style="margin: 0; font-size: 14px; color: #5d6a63">Feminism, matriarchy, astrology, enlightenment and Gen Alpha, plus a daily deep cut.</p>
 </section>
 </aside>
 
 </div>
-</main>
+</div>
+</div>
 </div>
 </x-dc>
-<script type="text/x-dc" data-dc-script data-props='{"showBreaking":{"editor":"boolean","default":true},"edition":{"editor":"enum","options":["ready","late"],"default":"ready"},"$preview":{"width":1440,"height":1560}}'>
+<script type="text/x-dc" data-dc-script data-props='{"light":{"editor":"enum","options":["morning","golden","night"],"default":"morning"},"$preview":{"width":1440,"height":1700}}'>
 class Component extends DCLogic {
   constructor(props) {
     super(props);
-    this.state = { read: {}, shelfOpen: false, dismissed: false };
+    this.state = { read: {}, saved: {}, shelf: 'all' };
   }
   renderVals() {
-    const tint = { 'United States': '#d6e6ef', 'China': '#f3d9c6', 'European Union': '#e2e7d0', 'Global': '#e6dff0' };
-    const stories = [
-      { rank: 1, region: 'China', kind: 'Launch', minutes: 2,
-        headline: '[Sample] A Chinese lab releases an open model that matches US leaders on reasoning tests',
-        summary: 'The model is free to download and run, and the lab says it was trained for a fraction of what US rivals spend. Early testers report strong maths and coding results.',
-        why: 'Open models this good change who can build with frontier AI, and put pressure on US pricing.',
-        skeptic: 'Benchmarks are self-reported so far, and independent tests often land lower.',
-        sources: ['Lab blog', 'Rest of World', 'ChinaTalk'] },
-      { rank: 2, region: 'United States', kind: 'Policy', minutes: 2,
-        headline: '[Sample] The US proposes tighter export rules for advanced AI chips',
-        summary: 'The draft rule widens the list of chips that need a licence to ship abroad and adds new reporting duties for cloud providers.',
-        why: 'Chip access decides how fast labs outside the US can train new models.',
-        skeptic: 'Past rules were worked around quickly, and critics say this one may push buyers to domestic Chinese chips faster.',
-        sources: ['Official release', 'Ars Technica'] },
-      { rank: 3, region: 'European Union', kind: 'Policy', minutes: 1,
-        headline: '[Sample] The EU publishes new guidance for general-purpose AI models',
-        summary: 'The guidance explains what model makers must disclose about training data and testing before release in Europe.',
-        why: 'It sets the paperwork bar for any model launched to European users.',
-        skeptic: 'Smaller labs say the cost of compliance favours the biggest companies.',
-        sources: ['EU AI Office', 'TechCrunch'] }
+    const all = [
+      { id: 'a1', meta: 'Lenny’s Newsletter · Hamel Husain and Shreya Shankar · 22 Sep 2026', minutes: 18,
+        title: 'Advanced evals: How to find (and fix) hidden AI failures in your product',
+        summary: 'Start with error discovery: find the failures that matter to your product before choosing metrics. Their example is Harvey, which rebuilt its AI contract reviewer this way and nearly doubled its internal quality score.',
+        themes: ['Evals'], why: 'A method you can apply to your own product before you write a single PRD.' },
+      { id: 'a2', meta: 'CX Network · Nayan Teja · 2 Nov 2026', minutes: 7,
+        title: 'Product managers need a new operating system for the AI era',
+        summary: 'When information is abundant, alignment becomes the constraint. AI takes over low-leverage PM work, which makes the quality of product judgment far more visible.',
+        themes: ['How teams operate', 'The AI PM role'], why: 'Useful framing for how your agent team should report to you.' },
+      { id: 'a3', meta: 'Product School · 28 Oct 2026', minutes: 23,
+        title: 'AI in product management: what’s (really) changing?',
+        summary: 'The main constraint on teams is moving from engineering output to product judgment, AI product strategy and decision quality.',
+        themes: ['The AI PM role'], why: 'Maps onto where you want to grow: judgment over output.' },
+      { id: 'a4', meta: 'Braintrust', minutes: 8,
+        title: 'Evals are the new PRD',
+        summary: 'PRDs assume you can fully specify a system’s behaviour up front. AI products can’t be specified that way, so measurable signals that verify the behaviour you want take the PRD’s place.',
+        themes: ['Evals', 'The AI PM role'], why: 'Directly shapes how your PM agent writes specs for Projects.' },
+      { id: 'a5', meta: 'Lenny’s Podcast · Elena Verna', minutes: 92,
+        title: 'The new AI growth playbook for 2026: how Lovable hit $200M ARR in one year',
+        summary: 'A long conversation with Lovable’s head of growth on how growth works for AI-native products.',
+        themes: ['AI growth'], why: 'Directly relevant to the road to $10K MRR.' }
     ];
-    const top = stories.map((s) => {
-      const isRead = !!this.state.read[s.rank];
-      return { ...s, regionBg: tint[s.region], isRead,
-        btnLabel: isRead ? 'Read ✓' : 'Mark read',
-        btnBg: isRead ? '#27504d' : 'transparent',
-        btnFg: isRead ? '#fbf4e4' : '#27504d',
-        toggle: () => this.setState({ read: { ...this.state.read, [s.rank]: !isRead } }) };
-    });
-    const readCount = top.filter((s) => s.isRead).length;
-    const more = [
-      { region: 'United States', kind: 'Deal', headline: '[Sample] A major cloud provider signs a multi-year compute deal with an AI lab' },
-      { region: 'China', kind: 'Policy', headline: '[Sample] China updates its rules for labelling AI-generated content' },
-      { region: 'Global', kind: 'Research', headline: '[Sample] A new study measures how often chatbots cite sources correctly' },
-      { region: 'United States', kind: 'Launch', headline: '[Sample] A new coding agent goes into public beta' },
-      { region: 'China', kind: 'Launch', headline: '[Sample] A phone maker ships an on-device assistant to millions of users' }
-    ].map((m) => ({ ...m, regionBg: tint[m.region] }));
-    const regions = [
-      { name: 'United States', count: 3, pct: '75%', color: '#27504d' },
-      { name: 'China', count: 3, pct: '75%', color: '#b9773a' },
-      { name: 'European Union', count: 1, pct: '25%', color: '#6e9a3a' },
-      { name: 'Global', count: 1, pct: '25%', color: '#7a6a9a' }
+    const read = this.state.read, saved = this.state.saved;
+    const readCount = all.filter((a) => read[a.id]).length;
+    const saveCount = all.filter((a) => saved[a.id]).length;
+    const shelf = this.state.shelf;
+    const visible = all.filter((a) => shelf === 'all' || (shelf === 'unread' && !read[a.id]) || (shelf === 'saved' && saved[a.id]) || (shelf === 'notes' && false));
+    const articles = visible.map((a) => ({ ...a, read: !!read[a.id], saved: !!saved[a.id],
+      readLabel: read[a.id] ? 'Read ✓' : 'Mark as read',
+      readBg: read[a.id] ? '#105666' : 'rgba(255,255,255,.6)', readFg: read[a.id] ? '#FCFBF3' : '#105666',
+      saveLabel: saved[a.id] ? 'Saved ✓' : 'Save', saveBg: saved[a.id] ? '#dfe5c6' : 'rgba(255,255,255,.6)',
+      toggleRead: () => this.setState({ read: { ...read, [a.id]: !read[a.id] } }),
+      toggleSave: () => this.setState({ saved: { ...saved, [a.id]: !saved[a.id] } }) }));
+    const shelfDefs = [['all', 'Everything', all.length], ['unread', 'Unread', all.length - readCount], ['saved', 'Saved', saveCount], ['notes', 'My notes', 0]];
+    const shelves = shelfDefs.map(([id, name, count]) => ({ name, count, on: shelf === id,
+      bg: shelf === id ? '#FCFBF3' : 'transparent', fg: shelf === id ? '#0A3323' : '#FCFBF3',
+      pick: () => this.setState({ shelf: id }) }));
+    const themeReads = {};
+    all.forEach((a) => { if (read[a.id]) a.themes.forEach((t) => { themeReads[t] = (themeReads[t] || 0) + 1; }); });
+    const pos = [['Evals', 150, 28], ['The AI PM role', 252, 70], ['How teams operate', 246, 176], ['AI adoption', 150, 206], ['AI growth', 52, 170], ['Agents', 48, 66]];
+    const nodes = pos.map(([name, x, y]) => { const n = themeReads[name] || 0;
+      return { name, x, y, r: 9 + n * 5, ly: y + (y > 115 ? 9 + n * 5 + 13 : -(9 + n * 5) - 6),
+        fill: n ? 'rgba(169,189,126,.85)' : 'rgba(252,251,243,.08)', dash: n ? '0' : '3 3' }; });
+    const xp = readCount * 10 + saveCount * 5;
+    const weekReads = Math.min(readCount, 5);
+    const circ = 2 * Math.PI * 18;
+    const themesTouched = Object.keys(themeReads).length;
+    const badgeDefs = [
+      ['First page turned', 'Read one article', readCount >= 1],
+      ['Steady reader', 'Read five articles', readCount >= 5],
+      ['Thinking out loud', 'Write your first note', false],
+      ['Curator', 'Make a folder', false],
+      ['Connector', 'Read across three themes', themesTouched >= 3],
+      ['Deep diver', 'Three notes on one theme', false]
     ];
-    const shelfOpen = this.state.shelfOpen;
+    const badges = badgeDefs.map(([name, how, got]) => ({ name, how,
+      bg: got ? 'rgba(169,189,126,.28)' : 'rgba(255,255,255,.08)',
+      dot: got ? '#a9bd7e' : 'rgba(255,255,255,.12)', icon: got ? '#0A3323' : '#dfe3c8' }));
+    const titles = { all: 'Today’s edition', unread: 'Unread', saved: 'Saved', notes: 'My notes' };
+    const light = this.props.light ?? 'morning';
     return {
-      top, more, regions, readCount,
-      readPct: Math.round((readCount / 3) * 100) + '%',
-      showBanner: (this.props.showBreaking ?? true) && !this.state.dismissed,
-      isLate: (this.props.edition ?? 'ready') === 'late',
-      dismiss: () => this.setState({ dismissed: true }),
-      shelfOpen, shelfLabel: shelfOpen ? 'Close' : 'Open',
-      toggleShelf: () => this.setState({ shelfOpen: !shelfOpen })
+      plate: ['morning', 'golden', 'night'].includes(light) ? light : 'morning',
+      articles, shelves, nodes, badges, xp, weekReads,
+      toNext: (100 - xp) + ' XP',
+      ringDash: (circ * weekReads / 5).toFixed(1) + ' ' + circ.toFixed(1),
+      ringLabel: weekReads + ' of 5 reads this week',
+      badgeCount: badgeDefs.filter((b) => b[2]).length,
+      shelfTitle: titles[shelf], empty: articles.length === 0
     };
   }
 }
