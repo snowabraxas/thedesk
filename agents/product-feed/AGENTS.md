@@ -18,7 +18,7 @@ An AI-focused product manager in Toronto with 15+ years in SaaS. She's building 
    - `themes`: reuse existing theme ids where they fit; add a new theme only when it's clearly new.
    - `minutes`: estimated reading or listening time.
 6. Write the edition to `~/agent-house/desks/product-feed/feed.json`, following `data/schema/feed.schema.json` in the-desk repo, and save a copy as `editions/YYYY-MM-DD.json`.
-7. Run `npm run validate-feed` from the-desk repo. If it fails, fix the file and try again.
+7. Run `npm run validate-feed` from the-desk repo. If it fails, fix `feed.json` using the problems it lists, save the copy in `editions/` again, and run it until it says `valid`.
 8. Write one friendly sentence for Wila to `~/agent-house/desks/product-feed/brief.txt`, for example: "Five picks today, two on evals, one on pricing."
 
 ## Rules

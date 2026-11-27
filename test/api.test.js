@@ -5,7 +5,7 @@ import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { after, afterEach, beforeEach, describe, test } from 'node:test';
-import { APP_DIR, SAMPLE_FEED_PATH, feedPath, statePath } from '../server/config.js';
+import { APP_DIR, SAMPLE_FEED_PATH, feedPath, productFeedDir, statePath } from '../server/config.js';
 import { CONTENT_SECURITY_POLICY, createServer } from '../server/index.js';
 import { MAX_STATE_BYTES, checkState, createStateStore } from '../server/state-store.js';
 
@@ -14,7 +14,7 @@ const EXPECTED_CSP =
   "font-src https://fonts.gstatic.com; img-src 'self' data:; connect-src 'self'; base-uri 'none'; " +
   "form-action 'self'; frame-ancestors 'none'";
 
-const quiet = { error() {} };
+const quiet = { error() {}, info() {} };
 const tmpDirs = [];
 function tempHome() {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'the-desk-api-'));
@@ -103,43 +103,91 @@ describe('GET /api/feed', () => {
   });
   afterEach(() => stop(server));
 
+  const writeFeed = (value) => {
+    fs.mkdirSync(path.dirname(feedPath(deskHome)), { recursive: true });
+    fs.writeFileSync(feedPath(deskHome), typeof value === 'string' ? value : JSON.stringify(value));
+  };
+  const withHttpUrl = (feed) => ({ ...feed, articles: feed.articles.map((a, i) => (i ? a : { ...a, url: 'http://example.com/post' })) });
+
   test('without a feed.json, serves the prototype edition marked as a sample', async () => {
     const res = await request(port, { path: '/api/feed' });
     assert.equal(res.status, 200);
     assert.match(res.headers['content-type'], /^application\/json/);
     assert.equal(res.headers['cache-control'], 'no-store');
+    assert.equal(res.headers['x-desk-feed-source'], 'sample');
     assert.equal(res.json.sample, true);
     assert.deepEqual(res.json.articles, SAMPLE.articles);
     assert.equal(res.json.edition, SAMPLE.edition);
   });
 
-  test("serves the agent's feed.json when it's there, not marked as a sample", async () => {
+  test("serves the agent's valid feed.json as live, not marked as a sample", async () => {
     const feed = { ...SAMPLE, edition: '2026-11-27', note: 'Written by the agent' };
-    fs.mkdirSync(path.dirname(feedPath(deskHome)), { recursive: true });
-    fs.writeFileSync(feedPath(deskHome), JSON.stringify(feed));
+    writeFeed(feed);
     const res = await request(port, { path: '/api/feed' });
     assert.equal(res.status, 200);
+    assert.equal(res.headers['x-desk-feed-source'], 'live');
     assert.deepEqual(res.json, feed);
     assert.equal(res.json.sample, undefined);
   });
 
-  test("falls back to the sample, and logs why, when feed.json doesn't parse", async () => {
+  test('an agent file can never mark itself as a sample', async () => {
+    writeFeed({ ...SAMPLE, edition: '2026-11-27', sample: true });
+    const res = await request(port, { path: '/api/feed' });
+    assert.equal(res.headers['x-desk-feed-source'], 'live');
+    assert.equal('sample' in res.json, false);
+  });
+
+  test("falls back to the sample, and logs why once, when feed.json doesn't parse", async () => {
     await stop(server);
     const logged = [];
     ({ server, port } = await start({ deskHome, log: { error: (...a) => logged.push(a.join(' ')) } }));
-    fs.mkdirSync(path.dirname(feedPath(deskHome)), { recursive: true });
-    fs.writeFileSync(feedPath(deskHome), '{"desk": "product-feed",');
-    const res = await request(port, { path: '/api/feed' });
-    assert.equal(res.status, 200);
-    assert.equal(res.json.sample, true);
+    writeFeed('{"desk": "product-feed",');
+    for (let i = 0; i < 3; i++) {
+      const res = await request(port, { path: '/api/feed' });
+      assert.equal(res.status, 200);
+      assert.equal(res.headers['x-desk-feed-source'], 'sample');
+      assert.equal(res.json.sample, true);
+    }
+    assert.equal(logged.length, 1, 'logged once, not on every request');
+    assert.match(logged[0], /feed\.json isn't a valid edition, so it keeps showing the sample edition:\n {2}- not valid JSON/);
+  });
+
+  test('a valid feed is served, an invalid one is rejected, and the last good edition keeps showing', async () => {
+    await stop(server);
+    const logged = [];
+    ({ server, port } = await start({ deskHome, log: { error: (m) => logged.push(m), info() {} } }));
+    writeFeed({ ...SAMPLE, edition: '2026-11-27' });
+    const good = await request(port, { path: '/api/feed' });
+    assert.equal(good.headers['x-desk-feed-source'], 'live');
+
+    writeFeed(withHttpUrl({ ...SAMPLE, edition: '2026-11-28' }));
+    const kept = await request(port, { path: '/api/feed' });
+    assert.equal(kept.status, 200);
+    assert.equal(kept.headers['x-desk-feed-source'], 'last-good');
+    assert.deepEqual(kept.json, good.json);
     assert.equal(logged.length, 1);
-    assert.match(logged[0], /feed\.json/);
+    assert.match(logged[0], /articles\[0\]\.url: must start with https:\/\//);
+  });
+
+  test('after a restart with a bad feed.json, serves the newest valid edition from editions/', async () => {
+    await stop(server);
+    writeFeed(withHttpUrl({ ...SAMPLE, edition: '2026-11-28' }));
+    const editions = path.join(productFeedDir(deskHome), 'editions');
+    fs.mkdirSync(editions, { recursive: true });
+    fs.writeFileSync(path.join(editions, '2026-11-27.json'), JSON.stringify({ ...SAMPLE, edition: '2026-11-27' }));
+    fs.writeFileSync(path.join(editions, '2026-11-28.json'), JSON.stringify(withHttpUrl({ ...SAMPLE, edition: '2026-11-28' })));
+    ({ server, port } = await start({ deskHome }));
+    const res = await request(port, { path: '/api/feed' });
+    assert.equal(res.headers['x-desk-feed-source'], 'edition:2026-11-27.json');
+    assert.equal(res.json.edition, '2026-11-27');
+    assert.equal(res.json.sample, undefined);
   });
 
   test('HEAD answers with headers only; other methods are refused', async () => {
     const head = await request(port, { method: 'HEAD', path: '/api/feed' });
     assert.equal(head.status, 200);
     assert.equal(head.body, '');
+    assert.equal(head.headers['x-desk-feed-source'], 'sample');
     const post = await request(port, { method: 'POST', path: '/api/feed', body: '{}' });
     assert.equal(post.status, 405);
     assert.equal(post.headers.allow, 'GET, HEAD');

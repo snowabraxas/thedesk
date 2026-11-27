@@ -16,6 +16,29 @@ function run(args, env = {}) {
   return spawnSync(process.execPath, [SCRIPT, ...args], { cwd: REPO_ROOT, env: cleanEnv, encoding: 'utf8' });
 }
 
+// npm's own CLI: npm sets npm_execpath while it runs `npm test`; otherwise look for npm on PATH.
+function findNpmCli() {
+  if (process.env.npm_execpath && fs.existsSync(process.env.npm_execpath)) return process.env.npm_execpath;
+  for (const dir of (process.env.PATH || '').split(path.delimiter)) {
+    try {
+      const cli = fs.realpathSync(path.join(dir, 'npm'));
+      if (cli.endsWith('.js')) return cli;
+    } catch {
+      /* not here */
+    }
+  }
+  return null;
+}
+const NPM_CLI = findNpmCli();
+
+/** `npm run validate-feed -- <args>`, typed in `cwd`, the way the agent runs it. */
+function runNpm(args, { cwd = REPO_ROOT, env = {} } = {}) {
+  const cleanEnv = { ...process.env, ...env };
+  for (const key of Object.keys(cleanEnv)) if (/^npm_/i.test(key) || key === 'INIT_CWD') delete cleanEnv[key];
+  const npmArgs = [NPM_CLI, 'run', 'validate-feed', ...(args.length ? ['--', ...args] : [])];
+  return spawnSync(process.execPath, npmArgs, { cwd, env: cleanEnv, encoding: 'utf8' });
+}
+
 describe('npm run validate-feed', () => {
   let dir;
   before(() => {
@@ -95,5 +118,58 @@ describe('npm run validate-feed', () => {
     const r = run([SAMPLE_FEED_PATH, SAMPLE_FEED_PATH]);
     assert.equal(r.status, 1);
     assert.match(r.stderr, /Usage/);
+  });
+
+  test('--help prints the usage and exits 0', () => {
+    const r = run(['--help']);
+    assert.equal(r.status, 0);
+    assert.match(r.stdout, /^Usage: npm run validate-feed \[path\/to\/feed\.json\]/);
+  });
+
+  test('names theme problems so the agent can fix them, and exits 1', () => {
+    const feed = JSON.parse(fs.readFileSync(SAMPLE_FEED_PATH, 'utf8'));
+    feed.themes.push({ id: 'evals', name: 'Evals, again' });
+    feed.articles[1].themes = ['pricing'];
+    const file = path.join(dir, 'themes.json');
+    fs.writeFileSync(file, JSON.stringify(feed));
+    const r = run([file]);
+    assert.equal(r.status, 1);
+    assert.equal(
+      r.stderr,
+      `invalid: ${file}\n` +
+        `  - themes[${feed.themes.length - 1}].id: duplicate id "evals" (also used by themes[0])\n` +
+        '  - articles[1].themes[0]: "pricing" is not in the themes list (add it to themes first, or use one that is)\n',
+    );
+  });
+
+  test('through npm: no path checks the live feed.json, a relative path works from the repo root or a subfolder', { skip: !NPM_CLI && 'npm not found' }, () => {
+    const deskHome = path.join(dir, 'npm-house');
+    const live = path.join(deskHome, 'desks', 'product-feed', 'feed.json');
+    fs.mkdirSync(path.dirname(live), { recursive: true });
+    fs.copyFileSync(SAMPLE_FEED_PATH, live);
+
+    const ok = runNpm([], { env: { DESK_HOME: deskHome } });
+    assert.equal(ok.status, 0, ok.stderr);
+    assert.match(ok.stdout, /^valid$/m);
+
+    const feed = JSON.parse(fs.readFileSync(SAMPLE_FEED_PATH, 'utf8'));
+    feed.articles[0].url = 'http://example.com';
+    fs.writeFileSync(live, JSON.stringify(feed));
+    const bad = runNpm([], { env: { DESK_HOME: deskHome } });
+    assert.equal(bad.status, 1);
+    assert.ok(bad.stderr.includes(`invalid: ${live}\n  - articles[0].url: must start with https://`), bad.stderr);
+
+    const fromRoot = runNpm(['prototype/feed.json']);
+    assert.equal(fromRoot.status, 0, fromRoot.stderr);
+    assert.match(fromRoot.stdout, /^valid$/m);
+
+    const fromSubfolder = runNpm(['../prototype/feed.json'], { cwd: path.join(REPO_ROOT, 'test') });
+    assert.equal(fromSubfolder.status, 0, fromSubfolder.stderr);
+    assert.match(fromSubfolder.stdout, /^valid$/m);
+
+    const wrongPlace = runNpm(['prototype/feed.json'], { cwd: path.join(REPO_ROOT, 'test') });
+    assert.equal(wrongPlace.status, 1);
+    const expected = `invalid: ${path.join(REPO_ROOT, 'test', 'prototype', 'feed.json')}\n  - file not found`;
+    assert.ok(wrongPlace.stderr.includes(expected), wrongPlace.stderr);
   });
 });

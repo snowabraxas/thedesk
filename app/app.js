@@ -2,7 +2,7 @@
 // Snow's reads, saves, folders, notes, XP and badges live on the local server
 // (GET and PUT /api/state); the edition comes from GET /api/feed.
 import {
-  PHASE_LABEL, WEEK_GOAL, BADGES, articlesFor, autoPhase, blank, cnt, createStateClient, dayKey, esc, fmtDate,
+  PHASE_LABEL, WEEK_GOAL, BADGES, articlesFor, autoPhase, awardText, blank, cnt, createStateClient, dayKey, esc, fmtDate,
   freshBadges, level as levelFor, moon, moonPath, readsThisWeek as readsSince, safeUrl,
   streak as streakOf, themeScores as scoresFor, uid, wilaLine,
 } from './lib.js';
@@ -35,7 +35,7 @@ let feed = { articles: [], themes: [] };
 let ready = false;
 const store = createStateClient({
   getState: () => S,
-  onSaveFail: () => toast("I couldn't save that just now. I'll keep it here and try again with your next change."),
+  onSaveFail: () => toast("I couldn't save that just now. I'll keep it here and keep trying."),
 });
 const save = () => store.save();
 // Leaving the page: send what the debounce was still holding.
@@ -70,10 +70,8 @@ function award(xp, msg) {
   const fresh = freshBadges(S, feed);
   fresh.forEach(b => S.badges[b.id] = Date.now());
   save();
-  let text = '+' + xp + ' XP · ' + msg;
-  if (fresh.length) text = 'New badge: ' + fresh.map(b => b.name).join(', ') + ' · +' + xp + ' XP';
-  if (level() > before) text = 'Level ' + level() + '! ' + text;
-  toast(text);
+  // While saving is paused (her saved state couldn't be read), say so gently.
+  toast(awardText({ xp, msg, badges: fresh.map(b => b.name), newLevel: level() > before ? level() : 0, saved: store.canSave }));
 }
 
 /* ================= time of day ================= */

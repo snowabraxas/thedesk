@@ -4,7 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { describe, test } from 'node:test';
 import { REPO_ROOT } from '../server/config.js';
 import {
-  articlesFor, autoPhase, blank, createStateClient, dayKey, esc, fmtDate, freshBadges, level, moon,
+  articlesFor, autoPhase, awardText, blank, createStateClient, dayKey, esc, fmtDate, freshBadges, level, moon,
   normalizeState, readsThisWeek, safeUrl, streak, sunTimes, themeScores, wilaLine,
 } from '../app/lib.js';
 
@@ -272,7 +272,7 @@ describe('createStateClient', () => {
       assert.equal(r.ok, false);
       assert.deepEqual(r.state, blank());
       client.save();
-      t.mock.timers.tick(5000);
+      t.mock.timers.tick(60_000); // past any retry, too
       await settle();
       assert.equal(client.flushOnExit(), false);
       assert.equal(srv.putCalls().length, 0);
@@ -325,7 +325,7 @@ describe('createStateClient', () => {
     assert.equal(client.dirty, false);
   });
 
-  test('a failed save keeps the state, tells Snow once, and retries with the next change', async (t) => {
+  test('a failed save keeps the state, tells Snow once, and retries every 15 s until it works', async (t) => {
     t.mock.timers.enable({ apis: ['setTimeout'] });
     const srv = fakeServer();
     const S = { xp: 1 };
@@ -339,29 +339,85 @@ describe('createStateClient', () => {
     await settle();
     assert.equal(told, 1);
     assert.equal(client.dirty, true, 'still waiting to be saved');
-    t.mock.timers.tick(60_000);
-    assert.equal(srv.puts.length, 1, 'no retry until something changes');
+    t.mock.timers.tick(14_999);
+    assert.equal(srv.puts.length, 1, 'waits 15 s before trying again');
+    t.mock.timers.tick(1);
+    assert.equal(srv.puts.length, 2, 'tries again by itself, with no new change');
+    assert.deepEqual(JSON.parse(srv.puts[1].body), { xp: 1 });
 
-    S.xp = 2;
-    client.save();
-    t.mock.timers.tick(600);
     srv.puts[1].reject(new TypeError('Failed to fetch'));
     await settle();
     assert.equal(told, 1, 'only one message for a run of failures');
-    assert.deepEqual(JSON.parse(srv.puts[1].body), { xp: 2 });
+    S.xp = 2; // changed in memory without a save() call: the retry still sends the latest state
+    t.mock.timers.tick(15_000);
+    assert.equal(srv.puts.length, 3);
+    assert.deepEqual(JSON.parse(srv.puts[2].body), { xp: 2 });
 
-    S.xp = 3;
-    client.save();
-    t.mock.timers.tick(600);
-    srv.puts[2].resolve({ ok: true });
+    srv.puts[2].resolve({ ok: true }); // the server is back
     await settle();
     assert.equal(client.dirty, false);
+    t.mock.timers.tick(120_000);
+    assert.equal(srv.puts.length, 3, 'stops retrying once it is saved');
 
     client.save();
     t.mock.timers.tick(600);
     srv.puts[3].resolve({ ok: false, status: 503 });
     await settle();
     assert.equal(told, 2, 'a new failure after a good save is told again');
+  });
+
+  test('a change while waiting to retry goes out after the usual 600 ms, then retrying stops', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const srv = fakeServer();
+    const S = { xp: 1 };
+    const client = createStateClient({ getState: () => S, fetchFn: srv.fetchFn });
+    await client.load();
+    client.save();
+    t.mock.timers.tick(600);
+    srv.puts[0].resolve({ ok: false, status: 500 });
+    await settle();
+
+    t.mock.timers.tick(5_000);
+    S.xp = 2;
+    client.save();
+    t.mock.timers.tick(600);
+    assert.equal(srv.puts.length, 2, 'sent with the change, not 15 s after the failure');
+    assert.deepEqual(JSON.parse(srv.puts[1].body), { xp: 2 });
+    srv.puts[1].resolve({ ok: true });
+    await settle();
+    t.mock.timers.tick(60_000);
+    assert.equal(srv.puts.length, 2, 'the old retry timer is gone');
+  });
+
+  test('the retry waits can be set', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const srv = fakeServer();
+    const client = createStateClient({ getState: () => ({ xp: 1 }), fetchFn: srv.fetchFn, retryDelay: 1000 });
+    await client.load();
+    client.save();
+    t.mock.timers.tick(600);
+    srv.puts[0].resolve({ ok: false, status: 500 });
+    await settle();
+    t.mock.timers.tick(1000);
+    assert.equal(srv.puts.length, 2);
+  });
+
+  test('a failed save on leaving the page is retried if the page stays open', async (t) => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const srv = fakeServer();
+    const client = createStateClient({ getState: () => ({ xp: 7 }), fetchFn: srv.fetchFn });
+    await client.load();
+    client.save();
+    assert.equal(client.flushOnExit(), true);
+    await settle();
+    srv.puts[0].resolve({ ok: false, status: 500 });
+    await settle();
+    assert.equal(client.dirty, true);
+    t.mock.timers.tick(15_000);
+    assert.equal(srv.puts.length, 2);
+    srv.puts[1].resolve({ ok: true });
+    await settle();
+    assert.equal(client.dirty, false);
   });
 
   test('on leaving the page, sends the waiting save with keepalive', async (t) => {
@@ -392,5 +448,23 @@ describe('createStateClient', () => {
     client.flushOnExit();
     await settle();
     assert.equal(srv.puts[0].keepalive, false);
+  });
+});
+
+describe('awardText', () => {
+  test('XP, badge and level-up toasts read as before', () => {
+    assert.equal(awardText({ xp: 10, msg: 'article read' }), '+10 XP · article read');
+    assert.equal(awardText({ xp: 5, msg: 'folder made', badges: ['Curator'] }), 'New badge: Curator · +5 XP');
+    assert.equal(awardText({ xp: 10, msg: 'article read', newLevel: 3 }), 'Level 3! +10 XP · article read');
+    assert.equal(
+      awardText({ xp: 15, msg: 'note saved', badges: ['Thinking out loud', 'Deep diver'], newLevel: 2 }),
+      'Level 2! New badge: Thinking out loud, Deep diver · +15 XP',
+    );
+  });
+
+  test("while saving is paused, says gently that it isn't saved", () => {
+    assert.equal(awardText({ xp: 10, msg: 'article read', saved: false }), '+10 XP · article read · not saved');
+    assert.equal(awardText({ xp: 5, msg: 'folder made', badges: ['Curator'], saved: false }), 'New badge: Curator · +5 XP · not saved');
+    assert.equal(awardText({ xp: 10, msg: 'article read', newLevel: 2, saved: false }), 'Level 2! +10 XP · article read · not saved');
   });
 });

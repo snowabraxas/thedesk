@@ -14,13 +14,24 @@ describe('validateFeed', () => {
     assert.deepEqual(result, { ok: true, errors: [] });
   });
 
+  // S3 rule: every article URL must start with https://.
   test('rejects an article url that is not https', () => {
     const feed = sample();
     feed.articles[1].url = 'http://example.com/post';
     const { ok, errors } = validateFeed(feed);
     assert.equal(ok, false);
-    assert.equal(errors.length, 1);
-    assert.match(errors[0], /^articles\[1\]\.url: must start with https:\/\//);
+    assert.deepEqual(errors, ['articles[1].url: must start with https:// (got "http://example.com/post")']);
+  });
+
+  test('the https:// rule applies to every article, and https:// passes', () => {
+    const feed = sample();
+    for (const article of feed.articles) assert.match(article.url, /^https:\/\//);
+    feed.articles.forEach((article) => {
+      article.url = article.url.replace(/^https:/, 'http:');
+    });
+    const { errors } = validateFeed(feed);
+    assert.equal(errors.length, feed.articles.length);
+    errors.forEach((line, i) => assert.match(line, new RegExp(`^articles\\[${i}\\]\\.url: must start with https://`)));
   });
 
   test('rejects javascript: and data: urls', () => {
@@ -53,6 +64,57 @@ describe('validateFeed', () => {
     const { ok, errors } = validateFeed(feed);
     assert.equal(ok, false);
     assert.deepEqual(errors, [`articles[3].id: duplicate id "${feed.articles[0].id}" (also used by articles[0])`]);
+  });
+
+  test('rejects duplicate theme ids and names both places', () => {
+    const feed = sample();
+    feed.themes.push({ id: 'evals', name: 'Evals, again' });
+    const { ok, errors } = validateFeed(feed);
+    assert.equal(ok, false);
+    assert.deepEqual(errors, [`themes[${feed.themes.length - 1}].id: duplicate id "evals" (also used by themes[0])`]);
+  });
+
+  test('rejects an article theme that is not in the themes list, and says how to fix it', () => {
+    const feed = sample();
+    feed.articles[2].themes = ['pm-role', 'pricing'];
+    const { ok, errors } = validateFeed(feed);
+    assert.equal(ok, false);
+    assert.deepEqual(errors, ['articles[2].themes[1]: "pricing" is not in the themes list (add it to themes first, or use one that is)']);
+  });
+
+  test('accepts a new theme once it is added to the themes list', () => {
+    const feed = sample();
+    feed.themes.push({ id: 'pricing', name: 'Pricing' });
+    feed.articles[2].themes = ['pm-role', 'pricing'];
+    assert.deepEqual(validateFeed(feed), { ok: true, errors: [] });
+  });
+
+  test('a missing themes list is reported once, not once per article theme', () => {
+    const feed = sample();
+    delete feed.themes;
+    assert.deepEqual(validateFeed(feed).errors, ['feed: missing required field "themes"']);
+  });
+
+  test('says how long a value is, and what an id may hold', () => {
+    const feed = sample();
+    feed.articles[0].summary = 'Too short.';
+    feed.articles[1].why = 'y'.repeat(201);
+    feed.articles[2].title = '';
+    feed.themes.push({ id: 'Pricing Two', name: 'Pricing' });
+    assert.deepEqual(validateFeed(feed).errors, [
+      `themes[${feed.themes.length - 1}].id: must be 1 to 40 lowercase letters, digits or dashes (got "Pricing Two")`,
+      'articles[0].summary: must be at least 20 characters (it has 10)',
+      'articles[1].why: must be at most 200 characters (it has 201)',
+      'articles[2].title: must not be empty',
+    ]);
+  });
+
+  test('says how many articles there are when there are too many or none', () => {
+    const feed = sample();
+    feed.articles = Array.from({ length: 13 }, (_, i) => ({ ...sample().articles[0], id: `a${i}` }));
+    assert.deepEqual(validateFeed(feed).errors, ['articles: must have at most 12 items (it has 13)']);
+    feed.articles = [];
+    assert.deepEqual(validateFeed(feed).errors, ['articles: must not be empty']);
   });
 
   test('lists every problem, not just the first', () => {
@@ -117,6 +179,15 @@ describe('checkFeedFile', () => {
     const { ok, errors } = await checkFeedFile(file);
     assert.equal(ok, false);
     assert.match(errors[0], /not valid JSON/);
+  });
+
+  test('a JSON error that quotes the file passes no control characters through', async () => {
+    const file = path.join(dir, 'escape.json');
+    fs.writeFileSync(file, `\u001b[31mred\u0007\n${'x'.repeat(400)}`);
+    const { errors } = await checkFeedFile(file);
+    assert.match(errors[0], /not valid JSON/);
+    assert.doesNotMatch(errors[0], /[\u0000-\u001f\u007f-\u009f]/);
+    assert.ok(errors[0].includes('\\u001b'));
   });
 
   test('refuses a file over the size limit without reading it', async () => {

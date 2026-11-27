@@ -1,12 +1,14 @@
 // The Desk's local server. node:http only, no framework.
 // Serves app/ on 127.0.0.1, refuses requests whose Host header isn't this machine, and answers
 // /api/feed (the edition) and /api/state (Snow's reads and notes) from under deskHome.
+// GET /api/feed says which edition it served in X-Desk-Feed-Source: live, last-good,
+// edition:<YYYY-MM-DD.json> or sample (see feed.js).
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { APP_DIR, HOST, SAMPLE_FEED_PATH, resolveDeskHome, resolvePort, statePath } from './config.js';
-import { loadFeed } from './feed.js';
+import { createFeedLoader } from './feed.js';
 import { CorruptStateError, MAX_STATE_BYTES, checkState, createStateStore } from './state-store.js';
 
 const MIME = {
@@ -157,12 +159,13 @@ const isJsonType = (header) => (header || '').split(';')[0].trim().toLowerCase()
 /**
  * Builds the server without listening, so tests can start it on a random port
  * with a temporary DESK_HOME.
- * @param {{ deskHome?: string, appDir?: string, log?: Pick<Console, 'error'>, fsp?: typeof fs.promises, samplePath?: string }} [options]
- *   fsp lets tests make a state write fail part way; samplePath is the edition shown when there is no feed.json.
+ * @param {{ deskHome?: string, appDir?: string, log?: { error: Function, info?: Function }, fsp?: typeof fs.promises, samplePath?: string }} [options]
+ *   fsp lets tests make a state write fail part way; samplePath is the edition shown when there is no valid one.
  */
 export function createServer({ deskHome = resolveDeskHome(), appDir = APP_DIR, log = console, fsp, samplePath = SAMPLE_FEED_PATH } = {}) {
   const root = path.resolve(appDir);
   const state = createStateStore(statePath(deskHome), fsp ? { fsp } : {});
+  const feeds = createFeedLoader(deskHome, { log, samplePath });
 
   async function getState(res) {
     try {
@@ -211,7 +214,8 @@ export function createServer({ deskHome = resolveDeskHome(), appDir = APP_DIR, l
     const isRead = req.method === 'GET' || req.method === 'HEAD';
     if (pathname === '/api/feed') {
       if (!isRead) return sendJson(res, 405, { error: 'Method not allowed' }, { Allow: 'GET, HEAD' });
-      return sendJson(res, 200, await loadFeed(deskHome, { log, samplePath }));
+      const { feed, source } = await feeds.load();
+      return sendJson(res, 200, feed, { 'X-Desk-Feed-Source': source });
     }
     if (pathname === '/api/state') {
       if (isRead) return getState(res);

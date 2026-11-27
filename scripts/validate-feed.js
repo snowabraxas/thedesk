@@ -1,7 +1,10 @@
 #!/usr/bin/env node
 // npm run validate-feed [path]
-// Checks a Product Feed edition against data/schema/feed.schema.json.
+// Checks a Product Feed edition against data/schema/feed.schema.json and the rules in
+// server/feed-schema.js (unique ids, themes in the list): the same check the server makes
+// before it serves an edition.
 // With no path it checks $DESK_HOME/desks/product-feed/feed.json (DESK_HOME defaults to ~/agent-house).
+// A relative path is taken from where the command was typed, even through `npm run`.
 // Prints "valid" and exits 0, or prints the problems and exits 1.
 import path from 'node:path';
 import { checkFeedFile } from '../server/feed-schema.js';

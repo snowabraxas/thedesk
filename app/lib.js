@@ -66,7 +66,8 @@ export function normalizeState(raw) {
  * - Nothing is saved until load() has succeeded, so a blank state can never overwrite the saved one.
  * - save() is debounced; only one PUT is in flight at a time, and changes made meanwhile follow it.
  * - A failed PUT keeps the state in memory, calls onSaveFail once (until a save works again),
- *   and is retried with the next change.
+ *   and is retried every retryDelay ms (sooner if something else changes) until a save works,
+ *   so a change isn't stuck in memory when the tab sits idle after the server comes back.
  * - flushOnExit() sends whatever is still waiting, with keepalive so it outlives the page.
  */
 export function createStateClient({
@@ -75,6 +76,7 @@ export function createStateClient({
   fetchFn = (...args) => globalThis.fetch(...args),
   onSaveFail = () => {},
   delay = 600,
+  retryDelay = 15000,
   keepaliveMax = 64000, // browsers refuse keepalive bodies over 64 KB
 }) {
   const headers = { 'Content-Type': 'application/json' };
@@ -117,6 +119,11 @@ export function createStateClient({
     timer = setTimeout(flush, delay);
   }
 
+  // After a failure: try again later, unless a save is already on its way.
+  function retryLater() {
+    if (canSave && dirty && !timer) timer = setTimeout(flush, retryDelay);
+  }
+
   async function flush() {
     clearTimeout(timer);
     timer = null;
@@ -138,7 +145,7 @@ export function createStateClient({
     writing = false;
     if (ok) failNoted = false;
     else {
-      dirty = true; // the next change sends everything again
+      dirty = true; // the retry (or the next change) sends everything again
       if (!failNoted) {
         failNoted = true;
         onSaveFail();
@@ -147,7 +154,9 @@ export function createStateClient({
     if (pending) {
       pending = false;
       await flush();
+      return;
     }
+    if (!ok) retryLater();
   }
 
   /** For pagehide. Returns true if it sent something. */
@@ -161,8 +170,13 @@ export function createStateClient({
     const keepalive = new TextEncoder().encode(body).length <= keepaliveMax;
     Promise.resolve()
       .then(() => fetchFn(url, { method: 'PUT', headers, body, keepalive }))
+      .then((r) => {
+        if (!r.ok) throw new Error(`PUT ${url} answered ${r.status}`);
+      })
       .catch(() => {
+        // Still here (the page was kept, or came back from the back/forward cache): try again later.
         dirty = true;
+        retryLater();
       });
     return true;
   }
@@ -184,6 +198,17 @@ export function createStateClient({
 /* ================= progress ================= */
 
 export const level = (xp) => 1 + Math.floor((xp || 0) / 100);
+
+/**
+ * The toast after earning XP: "+10 XP · article read", "New badge: Curator · +5 XP",
+ * "Level 2! +10 XP · article read". While saving is paused it adds " · not saved".
+ * @param {{ xp: number, msg: string, badges?: string[], newLevel?: number, saved?: boolean }} award
+ */
+export function awardText({ xp, msg, badges = [], newLevel = 0, saved = true }) {
+  let text = badges.length ? `New badge: ${badges.join(', ')} · +${xp} XP` : `+${xp} XP · ${msg}`;
+  if (newLevel) text = `Level ${newLevel}! ${text}`;
+  return saved ? text : `${text} · not saved`;
+}
 
 /** Days in a row with activity, counting today if it already has some, else ending yesterday. */
 export function streak(days, now = new Date()) {
