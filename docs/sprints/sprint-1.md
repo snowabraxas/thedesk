@@ -8,6 +8,22 @@ Build team stories run in order. Show Snow the result after S2 and again after S
 
 ---
 
+## Board
+
+Update this table the moment a story changes state (Not started, In progress, In review, Done, Blocked), not only at the end of a session. Commit and push the change on its own.
+
+| Story | Owner | Status | Note |
+| --- | --- | --- | --- |
+| S0 Foundation fixes | Snow | Done | |
+| S1 Repo set up | Developer | Done | |
+| S2 The Desk runs from the repo | Developer, designer | Done | |
+| S3 Feed schema and validator | Developer, tester | Done | |
+| S4 Always on | Developer | Done | Reboot verified 27 Nov |
+| S5 The Product Feed agent | Snow and lead dev | Not started | Next, with Snow |
+| S6 Stretch: talk with Wila | Build team | Not started | |
+
+---
+
 ## S0. Foundation fixes (Snow, about 2 hours, before S5)
 
 The Fix first list on the Plan tab. S5 depends on the first item: OpenClaw must use an Anthropic API key with a monthly cap.

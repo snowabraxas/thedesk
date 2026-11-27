@@ -25,6 +25,7 @@ The Desk is an illustrated study that follows Snow's real day. Every object in t
 The lead PM (Claude in the Claude desktop app) and you meet right here, in this folder on the Mac mini (`~/Documents/Projects/the-desk`). Both of you can read and write it.
 
 - **Start of a session:** read `docs/lead-pm-brief.md` for your next task, and `git status` to see what the lead PM changed since your last commit. Snow starts you with: "Read docs/lead-pm-brief.md and do it."
+- **Sprint board:** each sprint file in `docs/sprints/` starts with a Board table. Whoever owns a story updates its row the moment its state changes (Not started, In progress, In review, Done, Blocked), then commits and pushes that change on its own. If you have the Claude Docs tools, also set the matching Status in the live plan's Current sprint table; if not, the lead PM syncs it.
 - **End of a session:** update `docs/status.md` (what's done, what's next, any question for the lead PM, five lines or fewer). Then commit everything, the lead PM's edits included, and push.
 - GitHub (`snowabraxas/thedesk`) is the backup and history, not the meeting place.
 - Work on a branch per story and merge to `main` when the tester passes it. Snow reviews before anything big merges.
