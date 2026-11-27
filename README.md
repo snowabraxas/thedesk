@@ -32,7 +32,7 @@ The server only listens on this Mac (127.0.0.1). `PORT` changes the port and `DE
 The Desk can run by itself in the background. macOS starts it when you log in and starts it again if it ever stops, so http://localhost:4321 is simply there. It runs from the live copy, `~/the-desk-live` (see Deploying below), never from the folder you work in.
 
 ```
-npm run service:install     # set it up and start it (once, after the first npm run deploy)
+npm run service:install     # set it up and start it (once, after the first npm run deploy has finished)
 npm run service:status      # is it running, which commit is live, does the page answer, where's the log
 npm run service:stop        # stop it (it comes back with service:start, or at your next login)
 npm run service:start       # start it again
@@ -59,4 +59,4 @@ npm run deploy -- --dry-run   # see every step first, changing nothing
 npm run deploy                # update ~/the-desk-live to main and restart The Desk
 ```
 
-It ends with `The Desk is live at http://localhost:4321 on main @ 1a2b3c4 "Subject"`. It takes the committed `main`, never this folder's files, so uncommitted work and story branches stay out. It installs packages only when `package-lock.json` changed, and refuses if someone edited the live copy by hand. The very first time, it makes `~/the-desk-live` and asks you to run `npm run service:install` once to move the service there. Details: `docs/notes/sprint-2-build.md`.
+It ends with `The Desk is live at http://localhost:4321 on main @ 1a2b3c4 "Subject"`. It takes the committed `main`, never this folder's files, so uncommitted work and story branches stay out. It installs packages only when `package-lock.json` changed, in a folder beside the live copy first, so a failed install changes nothing. It refuses if someone edited the live copy by hand, and it won't run from inside the live copy. The very first time, it makes `~/the-desk-live` and asks you to run `npm run service:install` once to move the service there. Details: `docs/notes/sprint-2-build.md`.
