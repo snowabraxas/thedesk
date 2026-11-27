@@ -338,6 +338,25 @@ describe('GET and PUT /api/state', () => {
     assert.equal(fs.readFileSync(statePath(deskHome), 'utf8'), broken);
   });
 
+  // N2 review: V8's JSON errors quote the file; for state.json that went straight to the-desk.log.
+  test('a corrupt state.json is logged without quoting the file: no control bytes, no password', async () => {
+    await stop(server);
+    const logged = [];
+    ({ server, port } = await start({ deskHome, log: { error: (...a) => logged.push(a.join(' ')) } }));
+    fs.mkdirSync(path.dirname(statePath(deskHome)), { recursive: true });
+    fs.writeFileSync(statePath(deskHome), `{"notes": [${String.fromCodePoint(0x1b)}[31m https://admin:SECRET@example.com/]}`);
+    assert.equal((await request(port, { path: '/api/state' })).status, 500);
+    assert.equal(logged.length, 1);
+    assert.match(logged[0], /state\.json is not valid JSON \(Unexpected token '\\u001b'\)/);
+    assert.ok(!logged[0].includes('SECRET') && !logged[0].includes(String.fromCodePoint(0x1b)), logged[0]);
+  });
+
+  test('a state.json that starts with a byte-order mark still loads', async () => {
+    fs.mkdirSync(path.dirname(statePath(deskHome)), { recursive: true });
+    fs.writeFileSync(statePath(deskHome), `${String.fromCodePoint(0xfeff)}{"xp": 12}`);
+    assert.deepEqual(await createStateStore(statePath(deskHome)).read(), { xp: 12 });
+  });
+
   test('GET answers 500 when state.json holds something other than an object', async () => {
     fs.mkdirSync(path.dirname(statePath(deskHome)), { recursive: true });
     fs.writeFileSync(statePath(deskHome), '[1, 2, 3]');

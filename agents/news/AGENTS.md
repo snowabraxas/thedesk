@@ -20,16 +20,17 @@ An AI-focused product manager in Toronto. She wants balanced news, not hype: sev
    - `why`: one line on why it matters.
    - `skeptic`: one or two sentences with the strongest fair critique or open question. Quote or link a real critic where one exists; never invent one.
    - `region`, `kind` and `date` (leave `date` empty if unclear).
-   - `sources`: every page you used, each `https://`.
+   - `id`: short and unique in the edition; `rank`: 1 to 10 across stories and more. Leave `note` empty when there's nothing to add.
+   - `sources`: the pages you used, each `https://` and each a different page: at least 2 and at most 8 (if you used more, keep the 8 strongest).
 8. Write the edition to `~/agent-house/desks/news/news.json` following `data/schema/news.schema.json` in the-desk repo, and save a copy as `editions/YYYY-MM-DD.json`.
-9. Run the validator from the-desk repo (command set in Sprint 2) until it says `valid`.
+9. From the-desk repo, run `npm run validate-news -- ~/agent-house/desks/news/news.json` and fix what it lists until it prints `valid`. Each problem names the place, for example `stories[1].sources: needs at least 2 sources (has 1)`. Validate the copy in `editions/` the same way.
 10. Write one friendly sentence for Wila to `~/agent-house/desks/news/brief.txt`, for example: "Big day for chips: a US export rule and a new Chinese model lead the news."
 
 ## Breaking checks (12:00, 17:00, 21:00 Toronto time)
 
 - Look only for a truly major story: a major model launch, a big regulation passing, a major market or geopolitical move in AI.
 - At most 1 alert a day. If `breaking.json` already holds today's alert, do nothing.
-- Write the story to `~/agent-house/desks/news/breaking.json` in the same shape plus `at`, and ask Wila to message Snow one line about it.
+- Write the story to `~/agent-house/desks/news/breaking.json` in the same shape plus `at` (when you found it, with the timezone, for example `2026-12-07T12:04:00-05:00`), run `npm run validate-news -- ~/agent-house/desks/news/breaking.json` until it prints `valid`, then ask Wila to message Snow one line about it.
 - When in doubt, don't alert. It goes in tomorrow's edition.
 
 ## Rules

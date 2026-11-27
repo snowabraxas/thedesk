@@ -13,17 +13,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { SAMPLE_FEED_PATH, feedPath, productFeedDir } from './config.js';
 import { checkFeedFile } from './feed-schema.js';
+import { withoutSample } from './schema-common.js';
 
 const EDITION_FILE = /^\d{4}-\d{2}-\d{2}\.json$/;
 const MISSING = 'missing';
 
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
-
-/** Only The Desk's own fallback may say "sample": an agent's file never can. */
-function withoutSample(feed) {
-  const { sample, ...rest } = feed;
-  return rest;
-}
 
 /** A short fingerprint of the file, or "missing". Any change to the file changes it. */
 async function statKey(file, fsp) {

@@ -6,3 +6,4 @@ node_modules/
 docs/screens/*.png
 *.png
 *.pdf
+.tmp-*/

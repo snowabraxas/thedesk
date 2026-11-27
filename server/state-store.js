@@ -4,6 +4,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { jsonErrorText } from './schema-common.js';
 
 export const MAX_STATE_BYTES = 1024 * 1024;
 
@@ -60,9 +61,10 @@ export function createStateStore(filePath, { fsp = fs.promises } = {}) {
     }
     let value;
     try {
-      value = JSON.parse(text.replace(/^﻿/, ''));
+      value = JSON.parse(text.replace(/^\uFEFF/, ''));
     } catch (err) {
-      throw new CorruptStateError(`${filePath} is not valid JSON (${err.message})`);
+      // No quoted snippet of the file in the message (it goes to the-desk.log): see jsonErrorText.
+      throw new CorruptStateError(`${filePath} is not valid JSON (${jsonErrorText(err)})`);
     }
     if (!isPlainObject(value)) throw new CorruptStateError(`${filePath} does not hold a JSON object`);
     return value;
