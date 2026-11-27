@@ -134,9 +134,9 @@ export function markArticleRead(S, id, { now = Date.now(), canAward = true } = {
 }
 
 /**
- * Product Feed's merge before each save (and before paying): `awarded` becomes the union of this
- * tab's and the server's, so a tab that loaded earlier can never erase another tab's payment.
- * Everything else stays this tab's, as before.
+ * Before paying for a read: folds the server's `awarded` into this tab's (a union), so an article
+ * another tab already paid for counts here. Everything else stays this tab's. (Saves are merged on
+ * the server: server/state-store.js.)
  * @returns the local state, changed in place
  */
 export function mergeFeedState(local, server) {
@@ -173,24 +173,26 @@ export async function readArticle(getState, id, { canPay = true, peek, also = as
  * usable state and `empty` makes the blank one; both default to Product Feed's.
  * - Nothing is saved until load() has succeeded, so a blank state can never overwrite the saved one.
  * - save() is debounced; only one PUT is in flight at a time, and changes made meanwhile follow it.
+ *   Nothing is awaited between taking the state and sending it, so there is no moment when a change
+ *   is neither waiting nor on its way.
  * - A failed PUT keeps the state in memory, calls onSaveFail once (until a save works again),
  *   and is retried every retryDelay ms (sooner if something else changes) until a save works,
  *   so a change isn't stuck in memory when the tab sits idle after the server comes back.
- * - flushOnExit() sends whatever is still waiting, with keepalive so it outlives the page.
- * - merge(local, server), when given, runs just before each PUT with a fresh copy of the server's
- *   state, so the page can fold in what another tab saved (News: the union of `awarded` and
- *   `dismissed`). If that copy can't be read, the save counts as failed and is retried: it never
- *   writes over a state it couldn't read. On leaving the page there is no time for a GET, so it
- *   merges the last copy it read instead.
- * - peek() reads the server's copy without changing anything; reload() reads it only when nothing
- *   is waiting to be saved (idle), for picking up another tab's changes.
+ * - The server merges every save into the file as it is now (server/state-store.js). `counters`
+ *   names number keys (Product Feed: ["xp"]) that the server adds up: each PUT carries
+ *   `_sync: { xp: <the value last synced> }`, so the server adds only this page's own change.
+ * - flushOnExit() sends whatever is still waiting, with keepalive so it outlives the page; but not
+ *   when the last read from the server failed (it stays waiting, for a retry if the page stays).
+ * - peek() reads the server's copy without changing anything. reload(apply) reads it and hands it
+ *   to apply(state) only when nothing is waiting to be saved and no PUT is on its way, checked
+ *   in the same instant it applies, so a change made while the GET was out is never thrown away.
  */
 export function createStateClient({
   getState,
   url = '/api/state',
   normalize = normalizeState,
   empty = blank,
-  merge = null,
+  counters = [],
   fetchFn = (...args) => globalThis.fetch(...args),
   onSaveFail = () => {},
   delay = 600,
@@ -204,7 +206,9 @@ export function createStateClient({
   let pending = false;
   let timer = null;
   let failNoted = false;
-  let lastServer = null; // the last copy read from the server, for merging on exit
+  let lastReadOk = false;
+  let base = {}; // counters as last synced with the server
+  let inFlight = null; // counters in the PUT on its way, if any
 
   // Read the small reply even when only the status matters, so the browser can finish the request.
   const finish = async (r) => {
@@ -215,22 +219,39 @@ export function createStateClient({
     }
   };
 
+  // Counters only grow, and two PUTs' replies can come back in either order: never move the base back.
+  const advance = (sent) => {
+    for (const [k, v] of Object.entries(sent)) base[k] = Math.max(base[k] ?? 0, v);
+  };
+  const countersOf = (state) => Object.fromEntries(counters.map((k) => [k, typeof state?.[k] === 'number' && Number.isFinite(state[k]) ? state[k] : 0]));
+  // The body of a PUT: the state, plus the counters it was last synced at.
+  function bodyOf(state, syncedAt) {
+    if (!counters.length) return { body: JSON.stringify(state), sent: null };
+    return { body: JSON.stringify({ ...state, _sync: syncedAt }), sent: countersOf(state) };
+  }
+
   // GET the server's copy, normalized. Throws when it can't be read.
   async function readServer() {
-    const r = await fetchFn(url, { cache: 'no-store' });
-    if (!r.ok) {
-      await finish(r);
-      throw new Error(`GET ${url} answered ${r.status}`);
+    try {
+      const r = await fetchFn(url, { cache: 'no-store' });
+      if (!r.ok) {
+        await finish(r);
+        throw new Error(`GET ${url} answered ${r.status}`);
+      }
+      const state = normalize(await r.json());
+      lastReadOk = true;
+      return state;
+    } catch (error) {
+      lastReadOk = false;
+      throw error;
     }
-    const state = normalize(await r.json());
-    if (merge) lastServer = structuredClone(state);
-    return state;
   }
 
   async function load() {
     try {
       const state = await readServer();
       canSave = true;
+      base = countersOf(state);
       return { ok: true, state };
     } catch (error) {
       canSave = false;
@@ -249,11 +270,17 @@ export function createStateClient({
   }
 
   const idle = () => !dirty && !writing;
-  /** The server's copy, to replace this tab's, but only when nothing is waiting to be saved, before and after the GET. */
-  async function reload() {
+  /**
+   * The server's copy, handed to apply(state) to replace this tab's, but only when nothing is
+   * waiting to be saved, before the GET and in the instant it is applied.
+   */
+  async function reload(apply = () => {}) {
     if (!canSave || !idle()) return { ok: false };
     const r = await peek();
-    return r.ok && idle() ? r : { ok: false };
+    if (!r.ok || !idle()) return { ok: false };
+    base = countersOf(r.state);
+    apply(r.state);
+    return r;
   }
 
   function save() {
@@ -276,20 +303,25 @@ export function createStateClient({
       pending = true;
       return;
     }
+    // Take the state and send it in the same instant: nothing is awaited in between.
+    const { body, sent } = bodyOf(getState(), base);
     writing = true;
     dirty = false;
+    inFlight = sent;
     let ok = false;
     try {
-      if (merge) merge(getState(), await readServer());
-      const r = await fetchFn(url, { method: 'PUT', headers, body: JSON.stringify(getState()) });
+      const r = await fetchFn(url, { method: 'PUT', headers, body });
       ok = r.ok;
       await finish(r);
     } catch {
       /* offline or the server is down */
     }
     writing = false;
-    if (ok) failNoted = false;
-    else {
+    inFlight = null;
+    if (ok) {
+      failNoted = false;
+      if (sent) advance(sent); // the server has added everything up to what was sent
+    } else {
       dirty = true; // the retry (or the next change) sends everything again
       if (!failNoted) {
         failNoted = true;
@@ -306,18 +338,19 @@ export function createStateClient({
 
   /** For pagehide. Returns true if it sent something. */
   function flushOnExit() {
-    if (!canSave || !dirty) return false;
+    if (!canSave || !dirty || !lastReadOk) return false;
     clearTimeout(timer);
     timer = null;
     pending = false;
     dirty = false;
-    if (merge && lastServer) merge(getState(), structuredClone(lastServer));
-    const body = JSON.stringify(getState());
+    // A PUT still on its way will land (or the server is down): count from what it carries.
+    const { body, sent } = bodyOf(getState(), inFlight || base);
     const keepalive = new TextEncoder().encode(body).length <= keepaliveMax;
     Promise.resolve()
       .then(() => fetchFn(url, { method: 'PUT', headers, body, keepalive }))
       .then((r) => {
         if (!r.ok) throw new Error(`PUT ${url} answered ${r.status}`);
+        if (sent) advance(sent);
       })
       .catch(() => {
         // Still here (the page was kept, or came back from the back/forward cache): try again later.

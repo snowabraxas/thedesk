@@ -294,24 +294,41 @@ describe('app/app.js', () => {
     assert.match(js, /const news = createNewsPage\(\{ award, toast, isReady: \(\) => ready, canAward: \(\) => store\.canSave, reloadXpState: reloadState \}\);/);
     assert.match(js, /Promise\.all\(\[loadState\(\), loadFeed\(\), news\.load\(\)\]\)\.then\(\(\) => \{ ready = true; renderAll\(\); \}\);/);
     const nj = read('news.js');
-    assert.match(nj, /r = await readStory\(\(\) => N, key, \{ canPay, peek: \(\) => store\.peek\(\), also: reloadXpState \}\);[\s\S]*?store\.save\(\);\s*if \(r\.award\) award\(READ_XP, 'story read'\);\s*else if \(r\.read && sample\) toast\('Sample story: marked read, no XP\.'\);/);
+    assert.match(nj, /const r = await readStory\(\(\) => N, key, \{ canPay, peek: \(\) => store\.peek\(\), also: reloadXpState \}\);\s*store\.save\(\);\s*if \(r\.award\) award\(READ_XP, 'story read'\);\s*else if \(r\.read && sample\) toast\('Sample story: marked read, no XP\.'\);/);
     assert.match(nj, /const canPay = !sample && store\.canSave && canAward\(\);/, 'no XP for the sample, or when a state cannot be saved');
-    assert.match(nj, /url: STATE_URL,\s*normalize: normalizeNewsState,\s*empty: blankNewsState,\s*merge: mergeNewsState,/);
+    assert.match(nj, /url: STATE_URL,\s*normalize: normalizeNewsState,\s*empty: blankNewsState,\s*getState: \(\) => N,/);
+    assert.doesNotMatch(nj, /merge:/, 'saves are merged on the server, not with a GET before each PUT');
     assert.match(nj, /const STATE_URL = '\/api\/news\/state';/);
   });
 
-  test("two tabs: before paying, News checks the server's awarded and the latest XP; opening #news reloads both states", () => {
+  test('two tabs: opening #news reloads both states, applied only if nothing changed while the reload was out', () => {
     const nj = read('news.js');
-    assert.match(nj, /const \[state\] = await Promise\.all\(\[store\.reload\(\), reloadXpState\(\), loadEdition\(\), loadBreaking\(\)\]\);\s*if \(state\.ok\) N = state\.state;/);
-    assert.match(read('app.js'), /async function reloadState\(\) \{\s*if \(!ready\) return;\s*const r = await store\.reload\(\);\s*if \(r\.ok\) S = r\.state;\s*\}/);
+    assert.match(nj, /await Promise\.all\(\[store\.reload\(applyState\), reloadXpState\(\), loadEdition\(\), loadBreaking\(\)\]\);/);
+    assert.match(nj, /function applyState\(fresh\) \{\s*N = fresh;\s*\}/);
+    assert.doesNotMatch(nj, /N = state\.state/, 'never replaced after the await, only inside reload');
+    assert.match(read('app.js'), /async function reloadState\(\) \{\s*if \(!ready\) return false;\s*const before = JSON\.stringify\(S\);\s*await store\.reload\(\(fresh\) => \{ S = fresh; \}\);/);
   });
 
-  test('the Product Feed pays once per article, across tabs too: it merges awarded on save and checks the server before paying', () => {
+  test('a tab catches up before it can act: on becoming visible, on focus, and when the feed opens', () => {
     const js = read('app.js');
-    assert.match(js, /const store = createStateClient\(\{\s*getState: \(\) => S,\s*merge: mergeFeedState,/);
-    assert.match(js, /r = await readArticle\(\(\) => S, id, \{ canPay: store\.canSave, peek: \(\) => store\.peek\(\), also: reloadState \}\);[\s\S]*?if \(r\.award\) award\(10, 'article read'\); else save\(\);/);
-    assert.match(js, /if \(paying\) return;/, 'a second click while the check is on its way is ignored');
+    assert.match(js, /document\.addEventListener\('visibilitychange', \(\) => \{ if \(document\.visibilityState === 'visible'\) syncTab\(\); \}\);/);
+    assert.match(js, /window\.addEventListener\('focus', syncTab\);/);
+    assert.match(js, /const \[feedChanged\] = await Promise\.all\(\[busy \? false : reloadState\(\), news\.sync\(\)\]\);/);
+    assert.match(js, /if \(ready\) \{ renderFeed\(\); reloadState\(\)\.then\(changed => \{ if \(changed && !\$\('#feed'\)\.hidden\) keepFocus\(renderFeed\); \}\); \}/);
+  });
+
+  test('the Product Feed pays once per article, across tabs too: XP is a counter the server adds up, and it checks the server before paying', () => {
+    const js = read('app.js');
+    assert.match(js, /const store = createStateClient\(\{\s*getState: \(\) => S,\s*counters: \['xp'\],/);
+    assert.match(js, /const r = await readArticle\(\(\) => S, id, \{ canPay: store\.canSave, peek: \(\) => store\.peek\(\), also: reloadState \}\);\s*if \(r\.award\) award\(10, 'article read'\); else save\(\);/);
     assert.doesNotMatch(js, /S\.read\[id\] = Date\.now\(\)/);
+  });
+
+  test('Mark read clicks made while a pay check is out are queued, not dropped (both desks)', () => {
+    assert.match(read('app.js'), /reads = reads\.then\(\(\) => readOne\(id\)\)\.catch\(\(\) => \{\}\);/);
+    assert.match(read('news.js'), /reads = reads\.then\(\(\) => markRead\(ref\)\)\.catch\(\(\) => \{\}\);/);
+    assert.match(read('news.js'), /if \(b\.dataset\.read\) queueRead\(b\.dataset\.read\);/);
+    assert.doesNotMatch(read('app.js') + read('news.js'), /let paying|if \(paying\)/, 'no guard that drops clicks');
   });
 
   test('the "where it happened" hint hides when there are no stories', () => {

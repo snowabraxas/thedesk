@@ -16,7 +16,7 @@ import { createFeedLoader } from './feed.js';
 import { rotateLog } from './log-file.js';
 import { createBreakingReader, createNewsLoader } from './news.js';
 import { probeDesk } from './probe.js';
-import { CorruptStateError, MAX_STATE_BYTES, createStateStore } from './state-store.js';
+import { CorruptStateError, MAX_STATE_BYTES, StateTooLargeError, createStateStore } from './state-store.js';
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -228,6 +228,12 @@ export function createServer({
     try {
       await state.write(value);
     } catch (err) {
+      if (err instanceof StateTooLargeError) return tooLarge();
+      if (err instanceof CorruptStateError) {
+        // Each save is merged into the file as it is now, so a file that can't be read isn't saved over.
+        log.error(`The Desk: ${err.message}. Saving is paused until it's fixed.`);
+        return sendJson(res, 500, { error: "Your saved state couldn't be read, so it was left untouched." });
+      }
       log.error(`The Desk: couldn't save ${state.filePath} (${err.code || err.message}). The previous state is untouched.`);
       return sendJson(res, 500, { error: "Couldn't save just now. The previous state is untouched." });
     }

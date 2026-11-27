@@ -104,9 +104,10 @@ export function normalizeNewsState(raw) {
 }
 
 /**
- * Folds the server's copy into this tab's state, just before a save (and before paying for a read):
- * `awarded` and `dismissed` become the union of both, so a tab that loaded earlier can never erase
- * another tab's award or dismissal. `read` and `shelfOpen` stay this tab's, so un-marking still works.
+ * Folds the server's copy into this tab's state before paying for a read: `awarded` and `dismissed`
+ * become the union of both, so a story another tab already paid for counts here. `read` and
+ * `shelfOpen` stay this tab's, so un-marking still works. (Saves are merged on the server too:
+ * server/state-store.js.)
  * @returns the local state, changed in place
  */
 export function mergeNewsState(local, server) {

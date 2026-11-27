@@ -713,13 +713,13 @@ describe('createStateClient', () => {
     });
   });
 
-  describe('merging with the server before each save, and reading its copy (two tabs)', () => {
-    // A tiny server in memory: GET answers its copy, PUT replaces it. down: answer GETs with 500.
+  describe('two tabs: counters, reading the server copy, reload and leaving the page', () => {
+    // A tiny server in memory: GET answers its copy, PUT replaces it (it records each body). down: GETs answer 500.
     function memoryServer(value = {}) {
-      const srv = { value, gets: 0, puts: 0, down: false };
+      const srv = { value, gets: 0, puts: [], down: false };
       srv.fetchFn = async (url, opts = {}) => {
         if (opts.method === 'PUT') {
-          srv.puts++;
+          srv.puts.push(JSON.parse(opts.body));
           srv.value = JSON.parse(opts.body);
           return { ok: true, status: 200, text: async () => '' };
         }
@@ -729,123 +729,158 @@ describe('createStateClient', () => {
       };
       return srv;
     }
-    const union = (local, server) => {
-      for (const [k, v] of Object.entries(server.awarded || {})) if (!(k in local.awarded)) local.awarded[k] = v;
+    const tab = (srv, extra = {}) => {
+      const T = { S: null };
+      T.client = createStateClient({ getState: () => T.S, fetchFn: srv.fetchFn, counters: ['xp'], ...extra });
+      return T;
     };
-    const normalize = (raw) => ({ awarded: {}, ...raw });
-    const client = (srv, S, extra = {}) => createStateClient({ getState: () => S.value, fetchFn: srv.fetchFn, normalize, empty: () => ({ awarded: {} }), merge: union, ...extra });
 
-    test("each save first folds in the server's copy, so a stale tab keeps another tab's award", async () => {
-      const srv = memoryServer({ awarded: {} });
-      const A = { value: null };
-      const a = client(srv, A);
-      A.value = (await a.load()).state;
-      srv.value = { awarded: { s1: 1 } }; // another tab paid for s1 meanwhile
-      A.value.shelfOpen = true;
-      a.save();
-      await a.flush();
-      assert.deepEqual(srv.value, { awarded: { s1: 1 }, shelfOpen: true });
-      assert.deepEqual(A.value.awarded, { s1: 1 }, 'this tab now knows too');
+    test('each PUT carries the XP last synced as _sync, and the base moves to what was sent once it lands', async () => {
+      const srv = memoryServer({ xp: 15 });
+      const A = tab(srv);
+      A.S = (await A.client.load()).state;
+      A.S.xp += 10;
+      A.client.save();
+      await A.client.flush();
+      assert.deepEqual(srv.puts[0]._sync, { xp: 15 });
+      assert.equal(srv.puts[0].xp, 25);
+      A.S.notes.push({ id: 'n1' });
+      A.client.save();
+      await A.client.flush();
+      assert.deepEqual(srv.puts[1]._sync, { xp: 25 }, 'the next save counts from what the server has added');
     });
 
-    test("if the server's copy can't be read, nothing is written; it is retried and tells Snow once", async (t) => {
+    test('a failed PUT keeps the base, so the retry carries the whole change', async (t) => {
       t.mock.timers.enable({ apis: ['setTimeout'] });
-      const srv = memoryServer({ awarded: { s1: 1 } });
-      const A = { value: null };
-      let told = 0;
-      const a = client(srv, A, { onSaveFail: () => told++ });
-      A.value = (await a.load()).state;
-      srv.down = true;
-      a.save();
-      await a.flush();
-      assert.equal(srv.puts, 0);
-      assert.equal(told, 1);
-      assert.equal(a.dirty, true);
-      srv.down = false;
+      let fail = true;
+      const srv = memoryServer({ xp: 0 });
+      const fetchFn = async (url, opts = {}) => (opts.method === 'PUT' && fail ? { ok: false, status: 500, text: async () => '' } : srv.fetchFn(url, opts));
+      const A = tab(srv, { fetchFn });
+      A.S = (await A.client.load()).state;
+      A.S.xp = 10;
+      A.client.save();
+      await A.client.flush();
+      fail = false;
       t.mock.timers.tick(15_000);
       await settle();
-      assert.equal(srv.puts, 1, 'retried once the copy can be read');
+      assert.deepEqual(srv.puts.at(-1)._sync, { xp: 0 });
     });
 
-    test('a client whose first GET failed never merges or saves', async (t) => {
-      t.mock.timers.enable({ apis: ['setTimeout'] });
-      const srv = memoryServer({ awarded: { s1: 1 } });
-      srv.down = true;
-      const A = { value: null };
-      const a = client(srv, A);
-      A.value = (await a.load()).state;
-      srv.down = false;
-      a.save();
-      t.mock.timers.tick(60_000);
-      await a.flush();
-      assert.equal(a.flushOnExit(), false);
-      assert.deepEqual([srv.gets, srv.puts], [1, 0]);
-      assert.deepEqual(await a.peek(), { ok: false });
-      assert.deepEqual(await a.reload(), { ok: false });
-      assert.equal(srv.gets, 1, 'peek and reload do not even ask');
+    test('without counters, the body is the state as it is (News)', async () => {
+      const srv = memoryServer({ read: {} });
+      const N = { S: null };
+      const c = createStateClient({ getState: () => N.S, fetchFn: srv.fetchFn, normalize: (r) => r, empty: () => ({}) });
+      N.S = (await c.load()).state;
+      N.S.shelfOpen = true;
+      c.save();
+      await c.flush();
+      assert.deepEqual(srv.puts[0], { read: {}, shelfOpen: true });
+      assert.equal(srv.gets, 1, 'no GET before a PUT');
+    });
+
+    test('nothing is awaited between taking the state and sending it, so closing the page mid-save loses nothing', async () => {
+      const srv = memoryServer({ xp: 0 });
+      let sent = 0;
+      const fetchFn = (url, opts = {}) => { if (opts.method === 'PUT') sent++; return srv.fetchFn(url, opts); };
+      const A = tab(srv, { fetchFn });
+      A.S = (await A.client.load()).state;
+      A.client.save();
+      const flushing = A.client.flush(); // not awaited: the PUT must already be out
+      assert.equal(sent, 1);
+      assert.equal(A.client.dirty, false);
+      assert.equal(A.client.flushOnExit(), false, 'nothing left to send: it is on its way');
+      await flushing;
+    });
+
+    test('leaving the page while a PUT is on its way counts from what that PUT carries', async () => {
+      const srv = memoryServer({ xp: 0 });
+      let release;
+      const fetchFn = (url, opts = {}) => (opts.method === 'PUT' && !opts.keepalive ? new Promise((r) => (release = () => r(srv.fetchFn(url, opts)))) : srv.fetchFn(url, opts));
+      const A = tab(srv, { fetchFn });
+      A.S = (await A.client.load()).state;
+      A.S.xp = 10;
+      A.client.save();
+      const flushing = A.client.flush();
+      A.S.xp = 20;
+      A.client.save();
+      assert.equal(A.client.flushOnExit(), true);
+      await settle();
+      assert.deepEqual(srv.puts.at(-1)._sync, { xp: 10 }, 'the first PUT will add 10, this one the next 10');
+      release();
+      await flushing;
     });
 
     test('peek reads the server copy without changing what will be saved', async () => {
-      const srv = memoryServer({ awarded: { s1: 1 } });
-      const A = { value: null };
-      const a = client(srv, A);
-      A.value = (await a.load()).state;
-      srv.value = { awarded: { s1: 1, s2: 2 } };
-      const r = await a.peek();
-      assert.deepEqual(r, { ok: true, state: { awarded: { s1: 1, s2: 2 } } });
-      assert.deepEqual(A.value.awarded, { s1: 1 });
-      assert.equal(a.idle, true);
+      const srv = memoryServer({ xp: 5 });
+      const A = tab(srv);
+      A.S = (await A.client.load()).state;
+      srv.value = { xp: 50 };
+      const r = await A.client.peek();
+      assert.equal(r.state.xp, 50);
+      assert.equal(A.S.xp, 5);
+      A.client.save();
+      await A.client.flush();
+      assert.deepEqual(srv.puts[0]._sync, { xp: 5 }, 'peek did not move the base');
     });
 
-    test('reload only when nothing is waiting to be saved, before and after the GET', async () => {
-      const srv = memoryServer({ awarded: {} });
-      const A = { value: null };
-      const a = client(srv, A);
-      A.value = (await a.load()).state;
-      a.save();
-      assert.equal(a.idle, false);
-      assert.deepEqual(await a.reload(), { ok: false }, 'a change is waiting');
-      await a.flush();
-      assert.equal(a.idle, true);
-      srv.value = { awarded: { s9: 9 } };
-      assert.deepEqual(await a.reload(), { ok: true, state: { awarded: { s9: 9 } } });
-      // A change made while the GET is on its way wins over the reloaded copy.
-      const slow = memoryServer({ awarded: {} });
-      const B = { value: null };
-      let release;
-      const b = client(slow, B, { fetchFn: async (url, opts = {}) => { if (!opts.method && release === null) await new Promise((r) => (release = r)); return slow.fetchFn(url, opts); } });
-      release = undefined;
-      B.value = (await b.load()).state;
-      release = null;
-      const pending = b.reload();
+    test('reload applies the fresh copy (and its XP as the base) only when nothing is waiting, before and after the GET', async () => {
+      const srv = memoryServer({ xp: 0 });
+      let hold = null;
+      const fetchFn = async (url, opts = {}) => { if (!opts.method && hold) await new Promise((r) => (hold = r)); return srv.fetchFn(url, opts); };
+      const A = tab(srv, { fetchFn });
+      A.S = (await A.client.load()).state;
+      const apply = (fresh) => { A.S = fresh; };
+      A.client.save();
+      assert.deepEqual(await A.client.reload(apply), { ok: false }, 'a change is waiting');
+      await A.client.flush();
+      srv.value = { ...srv.value, xp: 40 };
+      assert.equal((await A.client.reload(apply)).ok, true);
+      assert.equal(A.S.xp, 40);
+      A.client.save();
+      await A.client.flush();
+      assert.deepEqual(srv.puts.at(-1)._sync, { xp: 40 });
+      // The refresh race: a change made while the GET is out wins over the fresh copy.
+      hold = true;
+      srv.value = { ...srv.value, xp: 99 };
+      const pending = A.client.reload(apply);
       await settle();
-      b.save();
-      release();
+      A.S.notes.push({ id: 'mine' });
+      A.client.save();
+      hold();
       assert.deepEqual(await pending, { ok: false });
+      assert.deepEqual(A.S.notes, [{ id: 'mine' }], 'not replaced');
     });
 
-    test('leaving the page merges the last copy it read (no time for a GET)', async () => {
-      const srv = memoryServer({ awarded: { s1: 1 } });
-      const A = { value: null };
-      const a = client(srv, A);
-      A.value = (await a.load()).state;
-      A.value.awarded = {}; // as if this tab never knew
-      a.save();
-      assert.equal(a.flushOnExit(), true);
-      await settle();
-      assert.equal(srv.gets, 1, 'no GET on the way out');
-      assert.deepEqual(srv.value.awarded, { s1: 1 });
+    test('after a failed read, leaving the page sends nothing and keeps the change waiting', async () => {
+      const srv = memoryServer({ xp: 0 });
+      const A = tab(srv);
+      A.S = (await A.client.load()).state;
+      A.S.xp = 10;
+      A.client.save();
+      srv.down = true;
+      assert.equal((await A.client.peek()).ok, false);
+      assert.equal(A.client.flushOnExit(), false);
+      assert.equal(A.client.dirty, true);
+      assert.equal(srv.puts.length, 0);
+      srv.down = false;
+      assert.equal((await A.client.peek()).ok, true);
+      assert.equal(A.client.flushOnExit(), true, 'a good read lets it go again');
     });
 
-    test('without merge, saving works as before (one PUT, no GET)', async () => {
+    test('a client whose first GET failed never reads, reloads or saves', async (t) => {
+      t.mock.timers.enable({ apis: ['setTimeout'] });
       const srv = memoryServer({ xp: 1 });
-      const S = { value: null };
-      const c = createStateClient({ getState: () => S.value, fetchFn: srv.fetchFn });
-      S.value = (await c.load()).state;
-      S.value.xp = 2;
-      c.save();
-      await c.flush();
-      assert.deepEqual([srv.gets, srv.puts, srv.value.xp], [1, 1, 2]);
+      srv.down = true;
+      const A = tab(srv);
+      A.S = (await A.client.load()).state;
+      srv.down = false;
+      A.client.save();
+      t.mock.timers.tick(60_000);
+      await A.client.flush();
+      assert.equal(A.client.flushOnExit(), false);
+      assert.deepEqual(await A.client.peek(), { ok: false });
+      assert.deepEqual(await A.client.reload(), { ok: false });
+      assert.deepEqual([srv.gets, srv.puts.length], [1, 0]);
     });
   });
 
