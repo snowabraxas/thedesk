@@ -88,6 +88,8 @@ const commandLine = (cmd, args) => [cmd, ...args].map(shellQuote).join(' ');
 const short = (sha) => sha.slice(0, 7);
 const firstLine = (r) => oneLine((r.stderr || r.stdout || '').trim().split('\n')[0] || `exit ${r.code}`, 300);
 const lines = (text) => String(text).split('\n').filter(Boolean);
+// A line of git's own output, printed as is (git status keeps meaning in its leading spaces), minus control characters.
+const asIs = (line) => line.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, '?').slice(0, 300);
 
 function realpath(fsImpl, p) {
   try {
@@ -159,7 +161,7 @@ export async function deploy(cfg, deps, { dryRun = false } = {}) {
       const changed = lines(dirty.stdout);
       return fail(
         `The live copy has changes of its own, so nothing was deployed:`,
-        ...changed.slice(0, 10).map((l) => `  ${oneLine(l, 200)}`),
+        ...changed.slice(0, 10).map((l) => `  ${asIs(l)}`),
         ...(changed.length > 10 ? [`  …and ${changed.length - 10} more`] : []),
         `The live copy only ever holds committed main. Make the change in your work folder and commit it to main.`,
         `To look: git -C ${shellQuote(live)} status. To set them aside (you can get them back with stash pop): git -C ${shellQuote(live)} stash --include-untracked`,
@@ -223,7 +225,7 @@ export async function deploy(cfg, deps, { dryRun = false } = {}) {
       const tail = lines(`${r.stdout}\n${r.stderr}`).slice(-15);
       return fail(
         `npm ci didn't work in the live copy, so The Desk was not restarted (it keeps running what it had):`,
-        ...tail.map((l) => `  ${oneLine(l, 300)}`),
+        ...tail.map((l) => `  ${asIs(l)}`),
         'Fix the problem, then run npm run deploy again.',
       );
     }
