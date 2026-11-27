@@ -52,13 +52,16 @@ Run it from your work folder (any checkout of the repo except the live copy). It
    - at the target: it carries on with the swap and shows git's message as a warning;
    - anywhere other than the old commit: it checks the old commit out again (judged by HEAD afterwards, not by git's exit code);
    - then it removes the staging folder and stops, showing git's `fatal:` line.
-4. **Swap the packages in.** Two renames on the same disk: `<live>/node_modules` to `<live>.staging/node_modules.old`, then `<live>.staging/node_modules` to `<live>/node_modules`. Then the staging folder is removed.
+4. **Swap the packages in.** Two renames on the same disk: `<live>/node_modules` to `<live>.staging/node_modules.old`, then `<live>.staging/node_modules` to `<live>/node_modules`. The old packages stay in the staging folder until the new code has passed step 5; then the folder is removed.
    - Whether there is an old `node_modules` is checked with `lstat`, so a symlink (dangling or not) is moved aside too. `.gitignore` says `node_modules` without the trailing slash, so such a link doesn't make the live copy look dirty.
    - The old copy goes into the staging folder, not the live copy, so an interrupted swap never leaves untracked files in the live copy.
    - If the second rename fails, deploy puts the old `node_modules` back, checks the old commit out again and says so. No restart, no new `.deployed.json`.
    - If the staging folder can't be removed after a good swap, deploy warns, then still records and restarts. The next run tidies the folder away.
-5. **Record it.** `.deployed.json` is written (temp file and rename) only now, so it only ever names a commit whose packages are in. A deploy that changed nothing (same commit, no install) leaves it as it was, deploy time included.
-6. **Restart.** It reads the installed plist's `WorkingDirectory`. Not installed, or not the live copy: it stops (exit 1) and says to run `npm run service:install` once. With a fake HOME (see "The real launchd service is shared" below) it stops before the restart with that reason; the live copy is ready but nothing touches launchd. Otherwise it calls `restart()` from `scripts/service.js` (`launchctl kickstart -k`, or bootstrap if it was stopped), uses the same health check (`/api/feed` within 15 s, log tail on failure), and ends with one line: `The Desk is live at http://localhost:4321 on main @ 1a2b3c4 "Subject"`.
+5. **Check that the new code loads** (N1b). Whenever the commit or the packages changed, `loadCheck` runs on the live copy, the same check as the install guard, with the service's own environment.
+   - If the new code doesn't load (a broken import, a package missing from the committed lockfile), deploy puts the old commit back, and the old packages too if they were replaced, from the staging folder. It records nothing, skips the restart and exits 1: "The new code doesn't load, so it wasn't put live: <error>".
+   - The running Desk keeps the last good version, and a later launchd start runs that version too.
+6. **Record it.** `.deployed.json` is written (temp file and rename) only now, so it only ever names a commit whose packages are in and whose code loads. A deploy that changed nothing (same commit, no install) leaves it as it was, deploy time included.
+7. **Restart.** It reads the installed plist's `WorkingDirectory`. Not installed, or not the live copy: it stops (exit 1) and says to run `npm run service:install` once. With a fake HOME (see "The real launchd service is shared" below) it stops before the restart with that reason; the live copy is ready but nothing touches launchd. Otherwise it calls `restart()` from `scripts/service.js` (`launchctl kickstart -k`, or bootstrap if it was stopped), uses the same health check (`/api/feed` within 15 s, log tail on failure), and ends with one line: `The Desk is live at http://localhost:4321 on main @ 1a2b3c4 "Subject"`.
 
 git always runs with `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_COMMON_DIR`, `GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES`, `GIT_CONFIG_PARAMETERS` (and `GIT_CONFIG_COUNT/KEY_n/VALUE_n`, `GIT_NAMESPACE`, `GIT_PREFIX`) removed (`gitEnv()`). If deploy is ever started from a git hook, `git -C <live>` still means the live copy.
 
@@ -76,28 +79,39 @@ Between the checkout and the restart (a few seconds) the running server already 
 - `install` refuses, changing nothing and calling no launchctl (so the running service is left alone), unless the live copy is fully deployed (`liveCopyState()`):
   - no `<live>/server/index.js`: "The live copy isn't there yet … run npm run deploy first".
   - Otherwise, any of these: no `node_modules`; a package from the live `package.json` "dependencies" missing (`node_modules is incomplete (no ajv)`); no readable `package.json` or `.deployed.json`; `git -C <live> rev-parse HEAD` (with `gitEnv`) not equal to the sha in `.deployed.json` ("it holds 1a2b3c4, but the last deploy that finished was main @ 9f8e7d6 …"); changes of its own (the same `git status` as deploy, e.g. `D server/feed.js`).
-  - When all of that holds, the load check must pass. A child `node --input-type=module -e …`, run in the live copy, imports `server/index.js` and exits. Importing it doesn't start the server: it only listens when it is the program node was started with, and `test/server.test.js` holds it to that. This catches a missing package of a package (ajv without `fast-deep-equal`) or a module that throws: "its server doesn't load: Error: Cannot find module 'fast-deep-equal'".
+  - When all of that holds, the load check must pass. A child `node --input-type=module -e …`, run in the live copy, imports `server/index.js` and exits. It uses the service's node and its environment from the plist (`cfg.env` plus `HOME`), not the caller's, so a `NODE_PATH` or `NODE_OPTIONS` in the shell can't make it pass when the service would crash. Importing it doesn't start the server: it only listens when it is the program node was started with, and `test/server.test.js` holds it to that. This catches a missing package of a package (ajv without `fast-deep-equal`) or a module that throws: "its server doesn't load: Error: Cannot find module 'fast-deep-equal'".
   - The message is "The live copy isn't fully deployed yet (<dir>: <problems>), so nothing was changed. Run npm run deploy until it finishes (it repairs this, or says what to do)". Deploy reinstalls on the same package and load checks, so it repairs whatever the guard refuses, except changes of its own, which deploy refuses with the stash hint.
 
   The dry run says which at the top. It runs only read-only commands: `git rev-parse`, `git status` and the load check.
 - `runCommand` (spawn-based) takes `cwd`, `timeoutMs`, `graceMs` and `env`.
   - The command runs in its own process group (`detached: true`). Every stop goes to the whole group (`process.kill(-pid, …)`), so nothing it started survives a timeout.
-  - Because the group no longer gets the terminal's Ctrl+C, a SIGINT or SIGTERM to the script passes SIGTERM on to the group, then stops the script the usual way.
+  - Because the group no longer gets the terminal's Ctrl+C, one shared process-level handler (installed while any command runs, with a set of the running groups, so no MaxListenersExceededWarning) handles SIGINT, SIGTERM, SIGHUP and SIGQUIT:
+    - it passes the signal that arrived on to every group: SIGINT stays SIGINT, which npm obeys;
+    - it waits up to `SIGNAL_WAIT_MS` (2 s) for them to exit, SIGKILLs whatever is left of each group, then re-raises the signal so the script stops the usual way;
+    - the time limits keep running meanwhile, and a second Ctrl+C during the wait stops the script at once.
   - The limit is hard: SIGTERM at `timeoutMs`, then SIGKILL `graceMs` (10 s) later, because npm ignores SIGTERM on a hung registry connection. It counts as timed out only if the command was still running at the deadline ("(stopped after N s: it took too long)").
   - Once the command exits, its output gets a drain of at most `min(graceMs, 2 s)`. Something it left running may hold the pipes open, and that doesn't change the result: the real exit code stands.
   - Output keeps its first and last 1 MB (`outputKeeper`), so npm's error lines at the end survive.
 - `gitEnv()` and `GIT` now live in `scripts/service.js` (deploy re-exports them), so the guard and deploy share them.
+- `status` shows `Runs from:` (the installed plist's WorkingDirectory) and `Deployed:` (that folder's `.deployed.json`). When the plist still points elsewhere, it says to run `service:install` (or `deploy` first, if there is no live copy).
+- `service:restart` now says "Restarted with the code in ~/the-desk-live."
+- The macOS-privacy hints stay, keyed on the folder the service runs from. With the live copy outside Documents they no longer appear.
 
 ### The real launchd service is shared
 
 launchd's label `local.thedesk.server` in `gui/<uid>` is the same whatever HOME says. A run with a fake HOME that reaches the real `/bin/launchctl` acts on Snow's live service: on 27 Nov a review run restarted it (runs = 2). So:
-- `launchdRefusal()` names a reason when HOME isn't the account's real home (`os.userInfo().homedir`), when the config's home isn't, or when `DESK_LIVE_DIR` or the live copy sits outside the real home.
-- `realDeps().run` is wrapped in `guardLaunchctl()`. Whenever there is such a reason, it refuses every launchctl verb that changes state (`bootstrap`, `bootout`, `kickstart`, `enable`, `disable`, `kill`, `load`, `unload`, `remove`) with "HOME (…) is not your real home folder (…), so I won't touch the real launchd service (its name is shared). Use --dry-run or the test hooks." `print` and `print-disabled` still run.
+- `launchdRefusal()` names a reason when any of these holds:
+  - this is a test run (`NODE_TEST_CONTEXT` is set: `node --test` sets it, and every child inherits it);
+  - HOME isn't the account's real home (`os.userInfo().homedir`);
+  - no config is bound to the runner;
+  - the config's home isn't the real home;
+  - `DESK_LIVE_DIR` or the live copy sits outside the real home.
+- `realDeps(cfg)` binds the config the run works on (`main()` in service.js passes its config, deploy passes `cfg.service`), and its runner is wrapped in `guardLaunchctl()` (N1b: an allow-list, no longer a deny-list):
+  - launchctl is matched by its name, in any case. Only reading verbs (`print`, `print-disabled`, `list`, `blame`, `version`, `help`) go through when there is a reason.
+  - Every other verb (`bootstrap`, `bootout`, `kickstart`, `enable`, `asuser`, `bsexec`, `submit`, `setenv`, `start`, `stop`, …) is refused with the reason, for example "HOME (…) is not your real home folder (…), so I won't touch the real launchd service (its name is shared). Use --dry-run or the test hooks."
+  - A `bootstrap` is also refused unless its plist is `servicePlistPath(realHome)`.
 - `service.js` `main()` refuses `install` (not `--dry-run`), `uninstall`, `start`, `stop` and `restart` up front for the same reasons. `deploy` stops before its restart.
-- **Rule for tests and fake-HOME runs: inject the runner** (`deps.run`) and the rest of `deps`. Never hand `realDeps()` to code that may reach launchctl. The tests do this throughout. The only test that touches `realDeps().run` swaps HOME and points it at a `launchctl` path that doesn't exist, so even a broken guard could only fail with ENOENT.
-- `status` shows `Runs from:` (the installed plist's WorkingDirectory) and `Deployed:` (that folder's `.deployed.json`). When the plist still points elsewhere, it says to run `service:install` (or `deploy` first, if there is no live copy).
-- `service:restart` now says "Restarted with the code in ~/the-desk-live."
-- The macOS-privacy hints stay, keyed on the folder the service runs from. With the live copy outside Documents they no longer appear.
+- **Rule for tests and fake-HOME runs: inject the runner** (`deps.run`) and the rest of `deps`. Never hand `realDeps()` to code that may reach launchctl. The tests do this throughout. The tests that touch the real runner always point it at a `launchctl` path that doesn't exist, so even a broken guard could only fail with ENOENT. One of them removes `NODE_TEST_CONTEXT` for a moment to check the other refusals.
 
 ### Server log
 
@@ -129,9 +143,12 @@ launchd's label `local.thedesk.server` in `gui/<uid>` is the same whatever HOME 
   - a fake HOME at restart.
 - `test/service.test.js`: the plist points at the live copy; install refuses without it, without `node_modules` or without a readable `.deployed.json` (no launchctl at all); an old plist from the work folder gets moved; status shows the folder and deployed commit. `runCommand` is tested for real: it runs in the given `cwd`, a `timeoutMs` stops a long child, a child that ignores SIGTERM is SIGKILLed after the grace period (and is gone afterwards), and `env` is passed. The guard is tested on every half-deployed state: no or incomplete `node_modules`, no `package.json`, no or broken `.deployed.json`, a stale `.deployed.json` (HEAD differs) and an unreadable HEAD. Assertions check the actual work-folder path, not the word "Documents", so a `TMPDIR` containing "Documents" passes.
 - `test/server.test.js` and `test/log-file.test.js`: timestamps (winter, summer, the local day, offsets east and on the half hour), every line stamped, the stopping line on SIGTERM and SIGINT with exit 0, the deployed line at start. `test/deployed.test.js`: reading and cleaning `.deployed.json`. `test/preview.test.js`: the preview script and `launch.json`.
+- N1b: deploy putting the old commit (and the old packages, from staging) back when the new code doesn't load. That covers a broken import in a fake world, and for real an import of a package nobody installed, plus a first deploy that records nothing. The load check runs between the checkout and the restart, with the service's environment (a real `NODE_OPTIONS` preload doesn't count). The guard's allow-list, any-case matching, test-run and no-config refusals, the bootstrap plist rule and `realDeps(cfg)`. Signal forwarding: SIGINT, SIGHUP and SIGQUIT reach the command as themselves; a command that ignores SIGINT is SIGKILLed after about 2 s with no orphan; 15 commands at once share one handler per signal. Mutation checks: without the load check after the swap 5 deploy tests fail; with the old deny-list 2 guard tests fail.
 - Scratch servers in this story used ports 4399–4404 with `DESK_HOME` under `.tmp-*/` (gitignored). Dry runs used a fake `HOME` outside the repo: deploy refuses a live path inside the checkout.
 
 ### One-time cutover (lead dev, with Snow's OK)
+
+Done on 27 Nov 2026 at 13:42: the service runs from `/Users/snow/the-desk-live`, the done-when check gave 404, and the next two deploys (Board: N1 done, then N3) each restarted in about a second. The steps stay here for reference and for the rollback.
 
 Snow's OK is needed because this reinstalls the always-on service. Expect about two seconds when 4321 doesn't answer. Her data in `~/agent-house` is untouched.
 
