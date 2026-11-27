@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { describe, test } from 'node:test';
-import { DEFAULT_PORT, expandHome, feedPath, resolveDeskHome, resolveLiveDir, resolvePort } from '../server/config.js';
+import { DEFAULT_PORT, breakingPath, expandHome, feedPath, newsDir, newsPath, resolveDeskHome, resolveLiveDir, resolvePort } from '../server/config.js';
 
 describe('config', () => {
   test('PORT defaults to 4321', () => {
@@ -46,5 +46,11 @@ describe('config', () => {
     assert.equal(resolveLiveDir({ DESK_LIVE_DIR: '/tmp/live' }, '/Users/someone'), '/tmp/live');
     assert.equal(resolveLiveDir({ DESK_LIVE_DIR: '~/x/live' }, '/Users/someone'), '/Users/someone/x/live');
     assert.equal(resolveLiveDir({ DESK_LIVE_DIR: '  ' }, '/Users/someone'), '/Users/someone/the-desk-live');
+  });
+
+  test('News lives at desks/news: news.json and breaking.json', () => {
+    assert.equal(newsDir('/h'), path.join('/h', 'desks', 'news'));
+    assert.equal(newsPath('/h'), path.join('/h', 'desks', 'news', 'news.json'));
+    assert.equal(breakingPath('/h'), path.join('/h', 'desks', 'news', 'breaking.json'));
   });
 });

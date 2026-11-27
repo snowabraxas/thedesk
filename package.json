@@ -14,6 +14,7 @@
     "deploy": "node scripts/deploy.js",
     "test": "TZ=America/Toronto node --test 'test/**/*.test.js'",
     "validate-feed": "node scripts/validate-feed.js",
+    "validate-news": "node scripts/validate-news.js",
     "screens": "node scripts/screens.js",
     "service:install": "node scripts/service.js install",
     "service:uninstall": "node scripts/service.js uninstall",

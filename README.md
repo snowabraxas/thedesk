@@ -21,9 +21,11 @@ npm run preview        # The Desk at http://localhost:3000 on its own data in .d
 npm test               # all tests
 npm run validate-feed  # checks ~/agent-house/desks/product-feed/feed.json
 npm run validate-feed -- path/to/feed.json   # or any other edition
+npm run validate-news  # checks ~/agent-house/desks/news/news.json (and breaking.json if there)
+npm run validate-news -- path/to/news.json path/to/breaking.json   # or any News files
 ```
 
-`validate-feed` prints `valid`, or a short list of what to fix, and exits 0 or 1.
+`validate-feed` and `validate-news` print `valid`, or a short list of what to fix, and exit 0 or 1.
 
 The server only listens on this Mac (127.0.0.1). `PORT` changes the port and `DESK_HOME` changes where the desks' data lives (default `~/agent-house`). `npm start` runs it without the auto-restart.
 

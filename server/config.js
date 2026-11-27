@@ -6,6 +6,8 @@ import { fileURLToPath } from 'node:url';
 export const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 export const APP_DIR = path.join(REPO_ROOT, 'app');
 export const SCHEMA_PATH = path.join(REPO_ROOT, 'data', 'schema', 'feed.schema.json');
+export const NEWS_SCHEMA_PATH = path.join(REPO_ROOT, 'data', 'schema', 'news.schema.json');
+export const BREAKING_SCHEMA_PATH = path.join(REPO_ROOT, 'data', 'schema', 'breaking.schema.json');
 export const SAMPLE_FEED_PATH = path.join(REPO_ROOT, 'prototype', 'feed.json');
 
 export const DEFAULT_PORT = 4321;
@@ -59,4 +61,18 @@ export function feedPath(deskHome) {
 
 export function statePath(deskHome) {
   return path.join(productFeedDir(deskHome), 'state.json');
+}
+
+export function newsDir(deskHome) {
+  return path.join(deskHome, 'desks', 'news');
+}
+
+/** The News agent's morning edition. */
+export function newsPath(deskHome) {
+  return path.join(newsDir(deskHome), 'news.json');
+}
+
+/** The News agent's breaking story, when there is one. */
+export function breakingPath(deskHome) {
+  return path.join(newsDir(deskHome), 'breaking.json');
 }
