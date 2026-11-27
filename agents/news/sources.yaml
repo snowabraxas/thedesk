@@ -1,0 +1,32 @@
+# Starter sources for the News agent (Phase 1). Picked by the lead PM.
+# Rule: free, open pages only. Skip anything behind a paywall.
+# Lead PM checks each URL before the agent goes live in Sprint 2.
+primary:
+  - { name: OpenAI news, url: https://openai.com/news }
+  - { name: Anthropic news, url: https://www.anthropic.com/news }
+  - { name: Google DeepMind blog, url: https://deepmind.google/discover/blog/ }
+  - { name: Meta AI blog, url: https://ai.meta.com/blog/ }
+  - { name: Qwen blog, url: https://qwenlm.github.io/blog/ }
+  - { name: DeepSeek news, url: https://api-docs.deepseek.com/news/ }
+  - { name: arXiv cs.AI recent, url: https://arxiv.org/list/cs.AI/recent }
+us_tech_press:
+  - { name: TechCrunch AI, url: https://techcrunch.com/category/artificial-intelligence/ }
+  - { name: Ars Technica AI, url: https://arstechnica.com/ai/ }
+china_focused:
+  - { name: Rest of World, url: https://restofworld.org }
+  - { name: ChinaTalk (free posts), url: https://www.chinatalk.media }
+  - { name: DigiChina (Stanford), url: https://digichina.stanford.edu }
+  - { name: China Law Translate, url: https://www.chinalawtranslate.com }
+policy_and_global:
+  - { name: NIST AI, url: https://www.nist.gov/artificial-intelligence }
+  - { name: EU AI Office, url: https://digital-strategy.ec.europa.eu/en/policies/ai-office }
+critics:
+  - { name: Gary Marcus, url: https://garymarcus.substack.com }
+  - { name: Where's Your Ed At (free posts), url: https://www.wheresyoured.at }
+early_signals:  # signals only; confirm with an open published source
+  - { name: Hacker News, url: https://news.ycombinator.com }
+  # X and LinkedIn: access method to decide in Sprint 2 setup
+weights:
+  us: high
+  china: high
+  other: by relevance
