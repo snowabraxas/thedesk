@@ -1,4 +1,4 @@
-// Log rotation for the service's log (server/log-file.js), and the probe that asks a port
+// The service's log (server/log-file.js): timestamps on every line and rotation. And the probe that asks a port
 // whether The Desk is answering (server/probe.js).
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -8,7 +8,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { after, describe, test } from 'node:test';
 import { createServer } from '../server/index.js';
-import { MAX_LOG_BYTES, rotateLog } from '../server/log-file.js';
+import { MAX_LOG_BYTES, createLogger, localTimestamp, rotateLog } from '../server/log-file.js';
 import { probeDesk } from '../server/probe.js';
 
 const tmpDirs = [];
@@ -20,6 +20,55 @@ const tempDir = () => {
 };
 const listen = (server) => new Promise((resolve) => server.listen(0, '127.0.0.1', () => resolve(server.address().port)));
 const close = (server) => new Promise((resolve) => server.close(resolve));
+
+describe('timestamps', () => {
+  // npm test runs with TZ=America/Toronto.
+  test('local time with its UTC offset, to the second', () => {
+    assert.equal(localTimestamp(new Date('2026-11-28T14:14:03.950Z')), '2026-11-28T09:14:03-05:00');
+    assert.equal(localTimestamp(new Date('2026-07-01T04:05:06Z')), '2026-07-01T00:05:06-04:00', 'summer time');
+    assert.equal(localTimestamp(new Date('2027-01-01T04:59:59Z')), '2026-12-31T23:59:59-05:00', 'the local day, not the UTC one');
+  });
+
+  test('offsets east of UTC and on the half hour', () => {
+    const at = (offsetMinutes) => ({
+      getTimezoneOffset: () => offsetMinutes,
+      getFullYear: () => 2026,
+      getMonth: () => 10,
+      getDate: () => 28,
+      getHours: () => 19,
+      getMinutes: () => 44,
+      getSeconds: () => 3,
+    });
+    assert.equal(localTimestamp(at(-330)), '2026-11-28T19:44:03+05:30');
+    assert.equal(localTimestamp(at(0)), '2026-11-28T19:44:03+00:00');
+    assert.equal(localTimestamp(at(210)), '2026-11-28T19:44:03-03:30');
+  });
+
+  test('the logger stamps every line, info and log to out, warn and error to err', () => {
+    const out = [];
+    const err = [];
+    const log = createLogger({ out: (t) => out.push(t), err: (t) => err.push(t), now: () => new Date('2026-11-28T14:14:03Z') });
+    log.info('The Desk is running at %s', 'http://localhost:4321');
+    log.log('plain');
+    log.error('The Desk: skipping a.json, it is not valid:\n  - one\n  - two\n');
+    log.warn('careful', 3);
+    assert.deepEqual(out, ['2026-11-28T09:14:03-05:00 The Desk is running at http://localhost:4321\n', '2026-11-28T09:14:03-05:00 plain\n']);
+    assert.deepEqual(err, [
+      '2026-11-28T09:14:03-05:00 The Desk: skipping a.json, it is not valid:\n2026-11-28T09:14:03-05:00   - one\n2026-11-28T09:14:03-05:00   - two\n',
+      '2026-11-28T09:14:03-05:00 careful 3\n',
+    ]);
+  });
+
+  test('an error with a stack trace gets a stamp on each of its lines', () => {
+    const err = [];
+    const log = createLogger({ out: () => {}, err: (t) => err.push(t), now: () => new Date('2026-11-28T14:14:03Z') });
+    log.error('The Desk server error:', new Error('boom'));
+    const lines = err.join('').trimEnd().split('\n');
+    assert.ok(lines.length > 2);
+    for (const line of lines) assert.match(line, /^2026-11-28T09:14:03-05:00 /);
+    assert.match(lines[0], /The Desk server error: Error: boom$/);
+  });
+});
 
 describe('rotateLog', () => {
   test('the limit is 5 MB', () => {
