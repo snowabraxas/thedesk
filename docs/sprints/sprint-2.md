@@ -15,7 +15,7 @@ Update this table the moment a story changes state (Not started, In progress, In
 | N1 Live copy separate from work in progress | Developer | Done | Live since 27 Nov 13:42: the service runs from `~/the-desk-live`; release = merge to main, then `npm run deploy`. 498 tests; tester passed; four review rounds fixed. Hardening (N1b) live too: deploy never puts code live that can't load and rolls back to the last finished deploy |
 | N2 News contract: schemas and validator | Developer, tester | Done | Merged 27 Nov. `npm run validate-news`. Tester passed; 3 review rounds fixed. Product Feed links got stricter too (see sprint-2-build notes, for S5) |
 | N3 News server routes | Developer, tester | Done | Merged and live 27 Nov. /api/news (live, last good on disk, editions, sample), /api/breaking (today in Toronto), /api/news/state. Product Feed keeps its last good edition on disk too |
-| N4 The News desk page | Snow | In review | Live on 4321 since 27 Nov 15:59 (Snow approved the screenshots). Waits for Snow to use it on the sample edition. Edge cases in follow-up N4b |
+| N4 The News desk page | Designer, developer | Done | Live 27 Nov. Snow approved the screenshots and tried it on the sample edition ("all good"). Save edge cases follow in N4b |
 | N5 The TV in the room | Tester | In review | Branch n5-tv-in-room. Snow approved 27 Nov with breaking mark A (the badge). Tester running; merges after N4 |
 | N6 Polish at 390 px and contrast | Designer, tester | Not started | Snow's OK before changes land |
 | N7 Sample edition and friendly states | Developer | In progress | Branch n7-friendly-states (built alongside N5/N6, merges after them). The sample edition itself landed with N3 |
