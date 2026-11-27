@@ -40,3 +40,7 @@ export function productFeedDir(deskHome) {
 export function feedPath(deskHome) {
   return path.join(productFeedDir(deskHome), 'feed.json');
 }
+
+export function statePath(deskHome) {
+  return path.join(productFeedDir(deskHome), 'state.json');
+}

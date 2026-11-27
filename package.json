@@ -11,7 +11,8 @@
     "dev": "node --watch server/index.js",
     "start": "node server/index.js",
     "test": "TZ=America/Toronto node --test 'test/**/*.test.js'",
-    "validate-feed": "node scripts/validate-feed.js"
+    "validate-feed": "node scripts/validate-feed.js",
+    "screens": "node scripts/screens.js"
   },
   "dependencies": {
     "ajv": "^8.20.0"

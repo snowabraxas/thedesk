@@ -122,9 +122,10 @@ describe('server', () => {
     assert.equal(res.headers.allow, 'GET, HEAD');
   });
 
-  test('answers 404 for missing files and the unbuilt API', async () => {
+  test('answers 404 for missing files and unknown API paths', async () => {
     assert.equal((await request(port, { path: '/nope.html' })).status, 404);
-    assert.equal((await request(port, { path: '/api/feed' })).status, 404);
+    assert.equal((await request(port, { path: '/api/nope' })).status, 404);
+    assert.equal((await request(port, { path: '/api' })).status, 404);
   });
 
   test('never serves files outside app/', async () => {

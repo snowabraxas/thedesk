@@ -1,11 +1,13 @@
 // The Desk's local server. node:http only, no framework.
-// S1: serves app/ on 127.0.0.1 and refuses requests whose Host header isn't this machine.
-// S2 adds /api/feed and /api/state (reading and writing under deskHome).
+// Serves app/ on 127.0.0.1, refuses requests whose Host header isn't this machine, and answers
+// /api/feed (the edition) and /api/state (Snow's reads and notes) from under deskHome.
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { APP_DIR, HOST, resolveDeskHome, resolvePort } from './config.js';
+import { APP_DIR, HOST, SAMPLE_FEED_PATH, resolveDeskHome, resolvePort, statePath } from './config.js';
+import { loadFeed } from './feed.js';
+import { CorruptStateError, MAX_STATE_BYTES, checkState, createStateStore } from './state-store.js';
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -23,6 +25,26 @@ const MIME = {
   '.txt': 'text/plain; charset=utf-8',
 };
 
+// Sent with every response. The app has no inline scripts or event handlers, so script-src 'self'
+// holds; styles allow inline because the room positions its hotspots with style attributes.
+export const CONTENT_SECURITY_POLICY = [
+  "default-src 'self'",
+  "script-src 'self'",
+  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
+  'font-src https://fonts.gstatic.com',
+  "img-src 'self' data:",
+  "connect-src 'self'",
+  "base-uri 'none'",
+  "form-action 'self'",
+  "frame-ancestors 'none'",
+].join('; ');
+
+const SECURITY_HEADERS = {
+  'Content-Security-Policy': CONTENT_SECURITY_POLICY,
+  'X-Content-Type-Options': 'nosniff',
+  'Referrer-Policy': 'no-referrer',
+};
+
 /**
  * Only answer requests addressed to this machine on our own port. A web page on another
  * site that rebinds its DNS to 127.0.0.1 still sends its own Host, so it gets refused.
@@ -36,12 +58,49 @@ export function isAllowedHost(hostHeader, port) {
 function sendText(res, status, text, extraHeaders = {}) {
   const body = Buffer.from(text, 'utf8');
   res.writeHead(status, {
+    ...SECURITY_HEADERS,
     'Content-Type': 'text/plain; charset=utf-8',
     'Content-Length': body.length,
-    'X-Content-Type-Options': 'nosniff',
     ...extraHeaders,
   });
   res.end(res.req.method === 'HEAD' ? undefined : body);
+}
+
+function sendJson(res, status, value, extraHeaders = {}) {
+  const body = Buffer.from(JSON.stringify(value), 'utf8');
+  res.writeHead(status, {
+    ...SECURITY_HEADERS,
+    'Content-Type': 'application/json; charset=utf-8',
+    'Content-Length': body.length,
+    'Cache-Control': 'no-store',
+    ...extraHeaders,
+  });
+  res.end(res.req.method === 'HEAD' ? undefined : body);
+}
+
+class BodyTooLargeError extends Error {}
+
+/** Reads the request body, refusing it once it passes maxBytes. */
+function readBody(req, maxBytes) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    let done = false;
+    const finish = (fn, value) => {
+      if (done) return;
+      done = true;
+      req.off('data', onData);
+      fn(value);
+    };
+    const onData = (chunk) => {
+      size += chunk.length;
+      if (size > maxBytes) return finish(reject, new BodyTooLargeError());
+      chunks.push(chunk);
+    };
+    req.on('data', onData);
+    req.on('end', () => finish(resolve, Buffer.concat(chunks).toString('utf8')));
+    req.on('error', (err) => finish(reject, err));
+  });
 }
 
 /**
@@ -82,10 +141,10 @@ async function serveStatic(req, res, root, pathname) {
   const found = await resolveStaticFile(root, pathname);
   if (!found) return sendText(res, 404, 'Not found\n');
   res.writeHead(200, {
+    ...SECURITY_HEADERS,
     'Content-Type': MIME[path.extname(found.filePath).toLowerCase()] || 'application/octet-stream',
     'Content-Length': found.size,
     'Cache-Control': 'no-cache',
-    'X-Content-Type-Options': 'nosniff',
   });
   if (req.method === 'HEAD') return res.end();
   const stream = fs.createReadStream(found.filePath);
@@ -93,13 +152,74 @@ async function serveStatic(req, res, root, pathname) {
   stream.pipe(res);
 }
 
+const isJsonType = (header) => (header || '').split(';')[0].trim().toLowerCase() === 'application/json';
+
 /**
  * Builds the server without listening, so tests can start it on a random port
  * with a temporary DESK_HOME.
- * @param {{ deskHome?: string, appDir?: string, log?: Pick<Console, 'error'> }} [options]
+ * @param {{ deskHome?: string, appDir?: string, log?: Pick<Console, 'error'>, fsp?: typeof fs.promises, samplePath?: string }} [options]
+ *   fsp lets tests make a state write fail part way; samplePath is the edition shown when there is no feed.json.
  */
-export function createServer({ deskHome = resolveDeskHome(), appDir = APP_DIR, log = console } = {}) {
+export function createServer({ deskHome = resolveDeskHome(), appDir = APP_DIR, log = console, fsp, samplePath = SAMPLE_FEED_PATH } = {}) {
   const root = path.resolve(appDir);
+  const state = createStateStore(statePath(deskHome), fsp ? { fsp } : {});
+
+  async function getState(res) {
+    try {
+      return sendJson(res, 200, await state.read());
+    } catch (err) {
+      // Leave the file alone so it can be recovered. The app sees the 500 and doesn't save over it.
+      const why = err instanceof CorruptStateError ? err.message : `can't read ${state.filePath} (${err.code || err.message})`;
+      log.error(`The Desk: ${why}. Saving is paused until it's fixed.`);
+      return sendJson(res, 500, { error: "Your saved state couldn't be read, so it was left untouched." });
+    }
+  }
+
+  async function putState(req, res) {
+    if (!isJsonType(req.headers['content-type'])) {
+      return sendJson(res, 415, { error: 'Send the state as application/json.' });
+    }
+    // No "Connection: close" here: Node reads and drops the rest of the body after we answer,
+    // so the client gets the 413 instead of a connection reset mid-upload.
+    const tooLarge = () => sendJson(res, 413, { error: `The state is over ${MAX_STATE_BYTES} bytes.` });
+    if (Number(req.headers['content-length']) > MAX_STATE_BYTES) return tooLarge();
+    let text;
+    try {
+      text = await readBody(req, MAX_STATE_BYTES);
+    } catch (err) {
+      if (err instanceof BodyTooLargeError) return tooLarge();
+      throw err;
+    }
+    let value;
+    try {
+      value = JSON.parse(text);
+    } catch {
+      return sendJson(res, 400, { error: 'The state is not valid JSON.' });
+    }
+    const check = checkState(value);
+    if (!check.ok) return sendJson(res, 400, { error: check.error });
+    try {
+      await state.write(value);
+    } catch (err) {
+      log.error(`The Desk: couldn't save ${state.filePath} (${err.code || err.message}). The previous state is untouched.`);
+      return sendJson(res, 500, { error: "Couldn't save just now. The previous state is untouched." });
+    }
+    return sendJson(res, 200, { ok: true });
+  }
+
+  async function handleApi(req, res, pathname) {
+    const isRead = req.method === 'GET' || req.method === 'HEAD';
+    if (pathname === '/api/feed') {
+      if (!isRead) return sendJson(res, 405, { error: 'Method not allowed' }, { Allow: 'GET, HEAD' });
+      return sendJson(res, 200, await loadFeed(deskHome, { log, samplePath }));
+    }
+    if (pathname === '/api/state') {
+      if (isRead) return getState(res);
+      if (req.method === 'PUT') return putState(req, res);
+      return sendJson(res, 405, { error: 'Method not allowed' }, { Allow: 'GET, HEAD, PUT' });
+    }
+    return sendJson(res, 404, { error: 'Not found' });
+  }
 
   const server = http.createServer(async (req, res) => {
     try {
@@ -114,9 +234,8 @@ export function createServer({ deskHome = resolveDeskHome(), appDir = APP_DIR, l
         return sendText(res, 400, 'Bad request\n');
       }
 
-      // S2: /api/feed and /api/state go here, reading and writing under deskHome.
       if (url.pathname === '/api' || url.pathname.startsWith('/api/')) {
-        return sendText(res, 404, 'Not found\n');
+        return await handleApi(req, res, url.pathname);
       }
 
       if (req.method !== 'GET' && req.method !== 'HEAD') {
@@ -125,8 +244,9 @@ export function createServer({ deskHome = resolveDeskHome(), appDir = APP_DIR, l
       await serveStatic(req, res, root, url.pathname);
     } catch (err) {
       log.error('The Desk server error:', err);
-      if (!res.headersSent) sendText(res, 500, 'Something went wrong\n');
-      else res.destroy();
+      if (res.headersSent) res.destroy();
+      else if (/^\/api(\/|$|\?)/.test(req.url || '')) sendJson(res, 500, { error: 'Something went wrong' });
+      else sendText(res, 500, 'Something went wrong\n');
     }
   });
 
