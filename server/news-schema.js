@@ -5,9 +5,12 @@
 //   - fewer than 3 stories needs a note saying why;
 //   - story ids are unique across stories and more, and ranks are unique across the edition;
 //   - dates are real calendar days, and `at` is a real moment;
-//   - every source link is a whole https:// link with a site name, no spaces and no user name or password.
-// Like Product Feed, only The Desk may mark something as a sample: a valid file comes back with
-// any "sample" key removed (the schema allows extra keys, so it never fails because of one).
+//   - every source link is a whole https:// link that opens the site it shows, with no user name
+//     or password, and a story doesn't list the same page twice.
+// A far too long list (stories, more, a story's sources) is refused before ajv runs, so a runaway
+// file is cheap to check. Like Product Feed, only The Desk may mark something as a sample: a valid
+// file comes back with any "sample" key removed (the schema allows extra keys, so it never fails
+// because of one).
 // Used by `npm run validate-news` (the agent runs it) and, from N3, by the server.
 import fs from 'node:fs';
 import path from 'node:path';
@@ -16,13 +19,17 @@ import {
   DATE_PARTS,
   DATE_TIME_PARTS,
   MAX_FILE_BYTES,
+  capErrors,
   createAjv,
   isCalendarDate,
   isDateTime,
+  isHttpsLink,
+  linkKey,
   linkProblem,
   readJsonFile,
   schemaErrors,
   show,
+  tooLongError,
   withoutSample,
 } from './schema-common.js';
 
@@ -41,6 +48,12 @@ ajv.addSchema(newsSchema);
 const checkNewsSchema = ajv.getSchema(newsSchema.$id);
 const checkBreakingSchema = ajv.compile(readSchema(BREAKING_SCHEMA_PATH));
 
+// The list limits, read from the schema so the guard's message can't drift from it.
+const MAX_STORIES = newsSchema.properties.stories.maxItems;
+const MAX_MORE = newsSchema.properties.more.maxItems;
+const MIN_SOURCES = newsSchema.$defs.story.properties.sources.minItems;
+const MAX_SOURCES = newsSchema.$defs.story.properties.sources.maxItems;
+
 const PATTERNS = {
   '^https://': 'must start with https://',
   '^\\d{4}-\\d{2}-\\d{2}$': 'must be a date like YYYY-MM-DD',
@@ -53,7 +66,7 @@ const PATTERNS = {
 const NOUNS = {
   stories: { one: 'story', many: 'stories', overflow: 'the top 3 go in stories, up to 7 more in more' },
   more: { one: 'story', many: 'stories', overflow: 'leave the weakest out' },
-  sources: { one: 'source', many: 'sources' },
+  sources: { one: 'source', many: 'sources', overflow: 'keep the 8 strongest' },
 };
 
 const NEWS_WORDS = { root: 'news', patterns: PATTERNS, nouns: NOUNS };
@@ -73,9 +86,18 @@ function storyErrors(story, where) {
     errors.push(`${at('date')}: must be a real calendar date like YYYY-MM-DD, or empty (got ${show(story.date)})`);
   }
   if (Array.isArray(story.sources)) {
+    const firstSeen = new Map(); // page -> index of the first source that links to it
     story.sources.forEach((source, i) => {
-      const problem = isObject(source) ? linkProblem(source.url) : null;
+      if (!isObject(source)) return;
+      const problem = linkProblem(source.url);
       if (problem) errors.push(`${at(`sources[${i}].url`)}: ${problem}`);
+      if (!isHttpsLink(source.url)) return; // a bad link already has its line (here or from the schema)
+      const page = linkKey(source.url);
+      if (firstSeen.has(page)) {
+        errors.push(`${at(`sources[${i}].url`)}: same link as sources[${firstSeen.get(page)}]; a story needs ${MIN_SOURCES} different sources`);
+      } else {
+        firstSeen.set(page, i);
+      }
     });
   }
   return errors;
@@ -125,21 +147,33 @@ function foundAtErrors(at) {
   return [];
 }
 
+// Far too long lists, found before ajv runs: the story lists first, then (only when those are
+// short enough to walk) each story's sources.
+function tooLongLists(news) {
+  const lists = [tooLongError(news.stories, 'stories', MAX_STORIES, 'stories'), tooLongError(news.more, 'more', MAX_MORE, 'stories')].filter(Boolean);
+  if (lists.length) return lists;
+  return placedStories(news)
+    .map(({ story, where }) => isObject(story) && tooLongError(story.sources, `${where}.sources`, MAX_SOURCES, 'sources'))
+    .filter(Boolean);
+}
+
 /**
  * Checks a parsed morning edition (news.json). Never throws.
- * @returns {{ ok: boolean, errors: string[] }} errors are short, readable lines.
+ * @returns {{ ok: boolean, errors: string[] }} errors are short, readable lines, at most MAX_ERRORS.
  */
 export function validateNews(news) {
   if (!isObject(news)) return { ok: false, errors: ['news: must be a JSON object'] };
+  const tooLong = tooLongLists(news);
+  if (tooLong.length) return { ok: false, errors: tooLong };
   const placed = placedStories(news);
-  const errors = [
+  const errors = capErrors([
     ...schemaErrors(checkNewsSchema, news, NEWS_WORDS),
     ...editionDateErrors(news.edition),
     ...noteErrors(news),
     ...placed.flatMap(({ story, where }) => storyErrors(story, where)),
     ...duplicates(placed, 'id', (v) => typeof v === 'string'),
     ...duplicates(placed, 'rank', Number.isInteger),
-  ];
+  ]);
   return { ok: errors.length === 0, errors };
 }
 
@@ -149,14 +183,24 @@ export function validateNews(news) {
  */
 export function validateBreaking(story) {
   if (!isObject(story)) return { ok: false, errors: ['breaking: must be a JSON object'] };
-  const errors = [...schemaErrors(checkBreakingSchema, story, BREAKING_WORDS), ...foundAtErrors(story.at), ...storyErrors(story, '')];
+  const tooLong = tooLongError(story.sources, 'sources', MAX_SOURCES, 'sources');
+  if (tooLong) return { ok: false, errors: [tooLong] };
+  const errors = capErrors([...schemaErrors(checkBreakingSchema, story, BREAKING_WORDS), ...foundAtErrors(story.at), ...storyErrors(story, '')]);
   return { ok: errors.length === 0, errors };
 }
 
-/** True when a file is a breaking story rather than an edition: it's named breaking.json, or it has `at`. */
+/**
+ * True when a file is a breaking story rather than an edition. The name decides first:
+ * breaking.json is a breaking story; news.json, or any file in an editions/ folder, is an edition.
+ * Any other file (a draft, a copy) is a breaking story unless it has a `stories` key.
+ * Pass value undefined when the file couldn't be read or parsed: then only the name counts.
+ */
 export function isBreakingFile(filePath, value) {
-  if (path.basename(String(filePath)).toLowerCase() === 'breaking.json') return true;
-  return isObject(value) && Object.hasOwn(value, 'at');
+  const name = path.basename(String(filePath)).toLowerCase();
+  if (name === 'breaking.json') return true;
+  if (name === 'news.json' || path.basename(path.dirname(String(filePath))).toLowerCase() === 'editions') return false;
+  if (value === undefined) return false;
+  return !(isObject(value) && Object.hasOwn(value, 'stories'));
 }
 
 // A valid file comes back under its kind ("news" or "breaking"), without any "sample" key.

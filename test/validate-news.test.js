@@ -95,15 +95,55 @@ describe('npm run validate-news', () => {
     );
   });
 
-  test('a file with "at" is checked as a breaking story whatever its name', () => {
+  // N2 review: breaking.json is breaking; news.json and editions/ are editions; other names are
+  // breaking unless they have "stories". An extra "at" no longer turns an edition into a breaking story.
+  test('news.json with an extra "at" is a valid edition, as the server will see it', () => {
+    const file = write(path.join('live', 'news.json'), { ...edition(), at: '2026-12-07T05:30:00-05:00' });
+    const r = run([file]);
+    assert.equal(r.status, 0, r.stderr);
+    assert.equal(r.stdout, 'valid\n');
+  });
+
+  test('a breaking story under another name is checked as one; a draft missing "at" is told so', () => {
     const ok = run([write('found-at-noon.json', breaking())]);
     assert.equal(ok.status, 0, ok.stderr);
     assert.equal(ok.stdout, 'valid\n');
 
-    const file = write('news-with-at.json', { ...edition(), at: '2026-12-07T05:30:00-05:00' });
+    const draft = breaking();
+    delete draft.at;
+    const file = write('breaking-draft.json', draft);
     const bad = run([file]);
     assert.equal(bad.status, 1);
-    assert.ok(bad.stderr.startsWith(`invalid: ${file} (checked as a breaking story)\n`), bad.stderr);
+    assert.equal(bad.stderr, `invalid: ${file} (checked as a breaking story)\n  - breaking: missing required field "at"\n`);
+  });
+
+  test('a file in editions/ is checked as an edition', () => {
+    const file = write(path.join('editions', '2026-12-07.json'), breaking());
+    const r = run([file]);
+    assert.equal(r.status, 1);
+    assert.ok(r.stderr.startsWith(`invalid: ${file}\n`), r.stderr);
+    assert.ok(r.stderr.includes('\n  - news: missing required field "stories"\n'), r.stderr);
+  });
+
+  test('a far too long list fails fast with one plain line', () => {
+    const news = edition();
+    news.more = Array.from({ length: 100_000 }, () => ({}));
+    const file = write('runaway.json', news);
+    const started = performance.now();
+    const r = run([file]);
+    assert.ok(performance.now() - started < 3000, 'a separate process, so allow for start-up');
+    assert.equal(r.status, 1);
+    assert.equal(r.stderr, `invalid: ${file}\n  - more: far too long (100000 stories); at most 7 allowed, so nothing else was checked\n`);
+  });
+
+  test('when the validator stops at 100 problems, it says "at least"', () => {
+    const news = edition();
+    news.more = Array.from({ length: 50 }, () => ({}));
+    const r = run([write('hundred.json', news)]);
+    assert.equal(r.status, 1);
+    const lines = r.stderr.trim().split('\n');
+    assert.equal(lines.length, 22);
+    assert.equal(lines.at(-1), '  …and at least 80 more');
   });
 
   test('several files: names each one, and exits 1 if any fails', () => {
@@ -188,12 +228,15 @@ describe('npm run validate-news', () => {
   test('quotes untrusted text safely: nothing from the file reaches the terminal raw', () => {
     const news = edition();
     news.stories[0].sources[0].url = 'http://example.com/\u001b]0;pwned\u0007';
-    news.stories[0].region = '\u001b[31mred';
+    news.stories[0].region = '\u001b[31mred\u009b2J\u202e\u200b';
+    news.stories[1].sources[0].url = 'http://user:secret@example.com/';
     const r = run([write('escapes.json', news)]);
     assert.equal(r.status, 1);
-    assert.equal(r.stderr.trim().split('\n').length, 3, 'both values are reported');
-    assert.doesNotMatch(r.stderr, /[\u0000-\u0009\u000b-\u001f\u007f]/, 'no control characters besides newlines');
+    assert.equal(r.stderr.trim().split('\n').length, 4, 'all three values are reported');
+    assert.doesNotMatch(r.stderr, /[\u0000-\u0009\u000b-\u001f\u007f-\u009f\u061c\u200b-\u200f\u2028-\u202e\u2060-\u2069\ufeff]/, 'no controls, bidi or zero-width characters');
     assert.ok(r.stderr.includes('\\u001b]0;pwned\\u0007'));
+    assert.ok(r.stderr.includes('red\\u009b2J\\u202e\\u200b'));
+    assert.ok(!r.stderr.includes('secret'), 'no password');
   });
 
   test('through npm: the agent\'s command works, and validate-feed still does too', { skip: !NPM_CLI && 'npm not found' }, () => {

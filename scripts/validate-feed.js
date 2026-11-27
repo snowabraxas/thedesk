@@ -8,6 +8,7 @@
 // Prints "valid" and exits 0, or prints the problems and exits 1.
 import path from 'node:path';
 import { checkFeedFile } from '../server/feed-schema.js';
+import { MAX_ERRORS } from '../server/schema-common.js';
 import { feedPath, resolveDeskHome } from '../server/config.js';
 
 const MAX_SHOWN = 20;
@@ -38,6 +39,7 @@ if (ok) {
 // File-level problems start with the path; the header already names it.
 const lines = [`invalid: ${target}`];
 for (const e of errors.slice(0, MAX_SHOWN)) lines.push(`  - ${e.startsWith(`${target}: `) ? e.slice(target.length + 2) : e}`);
-if (errors.length > MAX_SHOWN) lines.push(`  …and ${errors.length - MAX_SHOWN} more`);
+// The validator lists at most MAX_ERRORS problems; a full list means there may be more.
+if (errors.length > MAX_SHOWN) lines.push(`  …and ${errors.length >= MAX_ERRORS ? 'at least ' : ''}${errors.length - MAX_SHOWN} more`);
 console.error(lines.join('\n'));
 process.exit(1);

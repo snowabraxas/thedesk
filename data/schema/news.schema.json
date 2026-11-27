@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "the-desk/news.schema.json",
   "title": "News edition",
-  "description": "Written each morning by the news agent to ~/agent-house/desks/news/news.json (with a copy in editions/YYYY-MM-DD.json) and read by The Desk. Check it with `npm run validate-news` in the-desk repo. On top of this schema the validator also checks: fewer than 3 stories needs a note saying why; story ids are unique across stories and more; ranks are unique across the edition; dates are real calendar days; every link is a whole https:// link with no user name or password.",
+  "description": "Written each morning by the news agent to ~/agent-house/desks/news/news.json (with a copy in editions/YYYY-MM-DD.json) and read by The Desk. Check it with `npm run validate-news` in the-desk repo. On top of this schema the validator also checks: fewer than 3 stories needs a note saying why; story ids are unique across stories and more; ranks are unique across the edition; dates are real calendar days; every link is a whole https:// link that opens the site it shows (plain ASCII site name, not an IP address), with no user name or password; a story never lists the same page twice.",
   "type": "object",
   "required": ["desk", "edition", "stories"],
   "additionalProperties": true,
@@ -42,7 +42,7 @@
           "type": "array",
           "minItems": 2,
           "maxItems": 8,
-          "description": "Every page used, at least 2 independent ones",
+          "description": "The pages used, each a different page: at least 2 independent ones and at most 8 (if more were used, keep the 8 strongest)",
           "items": { "$ref": "#/$defs/source" }
         }
       }

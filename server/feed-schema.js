@@ -1,7 +1,8 @@
 // The feed contract: checks a Product Feed edition against data/schema/feed.schema.json,
 // plus the rules the schema's patterns don't cover: dates are real calendar days (no 2026-02-30),
-// article links are whole https:// links with a site name, no spaces and no user name or password,
+// article links are whole https:// links that open the site they show, with no user name or password,
 // article and theme ids are unique, and every theme an article uses must be in the edition's themes list.
+// A far too long articles or themes list is refused before ajv runs, so a runaway file is cheap to check.
 // Used by `npm run validate-feed` (the agent runs it) and by the server before it serves an edition.
 // The shared pieces (ajv setup, error wording, date and link checks) live in schema-common.js.
 import fs from 'node:fs';
@@ -9,6 +10,7 @@ import { SCHEMA_PATH } from './config.js';
 import {
   DATE_PARTS,
   MAX_FILE_BYTES,
+  capErrors,
   createAjv,
   isCalendarDate,
   isHttpsLink,
@@ -16,6 +18,7 @@ import {
   readJsonFile,
   schemaErrors,
   show,
+  tooLongError,
 } from './schema-common.js';
 
 export { isCalendarDate, isHttpsLink };
@@ -90,19 +93,24 @@ function unknownThemeErrors(feed) {
 
 /**
  * Checks a parsed feed object. Never throws.
- * @returns {{ ok: boolean, errors: string[] }} errors are short, readable lines.
+ * @returns {{ ok: boolean, errors: string[] }} errors are short, readable lines, at most MAX_ERRORS.
  */
 export function validateFeed(feed) {
   if (feed === null || typeof feed !== 'object' || Array.isArray(feed)) {
     return { ok: false, errors: ['feed: must be a JSON object'] };
   }
-  const errors = [
+  const guarded = [
+    tooLongError(feed.articles, 'articles', schema.properties.articles.maxItems, 'articles'),
+    tooLongError(feed.themes, 'themes', schema.properties.themes.maxItems, 'themes'),
+  ].filter(Boolean);
+  if (guarded.length) return { ok: false, errors: guarded };
+  const errors = capErrors([
     ...schemaErrors(checkSchema, feed, WORDS),
     ...calendarAndLinkErrors(feed),
     ...duplicateIds(feed.themes, 'themes'),
     ...duplicateIds(feed.articles, 'articles'),
     ...unknownThemeErrors(feed),
-  ];
+  ]);
   return { ok: errors.length === 0, errors };
 }
 

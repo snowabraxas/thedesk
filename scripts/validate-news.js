@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 // npm run validate-news [file ...]
 // Checks News desk files against the News contract in server/news-schema.js: the same check the
-// server makes before it serves them. A file named breaking.json, or one with an "at" field, is
-// checked as a breaking story (data/schema/breaking.schema.json); anything else as a morning
-// edition (data/schema/news.schema.json).
+// server makes before it serves them. breaking.json is checked as a breaking story
+// (data/schema/breaking.schema.json); news.json, or any file in an editions/ folder, as a morning
+// edition (data/schema/news.schema.json); any other file as a breaking story unless it has "stories".
 // With no file it checks $DESK_HOME/desks/news/news.json (DESK_HOME defaults to ~/agent-house),
 // and breaking.json there too when it exists.
 // A relative path is taken from where the command was typed, even through `npm run`.
@@ -12,6 +12,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import { checkNewsDeskFile } from '../server/news-schema.js';
+import { MAX_ERRORS } from '../server/schema-common.js';
 import { breakingPath, newsPath, resolveDeskHome } from '../server/config.js';
 
 const MAX_SHOWN = 20;
@@ -21,7 +22,8 @@ const args = process.argv.slice(2);
 if (args.includes('-h') || args.includes('--help')) {
   console.log(USAGE);
   console.log('Default: $DESK_HOME/desks/news/news.json, plus breaking.json there if it exists (DESK_HOME defaults to ~/agent-house)');
-  console.log('A file named breaking.json, or with an "at" field, is checked as a breaking story.');
+  console.log('breaking.json is checked as a breaking story; news.json, or a file in editions/, as an edition;');
+  console.log('any other file as a breaking story unless it has "stories".');
   process.exit(0);
 }
 const unknown = args.find((a) => a.startsWith('-'));
@@ -56,7 +58,8 @@ for (const file of files) {
   // File-level problems start with the path; the header already names it.
   const lines = [`invalid: ${file}${kind === 'breaking' ? ' (checked as a breaking story)' : ''}`];
   for (const e of errors.slice(0, MAX_SHOWN)) lines.push(`  - ${e.startsWith(`${file}: `) ? e.slice(file.length + 2) : e}`);
-  if (errors.length > MAX_SHOWN) lines.push(`  …and ${errors.length - MAX_SHOWN} more`);
+  // The validator lists at most MAX_ERRORS problems; a full list means there may be more.
+  if (errors.length > MAX_SHOWN) lines.push(`  …and ${errors.length >= MAX_ERRORS ? 'at least ' : ''}${errors.length - MAX_SHOWN} more`);
   console.error(lines.join('\n'));
 }
 

@@ -13,7 +13,7 @@ import {
   validateBreaking,
   validateNews,
 } from '../server/news-schema.js';
-import { DATE_TIME_PARTS } from '../server/schema-common.js';
+import { DATE_TIME_PARTS, MAX_ERRORS } from '../server/schema-common.js';
 
 const FIXTURES = path.join(REPO_ROOT, 'test', 'fixtures', 'news');
 const NEWS_FIXTURE = path.join(FIXTURES, 'news.json');
@@ -174,7 +174,7 @@ describe('validateNews: the rules', () => {
     news.stories[2].sources = Array.from({ length: 9 }, (_, i) => ({ name: `Example ${i}`, url: `https://example.com/${i}` }));
     assert.deepEqual(validateNews(news).errors, [
       'stories[0].sources: needs at least 2 sources (has 0)',
-      'stories[2].sources: can have at most 8 sources (has 9)',
+      'stories[2].sources: can have at most 8 sources (has 9); keep the 8 strongest',
     ]);
   });
 
@@ -475,11 +475,28 @@ describe('isBreakingFile', () => {
     assert.equal(isBreakingFile('/h/desks/news/Breaking.JSON', undefined), true);
   });
 
-  test('a file with "at" is a breaking story; anything else is an edition', () => {
+  // N2 review: the name decides first, then whether there is a `stories` key; `at` no longer decides.
+  test('news.json and anything in an editions/ folder is an edition, whatever is in it', () => {
+    assert.equal(isBreakingFile('/h/desks/news/news.json', { ...edition(), at: '2026-12-07T05:30:00-05:00' }), false);
+    assert.equal(isBreakingFile('/h/desks/news/News.JSON', breaking()), false);
+    assert.equal(isBreakingFile('/h/desks/news/editions/2026-12-07.json', breaking()), false);
+    assert.equal(isBreakingFile('/h/desks/news/Editions/draft.json', {}), false);
+  });
+
+  test('any other file is a breaking story unless it has a stories key', () => {
     assert.equal(isBreakingFile('/tmp/story.json', breaking()), true);
-    assert.equal(isBreakingFile('/tmp/news.json', edition()), false);
-    assert.equal(isBreakingFile('/tmp/not-breaking.json', null), false);
-    assert.equal(isBreakingFile('/tmp/list.json', [{ at: 'x' }]), false);
+    const draft = breaking();
+    delete draft.at;
+    assert.equal(isBreakingFile('/tmp/draft.json', draft), true, 'a breaking draft missing "at" is still a breaking story');
+    assert.equal(isBreakingFile('/tmp/list.json', [{ at: 'x' }]), true);
+    assert.equal(isBreakingFile('/tmp/copy.json', edition()), false);
+    assert.equal(isBreakingFile('/tmp/copy-with-at.json', { ...edition(), at: '2026-12-07T05:30:00-05:00' }), false);
+    assert.equal(isBreakingFile('/tmp/empty-edition.json', { stories: [] }), false);
+  });
+
+  test('a file that could not be read counts by its name only', () => {
+    assert.equal(isBreakingFile('/tmp/missing.json', undefined), false);
+    assert.equal(isBreakingFile('/tmp/breaking.json', undefined), true);
   });
 });
 
@@ -538,7 +555,7 @@ describe('checkNewsFile, checkBreakingFile and checkNewsDeskFile', () => {
   });
 
   test('accept a file that starts with a byte-order mark', async () => {
-    const file = write('bom.json', `﻿${fs.readFileSync(NEWS_FIXTURE, 'utf8')}`);
+    const file = write('bom.json', `\uFEFF${fs.readFileSync(NEWS_FIXTURE, 'utf8')}`);
     assert.equal((await checkNewsFile(file)).ok, true);
   });
 
@@ -569,10 +586,177 @@ describe('checkNewsFile, checkBreakingFile and checkNewsDeskFile', () => {
     assert.equal(edition2.ok, true);
   });
 
-  test('an edition that wrongly has "at" is checked as a breaking story, so the agent sees why', async () => {
-    const result = await checkNewsDeskFile(write('news-with-at.json', { ...edition(), at: '2026-12-07T05:30:00-05:00' }));
+  // N2 review: the CLI and the server (which uses checkNewsFile) must agree on an edition with an extra "at".
+  test('news.json with an extra top-level "at" is a valid edition, for the CLI and the server alike', async () => {
+    fs.mkdirSync(path.join(dir, 'live'));
+    const file = path.join(dir, 'live', 'news.json');
+    fs.writeFileSync(file, JSON.stringify({ ...edition(), at: '2026-12-07T05:30:00-05:00' }));
+    const desk = await checkNewsDeskFile(file);
+    assert.equal(desk.kind, 'news');
+    assert.equal(desk.ok, true, desk.errors.join('\n'));
+    assert.equal((await checkNewsFile(file)).ok, true);
+
+    const copy = await checkNewsDeskFile(write('edition-copy-with-at.json', { ...edition(), at: '2026-12-07T05:30:00-05:00' }));
+    assert.equal(copy.kind, 'news', 'a copy under another name has stories, so it is an edition too');
+    assert.equal(copy.ok, true);
+  });
+
+  test('a breaking draft under another name that is missing "at" is told exactly that', async () => {
+    const draft = breaking();
+    delete draft.at;
+    const result = await checkNewsDeskFile(write('breaking-draft.json', draft));
     assert.equal(result.kind, 'breaking');
-    assert.equal(result.ok, false);
-    assert.ok(result.errors.includes('breaking: missing required field "headline"'));
+    assert.deepEqual(result.errors, ['breaking: missing required field "at"']);
+  });
+
+  test('a file in editions/ is checked as an edition, even when it looks like a breaking story', async () => {
+    fs.mkdirSync(path.join(dir, 'editions'));
+    const result = await checkNewsDeskFile(write(path.join('editions', '2026-12-07.json'), breaking()));
+    assert.equal(result.kind, 'news');
+    assert.ok(result.errors.includes('news: missing required field "stories"'), result.errors.join('\n'));
+  });
+});
+
+describe('N2 review: links, quoting and runaway files', () => {
+  test('the same link twice in one story is refused: a story needs 2 different sources', () => {
+    const news = edition();
+    news.stories[0].sources[1].url = news.stories[0].sources[0].url;
+    assert.deepEqual(validateNews(news).errors, ['stories[0].sources[1].url: same link as sources[0]; a story needs 2 different sources']);
+  });
+
+  test('two names on one link count once, and so do links that differ only by #fragment, capitals in the site or a bare /', () => {
+    const variants = [
+      ['https://example.com/a', 'https://example.com/a#section-2'],
+      ['https://example.com/a', 'https://EXAMPLE.com/a'],
+      ['https://example.com', 'https://example.com/'],
+      ['https://example.com:443/a', 'https://example.com/a'],
+    ];
+    for (const [first, second] of variants) {
+      const news = edition();
+      news.more[1].sources = [
+        { name: 'Example News', url: first },
+        { name: 'Example Wire', url: second },
+      ];
+      assert.deepEqual(validateNews(news).errors, ['more[1].sources[1].url: same link as sources[0]; a story needs 2 different sources'], second);
+    }
+  });
+
+  test('different pages on one site, or different queries, are different sources', () => {
+    const news = edition();
+    news.stories[1].sources = [
+      { name: 'Example News', url: 'https://example.com/a' },
+      { name: 'Example News', url: 'https://example.com/b' },
+      { name: 'Example News', url: 'https://example.com/a?page=2' },
+    ];
+    assert.deepEqual(validateNews(news), VALID);
+  });
+
+  test('a repeated bad link is reported for being bad, not again for being repeated', () => {
+    const news = edition();
+    news.stories[2].sources = [
+      { name: 'Example News', url: 'http://example.com/a' },
+      { name: 'Example Wire', url: 'http://example.com/a' },
+    ];
+    news.stories[0].sources = [
+      { name: 'Example News', url: 'https://u:secret@example.com/a' },
+      { name: 'Example Wire', url: 'https://u:secret@example.com/a' },
+    ];
+    assert.deepEqual(validateNews(news).errors, [
+      'stories[2].sources[0].url: must start with https:// (got "http://example.com/a")',
+      'stories[2].sources[1].url: must start with https:// (got "http://example.com/a")',
+      'stories[0].sources[0].url: must not have a user name or password before the site name (got "https://***@example.com/a")',
+      'stories[0].sources[1].url: must not have a user name or password before the site name (got "https://***@example.com/a")',
+    ]);
+  });
+
+  test('the same link twice in a breaking story is refused too', () => {
+    const story = breaking();
+    story.sources[1].url = `${story.sources[0].url}#top`;
+    assert.deepEqual(validateBreaking(story).errors, ['sources[1].url: same link as sources[0]; a story needs 2 different sources']);
+  });
+
+  test('the brief and the schema agree: 2 to 8 sources, keep the 8 strongest', () => {
+    const schema = JSON.parse(fs.readFileSync(NEWS_SCHEMA_PATH, 'utf8'));
+    const sources = schema.$defs.story.properties.sources;
+    assert.equal(sources.minItems, 2);
+    assert.equal(sources.maxItems, 8);
+    assert.match(sources.description, /at most 8 \(if more were used, keep the 8 strongest\)/);
+    const brief = fs.readFileSync(path.join(REPO_ROOT, 'agents', 'news', 'AGENTS.md'), 'utf8');
+    const line = brief.split('\n').find((l) => l.includes('`sources`:'));
+    assert.match(line, /at least 2 and at most 8 \(if you used more, keep the 8 strongest\)/);
+  });
+
+  test('a password never shows, whatever else is wrong with the link', () => {
+    const cases = [
+      ['https://user:secret@exa mple.com/', 'must not have a user name or password before the site name (got "https://***@exa mple.com/")'],
+      ['https:///user:secret@evil.example', 'must not have a user name or password before the site name (got "https:///***@evil.example")'],
+      ['https:///@evil.example', 'must not have a user name or password before the site name (got "https:///***@evil.example")'],
+      ['http://user:secret@example.com/', 'must start with https:// (got "http://***@example.com/")'],
+      ['HTTPS://user:secret@example.com/', 'must start with https:// (got "HTTPS://***@example.com/")'],
+      ['https:\\\\user:secret@evil.example', 'must start with https:// (got "https:\\\\\\\\***@evil.example")'],
+    ];
+    for (const [url, words] of cases) {
+      const news = edition();
+      news.stories[1].sources[0].url = url;
+      const { errors } = validateNews(news);
+      assert.deepEqual(errors, [`stories[1].sources[0].url: ${words}`], url);
+      assert.ok(!errors[0].includes('secret'));
+    }
+  });
+
+  test('a lookalike or numeric site name is refused', () => {
+    for (const url of ['https://evil.example∕good.example/', 'https://еxample.com/', 'https://0x7f.1/', 'https://127.0.0.1/']) {
+      const news = edition();
+      news.stories[0].sources[0].url = url;
+      const { errors } = validateNews(news);
+      assert.equal(errors.length, 1, url);
+      assert.match(errors[0], /^stories\[0\]\.sources\[0\]\.url: must name its site in plain letters, digits, dots and dashes \(xn-- for other alphabets\), not as an IP address/, url);
+    }
+  });
+
+  test('bidi and zero-width characters are refused in links and escaped in messages', () => {
+    const news = edition();
+    news.stories[0].sources[0].url = 'https://example.com/\u202egnp.exe';
+    news.stories[0].region = 'us\u200b\u009b';
+    assert.deepEqual(validateNews(news).errors, [
+      'stories[0].region: must be one of "us", "china", "eu", "global", "other" (got "us\\u200b\\u009b")',
+      'stories[0].sources[0].url: must be a whole link that starts with https://, with a site name and no spaces (got "https://example.com/\\u202egnp.exe")',
+    ]);
+  });
+
+  test('more with 100,000 empty objects fails in well under a second', () => {
+    const news = edition();
+    news.more = Array.from({ length: 100_000 }, () => ({}));
+    const started = performance.now();
+    const { ok, errors } = validateNews(news);
+    assert.ok(performance.now() - started < 1000, 'well under a second');
+    assert.equal(ok, false);
+    assert.deepEqual(errors, ['more: far too long (100000 stories); at most 7 allowed, so nothing else was checked']);
+  });
+
+  test('far too long stories, sources, or breaking sources fail at once too', () => {
+    const started = performance.now();
+    const stories = edition();
+    stories.stories = Array.from({ length: 100_000 }, () => ({}));
+    assert.deepEqual(validateNews(stories).errors, ['stories: far too long (100000 stories); at most 3 allowed, so nothing else was checked']);
+
+    const sources = edition();
+    sources.more[1].sources = Array.from({ length: 100_000 }, () => ({}));
+    assert.deepEqual(validateNews(sources).errors, ['more[1].sources: far too long (100000 sources); at most 8 allowed, so nothing else was checked']);
+
+    const story = breaking();
+    story.sources = Array.from({ length: 100_000 }, () => ({}));
+    assert.deepEqual(validateBreaking(story).errors, ['sources: far too long (100000 sources); at most 8 allowed, so nothing else was checked']);
+    assert.ok(performance.now() - started < 1000, 'well under a second for all three');
+  });
+
+  test('a list just under the guard is checked normally, and at most 100 problems are listed', () => {
+    const news = edition();
+    news.more = Array.from({ length: 50 }, () => ({}));
+    const { errors } = validateNews(news);
+    assert.equal(MAX_ERRORS, 100);
+    assert.equal(errors.length, 100);
+    assert.equal(errors[0], 'more: can have at most 7 stories (has 50); leave the weakest out');
+    assert.equal(new Set(errors).size, errors.length, 'each line once');
   });
 });
