@@ -10,5 +10,5 @@ docs/screens/*.png
 .tmp-*/
 # The Preview button's Desk keeps its own data here, away from ~/agent-house
 .desk-preview/
-# Written by npm run deploy into the live copy (~/the-desk-live)
-.deployed.json
+# Written by npm run deploy into the live copy (~/the-desk-live), with its temp file while it writes
+/.deployed.json*

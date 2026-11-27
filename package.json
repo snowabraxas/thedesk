@@ -9,7 +9,9 @@
   },
   "scripts": {
     "dev": "node --watch server/index.js",
+    "preview": "PORT=3000 DESK_HOME=.desk-preview node --watch server/index.js",
     "start": "node server/index.js",
+    "deploy": "node scripts/deploy.js",
     "test": "TZ=America/Toronto node --test 'test/**/*.test.js'",
     "validate-feed": "node scripts/validate-feed.js",
     "screens": "node scripts/screens.js",
