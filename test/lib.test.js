@@ -6,6 +6,7 @@ import path from 'node:path';
 import { describe, test } from 'node:test';
 import { REPO_ROOT } from '../server/config.js';
 import { isHttpsLink } from '../server/schema-common.js';
+import { checkState } from '../server/state-store.js';
 import {
   articlesFor, autoPhase, awardText, blank, createStateClient, dayKey, esc, fmtDate, fmtDay, freshBadges, level, mentorLine,
   markArticleRead, mergeFeedState, moon, normalizeState, readArticle, readsThisWeek, safeUrl, streak, sunTimes, themeScores, toggleArticleRead, wilaLine,
@@ -244,6 +245,22 @@ describe('state and progress', () => {
     assert.deepEqual(normalizeState({}).awarded, {});
     const S = normalizeState(JSON.parse('{"__proto__": {"xp": 999}}'));
     assert.equal(Object.getPrototypeOf(S), Object.prototype);
+  });
+
+  test('normalizeState mends what the server would refuse in its permanent keys, so saving never gets stuck', () => {
+    const now = Date.parse('2026-11-27T15:00:00Z');
+    const S = normalizeState({
+      read: { a1: 1 },
+      awarded: { a1: 'yesterday', a2: 5, ['x'.repeat(201)]: 1 },
+      badges: { curator: true, 'first-read': 7 },
+      days: ['2026-11-26', 'monday', '2026-02-30', '2026-12-25', '2026-11-28'],
+      xp: -4,
+    }, now);
+    assert.deepEqual(S.awarded, { a1: now, a2: 5 });
+    assert.deepEqual(S.badges, { curator: now, 'first-read': 7 });
+    assert.deepEqual(S.days, ['2026-11-26', '2026-11-28']);
+    assert.equal(S.xp, 0);
+    assert.equal(checkState(S, 'product-feed', { now: () => now }).ok, true, 'the server accepts it');
   });
 
   test('toggleArticleRead pays once per article, ever', () => {
@@ -742,12 +759,14 @@ describe('createStateClient', () => {
       A.S.xp += 10;
       A.client.save();
       await A.client.flush();
-      assert.deepEqual(srv.puts[0]._sync, { xp: 15 });
+      assert.equal(srv.puts[0]._sync.xp, 15);
+      assert.equal(srv.puts[0]._sync.sent, 25);
+      assert.match(srv.puts[0]._sync.tab, /^[A-Za-z0-9_-]{1,64}$/);
       assert.equal(srv.puts[0].xp, 25);
       A.S.notes.push({ id: 'n1' });
       A.client.save();
       await A.client.flush();
-      assert.deepEqual(srv.puts[1]._sync, { xp: 25 }, 'the next save counts from what the server has added');
+      assert.equal(srv.puts[1]._sync.xp, 25, 'the next save counts from what the server has added');
     });
 
     test('a failed PUT keeps the base, so the retry carries the whole change', async (t) => {
@@ -763,7 +782,7 @@ describe('createStateClient', () => {
       fail = false;
       t.mock.timers.tick(15_000);
       await settle();
-      assert.deepEqual(srv.puts.at(-1)._sync, { xp: 0 });
+      assert.equal(srv.puts.at(-1)._sync.xp, 0);
     });
 
     test('without counters, the body is the state as it is (News)', async () => {
@@ -792,7 +811,7 @@ describe('createStateClient', () => {
       await flushing;
     });
 
-    test('leaving the page while a PUT is on its way counts from what that PUT carries', async () => {
+    test('leaving the page while a PUT is on its way counts from the last confirmed value (the server stops a double count)', async () => {
       const srv = memoryServer({ xp: 0 });
       let release;
       const fetchFn = (url, opts = {}) => (opts.method === 'PUT' && !opts.keepalive ? new Promise((r) => (release = () => r(srv.fetchFn(url, opts)))) : srv.fetchFn(url, opts));
@@ -805,9 +824,28 @@ describe('createStateClient', () => {
       A.client.save();
       assert.equal(A.client.flushOnExit(), true);
       await settle();
-      assert.deepEqual(srv.puts.at(-1)._sync, { xp: 10 }, 'the first PUT will add 10, this one the next 10');
+      const exit = srv.puts.at(-1)._sync;
+      assert.equal(exit.xp, 0, 'counts from the last confirmed value');
+      assert.equal(exit.sent, 20);
       release();
       await flushing;
+      const first = srv.puts.at(-1)._sync;
+      assert.deepEqual([first.xp, first.sent], [0, 10]);
+      assert.equal(exit.tab, first.tab, 'one page load, one tab id: the server sees both as the same tab');
+    });
+
+    test('each page load has its own tab id', async () => {
+      const tabs = [];
+      for (let i = 0; i < 20; i++) {
+        const srv = memoryServer({ xp: 0 });
+        const T = tab(srv);
+        T.S = (await T.client.load()).state;
+        T.client.save();
+        await T.client.flush();
+        tabs.push(srv.puts[0]._sync.tab);
+      }
+      assert.equal(new Set(tabs).size, 20);
+      assert.ok(tabs.every((t) => /^[A-Za-z0-9_-]{1,64}$/.test(t)));
     });
 
     test('peek reads the server copy without changing what will be saved', async () => {
@@ -820,7 +858,7 @@ describe('createStateClient', () => {
       assert.equal(A.S.xp, 5);
       A.client.save();
       await A.client.flush();
-      assert.deepEqual(srv.puts[0]._sync, { xp: 5 }, 'peek did not move the base');
+      assert.equal(srv.puts[0]._sync.xp, 5, 'peek did not move the base');
     });
 
     test('reload applies the fresh copy (and its XP as the base) only when nothing is waiting, before and after the GET', async () => {
@@ -838,7 +876,7 @@ describe('createStateClient', () => {
       assert.equal(A.S.xp, 40);
       A.client.save();
       await A.client.flush();
-      assert.deepEqual(srv.puts.at(-1)._sync, { xp: 40 });
+      assert.equal(srv.puts.at(-1)._sync.xp, 40);
       // The refresh race: a change made while the GET is out wins over the fresh copy.
       hold = true;
       srv.value = { ...srv.value, xp: 99 };

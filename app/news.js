@@ -238,6 +238,8 @@ export function createNewsPage({ award, toast, isReady, canAward, reloadXpState 
     load,
     refresh,
     sync,
+    /** Sends what is waiting now (the tab is being left). */
+    flush: () => store.flush(),
     render,
     /** For the TV in the room (N5): { unread, total, breaking, sample } from the edition, breaking story and News state. */
     signals: () => tvSignals(news, breaking, N),

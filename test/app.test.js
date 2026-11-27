@@ -309,9 +309,16 @@ describe('app/app.js', () => {
     assert.match(read('app.js'), /async function reloadState\(\) \{\s*if \(!ready\) return false;\s*const before = JSON\.stringify\(S\);\s*await store\.reload\(\(fresh\) => \{ S = fresh; \}\);/);
   });
 
+  test('leaving a tab sends what is waiting at once (hidden or blur), so the tab switched to reads it', () => {
+    const js = read('app.js');
+    assert.match(js, /function sendNow\(\) \{ if \(!ready\) return; store\.flush\(\); news\.flush\(\); \}/);
+    assert.match(js, /document\.addEventListener\('visibilitychange', \(\) => \{ if \(document\.visibilityState === 'visible'\) syncTab\(\); else sendNow\(\); \}\);/);
+    assert.match(js, /window\.addEventListener\('blur', sendNow\);/);
+    assert.match(read('news.js'), /flush: \(\) => store\.flush\(\),/);
+  });
+
   test('a tab catches up before it can act: on becoming visible, on focus, and when the feed opens', () => {
     const js = read('app.js');
-    assert.match(js, /document\.addEventListener\('visibilitychange', \(\) => \{ if \(document\.visibilityState === 'visible'\) syncTab\(\); \}\);/);
     assert.match(js, /window\.addEventListener\('focus', syncTab\);/);
     assert.match(js, /const \[feedChanged\] = await Promise\.all\(\[busy \? false : reloadState\(\), news\.sync\(\)\]\);/);
     assert.match(js, /if \(ready\) \{ renderFeed\(\); reloadState\(\)\.then\(changed => \{ if \(changed && !\$\('#feed'\)\.hidden\) keepFocus\(renderFeed\); \}\); \}/);

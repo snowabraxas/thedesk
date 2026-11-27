@@ -871,7 +871,7 @@ describe('the state store', () => {
   test('checkState names the field that is wrong', () => {
     assert.deepEqual(checkState({}), { ok: true });
     assert.deepEqual(checkState(STATE), { ok: true });
-    assert.deepEqual(checkState({ xp: '1' }), { ok: false, error: 'xp must be a number' });
+    assert.deepEqual(checkState({ xp: '1' }), { ok: false, error: `xp must be a number from 0 to ${Number.MAX_SAFE_INTEGER}` });
     assert.deepEqual(checkState({ folders: {} }), { ok: false, error: 'folders must be a list' });
     assert.deepEqual(checkState({ awarded: { a1: 1764250000000 } }), { ok: true });
     assert.deepEqual(checkState({ awarded: [] }), { ok: false, error: 'awarded must be an object' });

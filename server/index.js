@@ -182,7 +182,7 @@ export function createServer({
   now = Date.now,
 } = {}) {
   const root = path.resolve(appDir);
-  const storeOptions = fsp ? { fsp } : {};
+  const storeOptions = fsp ? { fsp, now } : { now };
   // Each desk's saved state, by route. Both follow the same rules (state-store.js).
   const stateRoutes = new Map([
     ['/api/state', createStateStore(deskHome, 'product-feed', storeOptions)],
@@ -194,7 +194,7 @@ export function createServer({
 
   async function getState(res, state) {
     try {
-      return sendJson(res, 200, await state.read());
+      return sendJson(res, 200, await state.readForPage());
     } catch (err) {
       // Leave the file alone so it can be recovered. The app sees the 500 and doesn't save over it.
       const why = err instanceof CorruptStateError ? err.message : `can't read ${state.filePath} (${err.code || err.message})`;
@@ -296,6 +296,8 @@ export function createServer({
   });
 
   server.desk = { deskHome, appDir: root };
+  /** Resolves once every state save queued so far has finished (start()'s stop waits for it). */
+  server.settled = () => Promise.all([...stateRoutes.values()].map((store) => store.settled())).then(() => {});
   return server;
 }
 
@@ -380,11 +382,14 @@ export function start(env = process.env, { logger = createLogger(), codeDir = RE
     for (const line of startedLines({ port, deskHome, deployed: readDeployed(codeDir) })) logger.info(line);
   });
 
+  // Stopping: close the server, let the saves already queued finish (so state.json is whole and
+  // up to date), then exit; never longer than 2 s.
   const stop = (signal) => {
     logger.info(`The Desk is stopping (${signal})`);
-    server.close(() => process.exit(0));
+    const exit = () => process.exit(0);
+    server.close(() => server.settled().then(exit, exit));
     server.closeAllConnections?.();
-    setTimeout(() => process.exit(0), 2000).unref();
+    setTimeout(exit, 2000).unref();
   };
   process.once('SIGINT', stop); // a signal listener is called with the signal's name
   process.once('SIGTERM', stop);
