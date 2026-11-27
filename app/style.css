@@ -108,8 +108,8 @@ svg.ic{width:22px;height:22px;flex:none;fill:none;stroke:currentColor;stroke-wid
 /* The News desk's one motion: the TV warms up. When the desk opens, a soft rosy glow opens behind the
    glass like an old screen (a line, then the full picture) and settles, in 0.9 s. It is invisible at
    rest, so with reduced motion (no animation) it simply never shows. */
-.backdrop[data-view=news]::after{content:"";position:absolute;inset:0;opacity:0;pointer-events:none;background:radial-gradient(ellipse 58% 44% at 54% 42%,rgba(var(--tv-glow),.5),rgba(var(--tv-glow),.16) 50%,rgba(var(--tv-glow),0) 74%);transform-origin:54% 42%;animation:tvwarm .9s cubic-bezier(.25,.7,.3,1) both}
-@keyframes tvwarm{0%{opacity:0;transform:scale(.92,.04)}30%{opacity:1;transform:scale(1,.4)}100%{opacity:0;transform:scale(1.08,1.04)}}
+.backdrop[data-view=news]::after{content:"";position:absolute;inset:0;opacity:0;pointer-events:none;background:radial-gradient(ellipse 90% 78% at 54% 42%,rgba(var(--tv-glow),.36),rgba(var(--tv-glow),.16) 45%,rgba(var(--tv-glow),0) 80%);transform-origin:54% 42%;animation:tvwarm .9s cubic-bezier(.25,.7,.3,1) both}
+@keyframes tvwarm{0%{opacity:0;transform:scale(1,.02)}12%{opacity:1;transform:scale(1,.08)}40%{opacity:1;transform:scale(1,1)}100%{opacity:0;transform:scale(1.04,1.04)}}
 .veil{position:absolute;inset:0;background:linear-gradient(180deg,rgba(10,51,35,.28),rgba(10,51,35,0) 55%),var(--room-veil)}
 .backdrop[data-view=feed][data-phase=morning] .veil,.backdrop[data-view=feed][data-phase=golden] .veil,.backdrop[data-view=news][data-phase=morning] .veil,.backdrop[data-view=news][data-phase=golden] .veil{background:linear-gradient(180deg,rgba(10,51,35,.28),rgba(10,51,35,0) 55%),linear-gradient(var(--veil-boost),var(--veil-boost)),var(--room-veil)}
 .view{position:relative;z-index:1}
@@ -401,7 +401,10 @@ svg.ic{width:22px;height:22px;flex:none;fill:none;stroke:currentColor;stroke-wid
 /* the columns: the edition, and the glance tiles beside it */
 .ncols{display:grid;grid-template-columns:minmax(0,1fr) 320px;gap:20px;align-items:start}
 .nmain,.ntop,.nstories,.nside{display:flex;flex-direction:column;gap:16px}
-.nh2{margin:0 0 0 8px;font:600 20px/1.2 var(--font-display);color:var(--beige);text-shadow:0 1px 10px rgba(6,30,24,.6)}
+/* "Today's top 3" sits straight on the room. A feathered shade behind it (no edge, so it reads as
+   shadow, not a panel) keeps it over 4.5:1 on the brightest plate, even at the warm-up's peak. */
+.nh2{position:relative;isolation:isolate;width:fit-content;margin:0 0 0 8px;font:600 20px/1.2 var(--font-display);color:var(--beige);text-shadow:0 1px 10px rgba(6,30,24,.6)}
+.nh2::before{content:"";position:absolute;inset:-14px -44px;z-index:-1;pointer-events:none;background:radial-gradient(closest-side,rgba(10,51,35,.42),rgba(10,51,35,.34) 62%,rgba(10,51,35,0))}
 .nh2:focus{outline:none}
 #news .nh2:focus-visible{outline:3px solid var(--beige);outline-offset:4px;border-radius:6px}
 
@@ -442,6 +445,7 @@ svg.ic{width:22px;height:22px;flex:none;fill:none;stroke:currentColor;stroke-wid
 .nstory.read,.nitem.read{background:var(--frost-quiet);box-shadow:inset 0 1px 0 rgba(255,255,255,.5),0 8px 22px rgba(6,30,24,.16)}
 .nstory.read h3{color:var(--ink-muted)}
 .nstory.read .nwhy,.nitem.read .nwhy{background:rgba(131,153,88,.16)}
+.nstory.read .nskeptic,.nitem.read .nskeptic{background:rgba(211,150,140,.18)}
 
 /* the "More stories" shelf (glass), with compact frost items that open to the full story */
 .nshelf{border-radius:var(--radius-lg);padding:6px 8px}
@@ -539,7 +543,7 @@ svg.ic{width:22px;height:22px;flex:none;fill:none;stroke:currentColor;stroke-wid
   .nbhead{order:1;flex-basis:100%;padding:0 6px;font-size:14px}
   .nbreaking a,.nbsrc,.nbx{margin-left:auto}
   .nbreaking :is(a,.nbsrc) + .nbx{margin-left:0}
-  .nside{display:flex}
+  .nside{display:flex;align-items:stretch}
   .nboxes{grid-template-columns:minmax(0,1fr)}
   .nstory{padding:18px 18px 16px;gap:12px}
   .nstory h3{font-size:19px}

@@ -154,6 +154,30 @@ describe('app/style.css', () => {
     assert.match(stripCssComments(css), /@media \(prefers-reduced-motion:reduce\)\{\*,\*::before,\*::after\{animation:none!important;transition:none!important/);
   });
 
+  test("the News desk's one opening motion, the TV warm-up, is under a second and invisible at rest", () => {
+    const css = read('style.css');
+    const glow = rulesFor(css, '.backdrop[data-view=news]::after').join(';');
+    const [, name, seconds] = glow.match(/animation\s*:\s*(\w+)\s+([\d.]+)s/) || [];
+    assert.equal(name, 'tvwarm');
+    assert.ok(Number(seconds) > 0 && Number(seconds) < 1, `the warm-up takes ${seconds}s`);
+    assert.doesNotMatch(glow, /infinite/, 'it plays once per opening');
+    assert.match(glow, /(^|;)\s*opacity\s*:\s*0\s*(;|$)/, 'without animation (reduced motion) the glow never shows');
+    assert.match(glow, /pointer-events\s*:\s*none/);
+    const frames = stripCssComments(css).match(/@keyframes tvwarm\{(.*?)\}\}/)[1];
+    assert.match(frames, /100%\{opacity:0/, 'it ends invisible');
+    assert.equal(rulesFor(css, '.news').some((b) => /animation/.test(b)), false, 'the News page has no second opening motion');
+  });
+
+  test('News focus rings are outline only (a box-shadow ring paints a bar across wrapped lines)', () => {
+    const css = read('style.css');
+    const ring = rulesFor(css, '#news :focus-visible').join(';');
+    assert.match(ring, /outline\s*:\s*3px solid/);
+    assert.match(ring, /outline-offset\s*:\s*\dpx/);
+    assert.match(ring, /box-shadow\s*:\s*none/);
+    assert.match(rulesFor(css, '#news .frost :focus-visible').join(';'), /outline-color\s*:\s*var\(--midnight-green\)/, 'dark ring on frost');
+    for (const s of selectorsWith(css, /box-shadow/)) assert.ok(!(s.startsWith('#news') && s.includes(':focus')) || s === '#news :focus-visible', `${s} sets a box-shadow ring`);
+  });
+
   test('opening the page shows the study straight away: the backdrop only fades once it has settled', () => {
     const css = read('style.css');
     assert.equal(rulesFor(css, '.bd').some((b) => /transition/.test(b)), false, '.bd has no transition of its own');
@@ -181,7 +205,7 @@ describe('app/style.css', () => {
   test('buttons are at least 44px tall', () => {
     const css = read('style.css');
     const px = (body, prop) => { const m = body.match(new RegExp(`(?:^|;)\\s*${prop}\\s*:\\s*(\\d+)px`)); return m ? Number(m[1]) : 0; };
-    for (const s of ['.act', '.ab', '.addbtn', '.rb', '.shelf>button.s', '.shelf .mini', '.shelf.confirm button', '.x', '.toast button', '.notes li button', '.chip', '.notecard .on button', '.nbx', '#newsMoreBtn', '.nitembtn']) {
+    for (const s of ['.act', '.ab', '.addbtn', '.rb', '.shelf>button.s', '.shelf .mini', '.shelf.confirm button', '.x', '.toast button', '.notes li button', '.chip', '.notecard .on button', '.nbx', '#newsMoreBtn', '.nitembtn', '.nsrcs a', '.nbreaking a']) {
       const bodies = rulesFor(css, s);
       assert.ok(bodies.length, `${s} has a rule`);
       const tallest = Math.max(...bodies.map((b) => Math.max(px(b, 'min-height'), px(b, 'height'))));
@@ -203,6 +227,8 @@ describe('app/index.html', () => {
     assert.match(html, /<button type="button" id="newsMoreBtn" aria-expanded="false" aria-controls="newsMoreList">/);
     assert.match(html, /<ul class="nmore" id="newsMoreList" hidden><\/ul>/);
     assert.match(html, /<h2 id="newsLensesTitle">Lenses arrive in Phase 2<\/h2>/);
+    // Lenses on the rail is a promise, not a control: an image with a name, never a link or button.
+    assert.match(html, /<span class="rb soon" role="img" aria-label="Lenses, coming in Phase 2"/);
   });
 
   test('the News page has one h1, then h2 for each section (h3 is for headlines, drawn from the edition)', () => {

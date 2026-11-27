@@ -333,9 +333,11 @@ async function run() {
         const step = `news reading @${vp.width}`;
         const { page, w } = await openDeskPage(context, { hash: '#news', ready: NEWS_READY, fonts: NEWS_FONTS, phase: 'morning', step });
         try {
-          await page.locator('#newsStories [data-read="t0"]').click();
+          // Only what isn't so already: on a Desk where story 1 is read or the shelf was left open, a click would undo it.
+          if ((await page.locator('#newsStories [data-read="t0"]').getAttribute('aria-pressed')) !== 'true') await page.locator('#newsStories [data-read="t0"]').click();
           await page.locator('#newsStories [data-read="t0"][aria-pressed="true"]').waitFor();
-          await page.locator('#newsMoreBtn').click();
+          if ((await page.locator('#newsMoreBtn').getAttribute('aria-expanded')) !== 'true') await page.locator('#newsMoreBtn').click();
+          await page.locator('#newsMoreBtn[aria-expanded="true"]').waitFor();
           await page.locator('#newsMoreList [data-item="m0"]').click();
           await page.locator('#newsMoreList [data-item="m0"][aria-expanded="true"]').waitFor();
           // The XP toast fades after a few seconds; the shots show the page under it.
