@@ -10,7 +10,9 @@ import { after, describe, test } from 'node:test';
 import { REPO_ROOT } from '../server/config.js';
 import { deployedPath, deployedRecord } from '../server/deployed.js';
 import {
+  GIT,
   HOMEBREW_NODE,
+  missingPackages,
   runCommand,
   LAUNCHCTL,
   LSOF,
@@ -70,9 +72,10 @@ const RECORD = deployedRecord({ sha: SHA, subject: 'N1: live copy', deployedAt: 
 /**
  * A fake Mac: launchd's state for our label, who holds the port, whether The Desk answers, a clock.
  * onStart(state, world) runs when launchd would start the server (bootstrap or kickstart).
- * The live copy is <home>/the-desk-live, fully deployed: server/index.js, node_modules/ and a
- * .deployed.json (liveCopy: false leaves it all out; inDocuments: true puts it in ~/Documents
- * instead, where macOS privacy applies).
+ * The live copy is <home>/the-desk-live, fully deployed: server/index.js, a package.json naming ajv,
+ * node_modules/ajv/package.json, and a .deployed.json for the commit git says it holds
+ * (state.liveHead). liveCopy: false leaves it all out; inDocuments: true puts it in ~/Documents
+ * instead, where macOS privacy applies.
  */
 function fakeMac({ loaded = false, pid = null, portHolder = null, deskUp = false, disabled = false, platform = 'darwin', lint = 0, bootstrapCode = 0, onStart, liveCopy = true, inDocuments = false } = {}) {
   const home = tempDir();
@@ -82,9 +85,11 @@ function fakeMac({ loaded = false, pid = null, portHolder = null, deskUp = false
     fs.mkdirSync(path.join(runDir, 'server'), { recursive: true });
     fs.mkdirSync(path.join(runDir, 'node_modules', 'ajv'), { recursive: true });
     fs.writeFileSync(cfg.serverPath, '// stand-in\n');
+    fs.writeFileSync(path.join(runDir, 'package.json'), JSON.stringify({ name: 'the-desk', dependencies: { ajv: '^8.20.0' }, devDependencies: { 'playwright-core': '^1' } }));
+    fs.writeFileSync(path.join(runDir, 'node_modules', 'ajv', 'package.json'), '{ "name": "ajv" }');
     fs.writeFileSync(deployedPath(runDir), JSON.stringify(RECORD));
   }
-  const state = { loaded, pid, portHolder, deskUp, disabled, runs: loaded ? 1 : 0, lastExit: '(never exited)', clock: 0, nextPid: 4242 };
+  const state = { loaded, pid, portHolder, deskUp, disabled, runs: loaded ? 1 : 0, lastExit: '(never exited)', clock: 0, nextPid: 4242, liveHead: SHA };
   const calls = [];
   const out = [];
   const err = [];
@@ -111,6 +116,10 @@ function fakeMac({ loaded = false, pid = null, portHolder = null, deskUp = false
   const deps = {
     async run(cmd, args) {
       calls.push([cmd, ...args].join(' '));
+      if (cmd === GIT) {
+        assert.deepEqual(args, ['-C', cfg.runDir, 'rev-parse', 'HEAD'], 'the only git the service runs');
+        return state.liveHead ? ok(`${state.liveHead}\n`) : { code: 128, stdout: '', stderr: 'fatal: not a git repository\n' };
+      }
       if (cmd === PLUTIL) return lint === 0 ? ok(`${args[1]}: OK\n`) : { code: 1, stdout: `${args[1]}: Encountered unexpected element\n`, stderr: '' };
       if (cmd === LSOF) return state.portHolder ? ok(`${state.portHolder}\n`) : { code: 1, stdout: '', stderr: '' };
       assert.equal(cmd, LAUNCHCTL);
@@ -342,7 +351,7 @@ describe('service:install', () => {
     fs.writeFileSync(deployedPath(mac.cfg.runDir), JSON.stringify(deployedRecord({ sha: SHA, subject: 'N1: live copy', deployedAt: '2026-11-28T09:14:03-05:00' })));
     const before = tree(mac.home);
     assert.equal(await mac.run('install', '--dry-run'), 0);
-    assert.deepEqual(mac.calls, [], 'no command was run');
+    assert.deepEqual(mac.calls, [`git -C ${mac.cfg.runDir} rev-parse HEAD`], 'only a read-only look at which commit the live copy holds');
     assert.deepEqual(tree(mac.home), before, 'no file or folder was written');
     const text = mac.text();
     assert.ok(text.startsWith('Dry run: nothing is changed.'));
@@ -372,18 +381,36 @@ describe('service:install', () => {
     assert.deepEqual(tree(mac.home), []);
   });
 
+  /** Install must refuse a half-deployed live copy before it touches launchd at all. */
+  async function refusesHalfDeployed(mac, problem) {
+    const before = tree(mac.home);
+    assert.equal(await mac.run('install'), 1);
+    const errors = mac.errors();
+    assert.ok(errors.startsWith(`The live copy isn't fully deployed yet (${mac.cfg.runDir}: ${problem}), so nothing was changed.\n`), errors);
+    assert.match(errors, /Run npm run deploy until it finishes \(it repairs this\), then run npm run service:install again\./);
+    assert.deepEqual(mac.launchctl(), [], 'no launchctl at all: the running service is left alone');
+    assert.deepEqual(tree(mac.home), before);
+  }
+
   test('refuses, changing nothing, when the live copy has no packages yet (a deploy stopped at npm ci)', async () => {
     const mac = fakeMac({ loaded: true, pid: 4100, portHolder: 4100, deskUp: true });
     fs.rmSync(path.join(mac.cfg.runDir, 'node_modules'), { recursive: true });
-    const before = tree(mac.home);
-    assert.equal(await mac.run('install'), 1);
-    assert.match(
-      mac.errors(),
-      new RegExp(`The live copy isn't fully deployed yet \\(${mac.cfg.runDir} has no node_modules\\), so nothing was changed\\.\\nRun npm run deploy until it gets past installing packages, then run npm run service:install again\\.`),
-    );
-    assert.deepEqual(mac.calls, [], 'no launchctl at all: the running service is left alone');
-    assert.deepEqual(tree(mac.home), before);
+    await refusesHalfDeployed(mac, 'no node_modules');
     assert.equal(mac.state.pid, 4100);
+  });
+
+  test('refuses an empty or incomplete node_modules: every package in package.json must be there', async () => {
+    const empty = fakeMac();
+    fs.rmSync(path.join(empty.cfg.runDir, 'node_modules', 'ajv'), { recursive: true });
+    await refusesHalfDeployed(empty, 'node_modules is incomplete (no ajv)');
+
+    const half = fakeMac();
+    fs.rmSync(path.join(half.cfg.runDir, 'node_modules', 'ajv', 'package.json'));
+    await refusesHalfDeployed(half, 'node_modules is incomplete (no ajv)');
+
+    const noManifest = fakeMac();
+    fs.rmSync(path.join(noManifest.cfg.runDir, 'package.json'));
+    await refusesHalfDeployed(noManifest, 'no readable package.json');
   });
 
   test('refuses, changing nothing, when the live copy has no readable .deployed.json', async () => {
@@ -391,11 +418,36 @@ describe('service:install', () => {
       const mac = fakeMac();
       if (broken === null) fs.rmSync(deployedPath(mac.cfg.runDir));
       else fs.writeFileSync(deployedPath(mac.cfg.runDir), broken);
-      assert.equal(await mac.run('install'), 1, String(broken));
-      assert.match(mac.errors(), /isn't fully deployed yet \(.* has no readable \.deployed\.json\), so nothing was changed/);
-      assert.deepEqual(mac.calls, []);
+      await refusesHalfDeployed(mac, 'no readable .deployed.json');
       assert.equal(fs.existsSync(mac.cfg.plistPath), false);
     }
+  });
+
+  test('refuses a stale .deployed.json: the live copy holds another commit than the last finished deploy', async () => {
+    const mac = fakeMac({ loaded: true, pid: 4100, portHolder: 4100, deskUp: true });
+    mac.state.liveHead = 'beef00000000000000000000000000000000beef';
+    await refusesHalfDeployed(mac, 'it holds beef000, but the last deploy that finished was main @ c0ffee0 "N1: live copy"');
+    assert.equal(mac.state.pid, 4100);
+  });
+
+  test("refuses when git can't say which commit the live copy holds", async () => {
+    const mac = fakeMac();
+    mac.state.liveHead = null;
+    await refusesHalfDeployed(mac, "git can't read which commit it holds");
+  });
+
+  test('missingPackages lists dependencies (not devDependencies) with no package.json in node_modules', () => {
+    const dir = tempDir();
+    fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ dependencies: { ajv: '1', '@scope/x': '1' }, devDependencies: { dev: '1' } }));
+    assert.deepEqual(missingPackages(dir), ['ajv', '@scope/x']);
+    fs.mkdirSync(path.join(dir, 'node_modules', '@scope', 'x'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'node_modules', '@scope', 'x', 'package.json'), '{}');
+    assert.deepEqual(missingPackages(dir), ['ajv']);
+    assert.deepEqual(missingPackages(dir, fs, path.join(dir, 'elsewhere')), ['ajv', '@scope/x']);
+    fs.writeFileSync(path.join(dir, 'package.json'), '{}');
+    assert.deepEqual(missingPackages(dir), []);
+    fs.writeFileSync(path.join(dir, 'package.json'), 'nope');
+    assert.equal(missingPackages(dir), null);
   });
 
   test('--dry-run says when the live copy is not fully deployed', async () => {
@@ -403,8 +455,8 @@ describe('service:install', () => {
     fs.rmSync(path.join(mac.cfg.runDir, 'node_modules'), { recursive: true });
     fs.rmSync(deployedPath(mac.cfg.runDir));
     assert.equal(await mac.run('install', '--dry-run'), 0);
-    assert.ok(mac.text().includes(`from the live copy: ${mac.cfg.runDir} (not fully deployed: no node_modules and no readable .deployed.json; run npm run deploy)`));
-    assert.match(mac.text(), /1\. Check that the live copy has server\/index\.js, node_modules and \.deployed\.json/);
+    assert.ok(mac.text().includes(`from the live copy: ${mac.cfg.runDir} (not fully deployed: no node_modules; no readable .deployed.json; run npm run deploy)`), mac.text());
+    assert.match(mac.text(), /1\. Check that the live copy is fully deployed: server\/index\.js, every package in its package\.json, and a \.deployed\.json for the commit it holds\./);
   });
 
   test('moves a service that ran from the work folder over to the live copy', async () => {
@@ -425,7 +477,7 @@ describe('service:install', () => {
   test('a --dry-run that npm swallowed is still a dry run', async () => {
     const mac = fakeMac();
     assert.equal(await main(['install'], { env: { npm_config_dry_run: 'true' }, deps: mac.deps, cfg: mac.cfg }), 0);
-    assert.deepEqual(mac.calls, []);
+    assert.deepEqual(mac.launchctl(), []);
     assert.equal(fs.existsSync(mac.cfg.plistPath), false);
     assert.match(mac.text(), /^Dry run/);
   });
@@ -743,6 +795,19 @@ describe('runCommand (the real runner deploy and the service use)', () => {
     assert.ok(Date.now() - started < 10_000, `stopped early (${Date.now() - started} ms)`);
     assert.notEqual(r.code, 0);
     assert.match(r.stderr, /stopped after 300 ms: it took too long/);
+  });
+
+  test('the time limit is hard: a command that ignores SIGTERM gets SIGKILL after the grace period', async () => {
+    const script = "process.on('SIGTERM', () => {}); console.log(process.pid); setInterval(() => {}, 1000);";
+    const started = Date.now();
+    const r = await runCommand(process.execPath, ['-e', script], { timeoutMs: 800, graceMs: 300 });
+    const took = Date.now() - started;
+    assert.ok(took >= 1000 && took < 10_000, `waited for the grace period, then stopped (${took} ms)`);
+    assert.notEqual(r.code, 0);
+    assert.match(r.stderr, /stopped after 800 ms: it took too long/);
+    const pid = Number(r.stdout.trim());
+    assert.ok(pid > 0, r.stdout);
+    assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' }, 'the child is gone');
   });
 
   test('passes env when given one, and never rejects', async () => {

@@ -29,9 +29,23 @@ import { pathToFileURL } from 'node:url';
 import { HOST, REPO_ROOT, resolveLiveDir } from '../server/config.js';
 import { deployedPath, deployedRecord, describeDeployed, oneLine, readDeployed } from '../server/deployed.js';
 import { localTimestamp } from '../server/log-file.js';
-import { HEALTH_TIMEOUT_MS, LAUNCHCTL, launchctlArgs, readInstalledPlist, realDeps, resolveNodePath, restart, serviceConfig, shellQuote } from './service.js';
+import {
+  GIT,
+  GIT_LOCATION_VARS,
+  HEALTH_TIMEOUT_MS,
+  LAUNCHCTL,
+  gitEnv,
+  launchctlArgs,
+  missingPackages,
+  readInstalledPlist,
+  realDeps,
+  resolveNodePath,
+  restart,
+  serviceConfig,
+  shellQuote,
+} from './service.js';
 
-export const GIT = 'git';
+export { GIT, GIT_LOCATION_VARS, gitEnv };
 export const DEPLOY_REF = 'main';
 export const NPM_CI_TIMEOUT_MS = 10 * 60_000;
 const SHA = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
@@ -92,7 +106,6 @@ export function deployConfig({ env = process.env, home = os.homedir(), uid, repo
 const inside = (child, parent) => child === parent || child.startsWith(parent + path.sep);
 const commandLine = (cmd, args) => [cmd, ...args].map(shellQuote).join(' ');
 const short = (sha) => sha.slice(0, 7);
-const firstLine = (r) => oneLine((r.stderr || r.stdout || '').trim().split('\n')[0] || `exit ${r.code}`, 300);
 const lines = (text) => String(text).split('\n').filter(Boolean);
 // A line of git's or npm's own output, printed as is (git status keeps meaning in its leading spaces), minus control characters.
 const asIs = (line) => line.replace(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, '?').slice(0, 300);
@@ -112,29 +125,44 @@ function writeFileAtomic(fsImpl, file, text) {
   fsImpl.renameSync(tmp, file);
 }
 
-// Environment variables that tell git which repo, index or object store to use. A git hook,
-// `git rebase -x` or `git bisect run` exports them; left in, they would point deploy's
-// `git -C <folder>` commands at whatever repo started it instead of the folder named.
-export const GIT_LOCATION_VARS = [
-  'GIT_DIR',
-  'GIT_WORK_TREE',
-  'GIT_INDEX_FILE',
-  'GIT_COMMON_DIR',
-  'GIT_OBJECT_DIRECTORY',
-  'GIT_ALTERNATE_OBJECT_DIRECTORIES',
-  'GIT_CONFIG_PARAMETERS',
-  'GIT_CONFIG_COUNT',
-  'GIT_NAMESPACE',
-  'GIT_PREFIX',
-];
+const isComplete = (missing) => Array.isArray(missing) && missing.length === 0; // null: no readable package.json
 
-/** A copy of env without the variables that would redirect git (GIT_CONFIG_KEY_n / _VALUE_n too). */
-export function gitEnv(env = process.env) {
-  const clean = { ...env };
-  for (const name of Object.keys(clean)) {
-    if (GIT_LOCATION_VARS.includes(name) || /^GIT_CONFIG_(KEY|VALUE)_\d+$/.test(name)) delete clean[name];
+const lexists = (fsImpl, p) => {
+  try {
+    fsImpl.lstatSync(p); // a symlink counts, even a dangling one
+    return true;
+  } catch {
+    return false;
   }
-  return clean;
+};
+
+/** The line of git's output that says what went wrong: its fatal: or error: line, else its last line. */
+export function gitError(r) {
+  const all = lines(`${r.stderr || ''}\n${r.stdout || ''}`).map((l) => l.trim()).filter(Boolean);
+  const line = all.find((l) => /^(fatal|error):/.test(l)) || lines(r.stderr || '').at(-1) || lines(r.stdout || '').at(-1) || `exit ${r.code}`;
+  return oneLine(line, 300);
+}
+
+/**
+ * What npm says went wrong: its "npm error code" line, the first few lines after it (the cause, up to
+ * the usage text) and where its full log is. Falls back to the last 15 lines when npm said nothing
+ * in its usual form.
+ */
+export function npmErrorLines(text, max = 5) {
+  const all = lines(text);
+  const errors = all.filter((l) => /^npm (error|ERR!)/.test(l));
+  if (!errors.length) return all.slice(-15);
+  const message = (l) => l.replace(/^npm (error|ERR!)\s?/, '').trim();
+  const code = errors.find((l) => /^npm (error|ERR!) code /.test(l));
+  const shown = code ? [code] : [];
+  for (const l of errors) {
+    const m = message(l);
+    if (/^(Usage|Options):?$/.test(m) || shown.length >= max) break;
+    if (!m || l === code || /complete log of this run/i.test(m)) continue;
+    shown.push(l);
+  }
+  const log = errors.find((l) => /complete log of this run/i.test(l));
+  return log ? [...shown, log] : shown;
 }
 
 /** Where packages are installed before they go into the live copy: a folder beside it, never inside. */
@@ -196,12 +224,14 @@ export async function deploy(cfg, deps, { dryRun = false } = {}) {
     }
     leftover = true;
   }
+  const liveModules = path.join(live, 'node_modules');
+  const asideModules = path.join(staging, 'node_modules.old');
 
   // What is main, right now? Everything below uses this one commit, even if main moves meanwhile.
   const head = await git(['-C', repo, 'log', '-1', '--format=%H%n%s', `refs/heads/${ref}`, '--']);
   const [sha = '', subject = ''] = head.stdout.split('\n');
   if (head.code !== 0 || !SHA.test(sha)) {
-    return fail(`There's no ${ref} branch in ${repo} to deploy, so nothing was changed. (git: ${firstLine(head)})`);
+    return fail(`There's no ${ref} branch in ${repo} to deploy, so nothing was changed. (git: ${gitError(head)})`);
   }
   const target = { sha, shortSha: short(sha), subject: oneLine(subject), ref };
   if (dryRun) out('Dry run: nothing is changed.\n');
@@ -225,7 +255,7 @@ export async function deploy(cfg, deps, { dryRun = false } = {}) {
       return fail(`${live} is there, but it isn't a live copy of this repo (a git worktree of it), so nothing was changed.`, 'Move that folder out of the way, then run npm run deploy again.');
     }
     const dirty = await git(['-C', live, '--no-optional-locks', 'status', '--porcelain']);
-    if (dirty.code !== 0) return fail(`Couldn't check the live copy for changes, so nothing was changed. (git: ${firstLine(dirty)})`);
+    if (dirty.code !== 0) return fail(`Couldn't check the live copy for changes, so nothing was changed. (git: ${gitError(dirty)})`);
     if (dirty.stdout.trim()) {
       const changed = lines(dirty.stdout);
       return fail(
@@ -241,12 +271,27 @@ export async function deploy(cfg, deps, { dryRun = false } = {}) {
     oldSha = now.code === 0 && SHA.test(now.stdout.trim()) ? now.stdout.trim() : null;
   }
 
-  // Do the packages need installing? The base is the last deploy that went all the way through
-  // (.deployed.json): its packages are the ones in the live copy.
+  // A deploy cut off between its two renames leaves the live copy's packages in the staging folder
+  // as node_modules.old: put them back before the staging folder goes.
+  const restore = leftover && exists && !lexists(deps.fs, liveModules) && lexists(deps.fs, asideModules);
+  if (leftover && !dryRun) {
+    if (restore) {
+      out("Putting back the live copy's packages, which an interrupted deploy had moved aside…");
+      deps.fs.renameSync(asideModules, liveModules);
+    }
+    out('Removing a staging folder left by an interrupted deploy…');
+    removeStaging();
+  }
+
+  // Do the packages need installing? Every package the live copy's package.json names must be in its
+  // node_modules (the install guard checks the same). The base for the lockfile is the last deploy that
+  // went all the way through (.deployed.json): its packages are the ones in the live copy.
   const installed = exists ? readDeployed(live, { fsImpl: deps.fs }) : null;
+  const modulesDir = dryRun && restore ? asideModules : liveModules; // a dry run judges what it would put back
   let why = null;
   if (!exists) why = 'a new live copy';
-  else if (!deps.fs.existsSync(path.join(live, 'node_modules'))) why = 'node_modules is missing';
+  else if (!deps.fs.existsSync(modulesDir)) why = 'node_modules is missing';
+  else if (!isComplete(missingPackages(live, deps.fs, modulesDir))) why = 'node_modules is incomplete';
   else if (!installed) why = 'no earlier deploy is recorded';
   else if (installed.sha !== sha) {
     const d = await git(['-C', repo, 'diff', '--quiet', installed.sha, sha, '--', 'package-lock.json']);
@@ -261,6 +306,7 @@ export async function deploy(cfg, deps, { dryRun = false } = {}) {
   const moves = !exists || oldSha !== sha;
 
   if (dryRun) {
+    if (restore) say(`Put the live copy's packages back, which an interrupted deploy had moved aside: mv ${shellQuote(asideModules)} ${shellQuote(liveModules)}`);
     if (leftover) say(`Remove a staging folder left by an interrupted deploy: rm -rf ${shellQuote(staging)}`);
     if (why) {
       say(`Install the packages first, outside the live copy (${why}):`);
@@ -277,16 +323,11 @@ export async function deploy(cfg, deps, { dryRun = false } = {}) {
     if (moves) out(`   ${commandLine(GIT, moveArgs)}`);
     if (why) {
       say('Swap the new packages in, then remove the staging folder:');
-      if (exists && deps.fs.existsSync(path.join(live, 'node_modules'))) out(`   mv ${shellQuote(path.join(live, 'node_modules'))} ${shellQuote(path.join(staging, 'node_modules.old'))}`);
-      out(`   mv ${shellQuote(path.join(staging, 'node_modules'))} ${shellQuote(path.join(live, 'node_modules'))}`);
+      if (exists && (restore || lexists(deps.fs, liveModules))) out(`   mv ${shellQuote(liveModules)} ${shellQuote(asideModules)}`);
+      out(`   mv ${shellQuote(path.join(staging, 'node_modules'))} ${shellQuote(liveModules)}`);
       out(`   rm -rf ${shellQuote(staging)}`);
     }
   } else {
-    if (leftover) {
-      out('Removing a staging folder left by an interrupted deploy…');
-      removeStaging();
-    }
-
     // 1. Packages first, in a staging folder beside the live copy, from the new commit's own
     // package.json and package-lock.json. npm ci empties node_modules before it installs, so it
     // never runs inside the live copy: if it fails, the live copy hasn't changed at all.
@@ -297,17 +338,19 @@ export async function deploy(cfg, deps, { dryRun = false } = {}) {
         const r = await git(showArgs(file));
         if (r.code !== 0) {
           removeStaging();
-          return fail(`${ref} @ ${short(sha)} has no ${file} that git can read, so nothing was changed. (git: ${firstLine(r)})`);
+          return fail(`${ref} @ ${short(sha)} has no ${file} that git can read, so nothing was changed. (git: ${gitError(r)})`);
         }
         deps.fs.writeFileSync(path.join(staging, file), r.stdout);
       }
-      const r = await deps.run(cfg.npm, npmArgs, { cwd: staging, timeoutMs: NPM_CI_TIMEOUT_MS });
+      const r = await deps.run(cfg.npm, npmArgs, { cwd: staging, timeoutMs: NPM_CI_TIMEOUT_MS, env });
       if (r.code !== 0) {
         removeStaging();
-        const tail = lines(`${r.stdout}\n${r.stderr}`).slice(-15);
+        const shown = npmErrorLines(`${r.stdout}\n${r.stderr}`);
+        const timedOut = lines(r.stderr).find((l) => l.startsWith('(stopped after'));
+        if (timedOut && !shown.includes(timedOut)) shown.push(timedOut);
         return fail(
           "npm ci didn't work, so nothing was deployed: the live copy is untouched and The Desk keeps running what it had.",
-          ...tail.map((l) => `  ${asIs(l)}`),
+          ...shown.map((l) => `  ${asIs(l)}`),
           'Fix the problem, then run npm run deploy again.',
         );
       }
@@ -326,7 +369,7 @@ export async function deploy(cfg, deps, { dryRun = false } = {}) {
       if (r.code !== 0) {
         removeStaging();
         return fail(
-          `git couldn't ${exists ? `move the live copy to ${ref}` : 'make the live copy'}: ${firstLine(r)}`,
+          `git couldn't ${exists ? `move the live copy to ${ref}` : 'make the live copy'}: ${gitError(r)}`,
           ...(exists ? [] : ['If it says the folder is a missing but already registered worktree, run git worktree prune, then npm run deploy again.']),
           'The Desk was not restarted, so it keeps running what it had.',
         );
@@ -334,25 +377,49 @@ export async function deploy(cfg, deps, { dryRun = false } = {}) {
     }
 
     // 3. Swap the new packages in with renames (same disk, so each is instant), then tidy up.
+    // If the second rename fails, put everything back as it was: the old packages, the old commit.
     if (why) {
-      const liveModules = path.join(live, 'node_modules');
+      let movedAside = false;
       try {
-        if (deps.fs.existsSync(liveModules)) deps.fs.renameSync(liveModules, path.join(staging, 'node_modules.old'));
+        if (lexists(deps.fs, liveModules)) {
+          deps.fs.renameSync(liveModules, asideModules);
+          movedAside = true;
+        }
         deps.fs.renameSync(path.join(staging, 'node_modules'), liveModules);
       } catch (err) {
-        return fail(`Couldn't move the new packages into the live copy (${err.code || err.message}), so The Desk was not restarted.`, 'Run npm run deploy again: it installs them afresh.');
+        let restored = exists;
+        if (movedAside && !lexists(deps.fs, liveModules)) {
+          try {
+            deps.fs.renameSync(asideModules, liveModules);
+          } catch {
+            restored = false;
+          }
+        }
+        if (exists && moves && oldSha) {
+          const back = await git(['-C', live, 'checkout', '--quiet', '--detach', oldSha]);
+          if (back.code !== 0) restored = false;
+        }
+        if (restored) removeStaging(); // otherwise the old packages wait there for the next run
+        return fail(
+          `Couldn't move the new packages into the live copy (${err.code || err.message}), so The Desk was not restarted.`,
+          restored ? `The live copy is back on ${oldSha ? short(oldSha) : 'its commit'} with its old packages.` : 'Run npm run deploy again: it repairs the live copy.',
+        );
       }
       removeStaging();
     }
   }
 
   // 4. Remember what's deployed. Written last, so it only ever names a commit whose packages are in.
-  const record = deployedRecord({ sha, subject, ref, deployedAt: localTimestamp(new Date(deps.now())) });
+  // A deploy that changed nothing keeps the record (and its time) as it was.
+  const unchanged = !why && !moves && installed !== null && installed.sha === sha;
+  const record = unchanged ? installed : deployedRecord({ sha, subject, ref, deployedAt: localTimestamp(new Date(deps.now())) });
   const recordText = `${JSON.stringify(record, null, 2)}\n`;
-  if (dryRun) {
+  if (dryRun && unchanged) {
+    say(`${cfg.deployedFile} already names this commit (deployed ${record.deployedAt}), so it stays as it is.`);
+  } else if (dryRun) {
     say(`Write ${cfg.deployedFile}:`);
     out(recordText.replace(/^/gm, '   ').trimEnd());
-  } else {
+  } else if (!unchanged) {
     writeFileAtomic(deps.fs, cfg.deployedFile, recordText);
   }
 

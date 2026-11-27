@@ -16,7 +16,7 @@
 // macOS privacy: the live copy sits outside ~/Documents, so macOS has nothing to ask. If DESK_LIVE_DIR
 // ever puts it in a protected folder, a node started by launchd may be refused ("Operation not
 // permitted") until node is allowed in System Settings; the health check spots that and prints the steps.
-import { execFile } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
@@ -35,6 +35,34 @@ export const LSOF = '/usr/sbin/lsof';
 export const THROTTLE_SECONDS = 10;
 export const HEALTH_TIMEOUT_MS = 15_000;
 export const SERVICE_PATH = '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin';
+export const GIT = 'git';
+export const KILL_GRACE_MS = 10_000;
+const MAX_OUTPUT = 16 * 1024 * 1024;
+
+// Environment variables that tell git which repo, index or object store to use. A git hook,
+// `git rebase -x` or `git bisect run` exports them; left in, they would point `git -C <folder>`
+// at whatever repo started us instead of the folder named.
+export const GIT_LOCATION_VARS = [
+  'GIT_DIR',
+  'GIT_WORK_TREE',
+  'GIT_INDEX_FILE',
+  'GIT_COMMON_DIR',
+  'GIT_OBJECT_DIRECTORY',
+  'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+  'GIT_CONFIG_PARAMETERS',
+  'GIT_CONFIG_COUNT',
+  'GIT_NAMESPACE',
+  'GIT_PREFIX',
+];
+
+/** A copy of env without the variables that would redirect git (GIT_CONFIG_KEY_n / _VALUE_n too). */
+export function gitEnv(env = process.env) {
+  const clean = { ...env };
+  for (const name of Object.keys(clean)) {
+    if (GIT_LOCATION_VARS.includes(name) || /^GIT_CONFIG_(KEY|VALUE)_\d+$/.test(name)) delete clean[name];
+  }
+  return clean;
+}
 
 const USAGE = `Usage: npm run service:<command>
 
@@ -235,18 +263,52 @@ export function isDisabled(printDisabledText, label) {
 
 /**
  * Runs a command; resolves { code, stdout, stderr } and never rejects.
- * @param {{ timeoutMs?: number, cwd?: string, env?: Record<string, string|undefined> }} [options]
- *   cwd: the folder to run it in (npm ci depends on it); timeoutMs: stop it after this long;
- *   env: its environment (default: this process's)
+ * The time limit is hard: at timeoutMs it sends SIGTERM, and if the command is still there graceMs
+ * later (npm ignores SIGTERM while it waits on a hung registry connection), SIGKILL.
+ * @param {{ timeoutMs?: number, graceMs?: number, cwd?: string, env?: Record<string, string|undefined> }} [options]
+ *   cwd: the folder to run it in (npm ci depends on it); env: its environment (default: this process's)
  */
-export function runCommand(cmd, args, { timeoutMs = 20_000, cwd, env } = {}) {
+export function runCommand(cmd, args, { timeoutMs = 20_000, graceMs = KILL_GRACE_MS, cwd, env } = {}) {
   return new Promise((resolve) => {
-    const options = { timeout: timeoutMs, encoding: 'utf8', maxBuffer: 16 * 1024 * 1024, ...(cwd ? { cwd } : {}), ...(env ? { env } : {}) };
-    execFile(cmd, args, options, (err, stdout, stderr) => {
-      if (!err) return resolve({ code: 0, stdout, stderr });
-      const limit = timeoutMs >= 1000 ? `${Math.round(timeoutMs / 1000)} s` : `${timeoutMs} ms`;
-      const timedOut = err.killed && err.signal ? `\n(stopped after ${limit}: it took too long)` : '';
-      resolve({ code: typeof err.code === 'number' ? err.code : 1, stdout: stdout || '', stderr: `${stderr || err.message}${timedOut}` });
+    const limit = (ms) => (ms >= 1000 ? `${Math.round(ms / 1000)} s` : `${ms} ms`);
+    let stdout = '';
+    let stderr = '';
+    let timedOut = false;
+    let done = false;
+    let killTimer = null;
+    let child;
+    const finish = (code, signal, error) => {
+      if (done) return;
+      done = true;
+      clearTimeout(termTimer);
+      clearTimeout(killTimer);
+      if (!error && code === 0 && !timedOut) return resolve({ code: 0, stdout, stderr });
+      const why = error ? error.message : signal ? `stopped by ${signal}` : `exit ${code}`;
+      const note = timedOut ? `\n(stopped after ${limit(timeoutMs)}: it took too long)` : '';
+      resolve({ code: typeof code === 'number' && code !== 0 ? code : 1, stdout, stderr: `${stderr || why}${note}` });
+    };
+    const termTimer = setTimeout(() => {
+      timedOut = true;
+      child?.kill('SIGTERM');
+      killTimer = setTimeout(() => child?.kill('SIGKILL'), graceMs);
+    }, timeoutMs);
+    try {
+      child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'], ...(cwd ? { cwd } : {}), ...(env ? { env } : {}) });
+    } catch (err) {
+      return finish(null, null, err);
+    }
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (c) => (stdout = stdout.length < MAX_OUTPUT ? stdout + c : stdout));
+    child.stderr.on('data', (c) => (stderr = stderr.length < MAX_OUTPUT ? stderr + c : stderr));
+    child.on('error', (err) => finish(null, null, err));
+    child.on('close', (code, signal) => finish(code, signal));
+    // A killed command's own children can keep its output pipes open; don't wait on them.
+    child.on('exit', (code, signal) => {
+      if (!timedOut) return;
+      child.stdout.destroy();
+      child.stderr.destroy();
+      finish(code, signal);
     });
   });
 }
@@ -486,25 +548,55 @@ async function bootstrap(cfg, deps) {
 }
 
 /**
- * Is the live copy ready to run? It needs its code (server/index.js), its packages (node_modules)
- * and a finished deploy (.deployed.json, written only once packages are in).
- * @returns {{ ready: true, deployed: object } | { ready: false, there: boolean, missing: string[] }}
+ * The names in dir/package.json "dependencies" that have no <modulesDir>/<name>/package.json,
+ * or null when package.json can't be read. Shared by the install guard and deploy's "packages needed?".
+ * modulesDir defaults to dir/node_modules.
  */
-export function liveCopyState(cfg, deps) {
-  if (!deps.fs.existsSync(cfg.serverPath)) return { ready: false, there: false, missing: ['server/index.js'] };
-  const deployed = readDeployed(cfg.runDir, { fsImpl: deps.fs });
-  const missing = [];
-  if (!deps.fs.existsSync(path.join(cfg.runDir, 'node_modules'))) missing.push('node_modules');
-  if (!deployed) missing.push('readable .deployed.json');
-  return missing.length ? { ready: false, there: true, missing } : { ready: true, deployed };
+export function missingPackages(dir, fsImpl = fs, modulesDir = path.join(dir, 'node_modules')) {
+  let pkg;
+  try {
+    pkg = JSON.parse(fsImpl.readFileSync(path.join(dir, 'package.json'), 'utf8'));
+  } catch {
+    return null;
+  }
+  const names = pkg && typeof pkg.dependencies === 'object' && pkg.dependencies !== null ? Object.keys(pkg.dependencies) : [];
+  return names.filter((name) => !fsImpl.existsSync(path.join(modulesDir, name, 'package.json')));
 }
 
-/** One line about the live copy: which commit it holds, or what it still lacks. */
-export function liveCopyLine(cfg, deps) {
-  const live = liveCopyState(cfg, deps);
+/**
+ * Is the live copy ready to run? It needs its code (server/index.js), every package its package.json
+ * names, and a finished deploy (.deployed.json) for the very commit it holds. Anything less would
+ * crash-loop the moment launchd starts it.
+ * @returns {Promise<{ ready: true, deployed: object } | { ready: false, there: boolean, problems: string[] }>}
+ */
+export async function liveCopyState(cfg, deps) {
+  if (!deps.fs.existsSync(cfg.serverPath)) return { ready: false, there: false, problems: ['no server/index.js'] };
+  const problems = [];
+  if (!deps.fs.existsSync(path.join(cfg.runDir, 'node_modules'))) {
+    problems.push('no node_modules');
+  } else {
+    const missing = missingPackages(cfg.runDir, deps.fs);
+    if (missing === null) problems.push('no readable package.json');
+    else if (missing.length) problems.push(`node_modules is incomplete (no ${missing.join(', ')})`);
+  }
+  const deployed = readDeployed(cfg.runDir, { fsImpl: deps.fs });
+  if (!deployed) {
+    problems.push('no readable .deployed.json');
+  } else {
+    const head = await deps.run(GIT, ['-C', cfg.runDir, 'rev-parse', 'HEAD'], { env: gitEnv(deps.env || process.env) });
+    const sha = head.code === 0 ? head.stdout.trim() : '';
+    if (!sha) problems.push("git can't read which commit it holds");
+    else if (sha !== deployed.sha) problems.push(`it holds ${sha.slice(0, 7)}, but the last deploy that finished was ${describeDeployed(deployed)}`);
+  }
+  return problems.length ? { ready: false, there: true, problems } : { ready: true, deployed };
+}
+
+/** One line about the live copy: which commit it holds, or what is wrong with it. */
+export async function liveCopyLine(cfg, deps) {
+  const live = await liveCopyState(cfg, deps);
   if (live.ready) return `${cfg.runDir}, ${describeDeployed(live.deployed)}${live.deployed.deployedAt ? `, deployed ${live.deployed.deployedAt}` : ''}`;
   if (!live.there) return `${cfg.runDir} (not there yet: make it with npm run deploy)`;
-  return `${cfg.runDir} (not fully deployed: no ${live.missing.join(' and no ')}; run npm run deploy)`;
+  return `${cfg.runDir} (not fully deployed: ${live.problems.join('; ')}; run npm run deploy)`;
 }
 
 /**
@@ -519,7 +611,7 @@ export function dryRunText(cfg, { liveCopy = cfg.runDir } = {}) {
     '',
     `The service will run The Desk from the live copy: ${liveCopy}`,
     '',
-    `1. Check that the live copy has server/index.js, node_modules and .deployed.json (a finished deploy). If not, stop and say: run npm run deploy first.`,
+    `1. Check that the live copy is fully deployed: server/index.js, every package in its package.json, and a .deployed.json for the commit it holds. If not, stop and say: run npm run deploy.`,
     `2. Check that port ${cfg.port} is free, or held by this service (which is then replaced). Refuse otherwise.`,
     `3. Create the log folder: ${cfg.logDir}`,
     `4. Write ${cfg.plistPath}:`,
@@ -544,7 +636,7 @@ export function dryRunText(cfg, { liveCopy = cfg.runDir } = {}) {
 export async function install(cfg, deps, { dryRun = false } = {}) {
   const plist = buildPlist(cfg);
   if (dryRun) {
-    deps.out(dryRunText(cfg, { liveCopy: liveCopyLine(cfg, deps) }));
+    deps.out(dryRunText(cfg, { liveCopy: await liveCopyLine(cfg, deps) }));
     return 0;
   }
   if (deps.platform !== 'darwin') {
@@ -553,15 +645,15 @@ export async function install(cfg, deps, { dryRun = false } = {}) {
   }
   // Before anything touches the running service: a live copy without its code, its packages or a
   // finished deploy would crash-loop the moment launchd starts it.
-  const live = liveCopyState(cfg, deps);
+  const live = await liveCopyState(cfg, deps);
   if (!live.ready && !live.there) {
     deps.err(`The live copy isn't there yet (${cfg.runDir}), so nothing was changed.`);
     deps.err('Run npm run deploy first: it makes the live copy from main. Then run npm run service:install again.');
     return 1;
   }
   if (!live.ready) {
-    deps.err(`The live copy isn't fully deployed yet (${cfg.runDir} has no ${live.missing.join(' and no ')}), so nothing was changed.`);
-    deps.err('Run npm run deploy until it gets past installing packages, then run npm run service:install again.');
+    deps.err(`The live copy isn't fully deployed yet (${cfg.runDir}: ${live.problems.join('; ')}), so nothing was changed.`);
+    deps.err('Run npm run deploy until it finishes (it repairs this), then run npm run service:install again.');
     return 1;
   }
   const svc = await readService(cfg, deps);

@@ -12,7 +12,7 @@ import path from 'node:path';
 import { after, describe, test } from 'node:test';
 import { REPO_ROOT } from '../server/config.js';
 import { deployedPath, readDeployed } from '../server/deployed.js';
-import { GIT, NPM_CI_TIMEOUT_MS, deploy, deployConfig, gitEnv, main, parseArgs, resolveNpmPath, stagingDir } from '../scripts/deploy.js';
+import { GIT, NPM_CI_TIMEOUT_MS, deploy, deployConfig, gitEnv, gitError, main, npmErrorLines, parseArgs, resolveNpmPath, stagingDir } from '../scripts/deploy.js';
 import { HOMEBREW_NODE, LAUNCHCTL, LSOF, buildPlist, runCommand } from '../scripts/service.js';
 
 const tmpDirs = [];
@@ -58,7 +58,7 @@ function gitSync(cwd, ...args) {
 
 const NOW = Date.parse('2026-11-28T14:14:03Z'); // 09:14:03 in Toronto
 
-const PACKAGE_JSON = '{ "name": "the-desk", "type": "module" }\n';
+const PACKAGE_JSON = '{ "name": "the-desk", "type": "module", "dependencies": { "ajv": "^8.20.0" } }\n';
 const LOCK_V1 = '{ "name": "the-desk", "lockfileVersion": 3, "packages": {} }\n';
 const LOCK_V2 = '{ "name": "the-desk", "lockfileVersion": 3, "packages": { "node_modules/ajv": {} } }\n';
 
@@ -89,7 +89,7 @@ function world({ service = 'moved' } = {}) {
   };
   gitSync(repo, 'init', '-q', '-b', 'main');
   const first = commit('First desk', {
-    '.gitignore': 'node_modules/\n/.deployed.json*\n',
+    '.gitignore': 'node_modules\n/.deployed.json*\n',
     'package.json': PACKAGE_JSON,
     'package-lock.json': LOCK_V1,
     'server/index.js': '// v1\n',
@@ -104,7 +104,7 @@ function world({ service = 'moved' } = {}) {
     fs.writeFileSync(svc.plistPath, buildPlist({ ...svc, runDir, serverPath: path.join(runDir, 'server', 'index.js') }));
   }
 
-  const state = { loaded: service !== 'none', pid: service !== 'none' ? 4100 : null, deskUp: service !== 'none', health: true, npmCode: 0, clock: NOW, nextPid: 4242 };
+  const state = { loaded: service !== 'none', pid: service !== 'none' ? 4100 : null, deskUp: service !== 'none', health: true, npmCode: 0, npmStderr: null, clock: NOW, nextPid: 4242 };
   const calls = [];
   const npmSaw = []; // the package files npm ci found in its folder, each time it ran
   const out = [];
@@ -120,9 +120,10 @@ function world({ service = 'moved' } = {}) {
         const modules = path.join(options.cwd, 'node_modules');
         fs.rmSync(modules, { recursive: true, force: true }); // npm ci starts by emptying node_modules
         fs.mkdirSync(modules);
-        if (state.npmCode !== 0) return { code: state.npmCode, stdout: '', stderr: 'npm error code E404\nnpm error 404 Not Found - GET https://registry.npmjs.org/ajv\n' };
+        if (state.npmCode !== 0) return { code: state.npmCode, stdout: '', stderr: state.npmStderr ?? 'npm error code E404\nnpm error 404 Not Found - GET https://registry.npmjs.org/ajv\n' };
         fs.mkdirSync(path.join(modules, 'ajv'));
         fs.writeFileSync(path.join(modules, 'ajv', 'index.js'), '// new ajv\n');
+        fs.writeFileSync(path.join(modules, 'ajv', 'package.json'), '{ "name": "ajv" }\n');
         return ok('added 1 package\n');
       }
       if (cmd === LSOF) return state.pid ? ok(`${state.pid}\n`) : { code: 1, stdout: '', stderr: '' };
@@ -183,6 +184,49 @@ const gitSubcommand = (args) => {
   return rest[0] === 'worktree' ? `worktree ${rest[1]}` : rest[0];
 };
 
+// What npm 11 prints when the lockfile doesn't match package.json: the cause, then pages of usage.
+const NPM_EUSAGE = [
+  'npm error code EUSAGE',
+  'npm error',
+  'npm error `npm ci` can only install packages when your package.json and package-lock.json or npm-shrinkwrap.json are in sync. Please update your lock file with `npm install` before continuing.',
+  'npm error',
+  'npm error Missing: ajv@8.17.1 from lock file',
+  'npm error',
+  'npm error Clean install a project',
+  'npm error',
+  'npm error Usage:',
+  'npm error npm ci',
+  'npm error',
+  'npm error Options:',
+  'npm error [--install-strategy <hoisted|nested|shallow|linked>] [--legacy-bundling]',
+  'npm error [--global-style] [--omit <dev|optional|peer> [--omit <dev|optional|peer> ...]]',
+  'npm error',
+  'npm error aliases: clean-install, ic, install-clean, isntall-clean',
+  'npm error A complete log of this run can be found in: /Users/x/.npm/_logs/2026-11-28T14_14_03_000Z-debug-0.log',
+  '',
+].join('\n');
+
+describe('deploy: what it shows when git or npm fails', () => {
+  test('npmErrorLines: the code line, the cause, and where the log is', () => {
+    assert.deepEqual(npmErrorLines(NPM_EUSAGE), [
+      'npm error code EUSAGE',
+      'npm error `npm ci` can only install packages when your package.json and package-lock.json or npm-shrinkwrap.json are in sync. Please update your lock file with `npm install` before continuing.',
+      'npm error Missing: ajv@8.17.1 from lock file',
+      'npm error Clean install a project',
+      'npm error A complete log of this run can be found in: /Users/x/.npm/_logs/2026-11-28T14_14_03_000Z-debug-0.log',
+    ]);
+    assert.deepEqual(npmErrorLines('npm ERR! code ENOTFOUND\nnpm ERR! network getaddrinfo ENOTFOUND registry.npmjs.org\n'), ['npm ERR! code ENOTFOUND', 'npm ERR! network getaddrinfo ENOTFOUND registry.npmjs.org']);
+    assert.deepEqual(npmErrorLines('something odd\nlast words\n'), ['something odd', 'last words'], 'no npm error lines: the tail');
+  });
+
+  test("gitError: git's fatal: or error: line, else its last line", () => {
+    assert.equal(gitError({ code: 128, stdout: '', stderr: "Preparing worktree (detached HEAD 1a2b3c4)\nfatal: '/x' is a missing but already registered worktree;\nuse 'add -f' to override\n" }), "fatal: '/x' is a missing but already registered worktree;");
+    assert.equal(gitError({ code: 1, stdout: '', stderr: 'error: Your local changes would be overwritten\n' }), 'error: Your local changes would be overwritten');
+    assert.equal(gitError({ code: 1, stdout: '', stderr: 'first\nlast\n' }), 'last');
+    assert.equal(gitError({ code: 5, stdout: '', stderr: '' }), 'exit 5');
+  });
+});
+
 describe('deploy: arguments and config', () => {
   test('parseArgs: no words, --dry-run (also when npm swallowed it), --help, and nothing else', () => {
     assert.deepEqual(parseArgs([]), { dryRun: false });
@@ -208,6 +252,12 @@ describe('deploy: arguments and config', () => {
   test('uses the npm next to Homebrew node, else npm from PATH', () => {
     assert.equal(resolveNpmPath('/opt/homebrew/bin/node', { exists: () => true }), '/opt/homebrew/bin/npm');
     assert.equal(resolveNpmPath('/opt/homebrew/bin/node', { exists: () => false }), 'npm');
+  });
+
+  test(".gitignore keeps node_modules (a folder or a link) and .deployed.json out of the live copy's git status", () => {
+    const ignore = fs.readFileSync(path.join(REPO_ROOT, '.gitignore'), 'utf8');
+    assert.match(ignore, /^node_modules$/m, 'no trailing slash: a symlinked node_modules is ignored too');
+    assert.match(ignore, /^\/\.deployed\.json\*$/m);
   });
 
   test('package.json wires npm run deploy', () => {
@@ -259,8 +309,10 @@ describe('deploy: git never follows an inherited GIT_DIR', () => {
     assert.equal(await deploy(w.cfg, w.deps), 0, w.errors());
     const gits = w.commands(GIT);
     assert.ok(gits.length > 5);
-    for (const c of gits) {
-      assert.equal(c.env.GIT_DIR, undefined, c.args.join(' '));
+    const npm = w.commands(w.cfg.npm);
+    assert.equal(npm.length, 1);
+    for (const c of [...gits, ...npm]) {
+      assert.equal(c.env.GIT_DIR, undefined, `${c.cmd} ${c.args.join(' ')}`);
       assert.equal(c.env.GIT_WORK_TREE, undefined);
       assert.equal(c.env.GIT_INDEX_FILE, undefined);
       assert.equal(c.env.PATH, process.env.PATH);
@@ -535,6 +587,115 @@ describe('deploy: updating the live copy', () => {
     assert.deepEqual(w.calls, []);
   });
 
+  test('an incomplete node_modules (a package the live package.json names is missing) gets a fresh npm ci', async () => {
+    const w = await deployedWorld();
+    fs.rmSync(path.join(w.live, 'node_modules', 'ajv', 'package.json'));
+    assert.equal(await w.run(), 0, w.errors());
+    assert.equal(w.commands(w.cfg.npm).length, 1);
+    assert.match(w.text(), /because node_modules is incomplete/);
+    assert.ok(fs.existsSync(path.join(w.live, 'node_modules', 'ajv', 'package.json')), 'repaired: what the install guard refuses, deploy fixes');
+  });
+
+  test('a node_modules that is a symlink, dangling or not, is moved aside too', async () => {
+    const dangling = await deployedWorld();
+    fs.rmSync(path.join(dangling.live, 'node_modules'), { recursive: true });
+    fs.symlinkSync(path.join(dangling.root, 'nowhere'), path.join(dangling.live, 'node_modules'));
+    assert.equal(await dangling.run(), 0, dangling.errors());
+    assert.match(dangling.text(), /because node_modules is missing/);
+    assert.ok(!fs.lstatSync(path.join(dangling.live, 'node_modules')).isSymbolicLink());
+    assert.equal(ajvIn(dangling.live), '// new ajv\n');
+
+    const linked = await deployedWorld();
+    const elsewhere = path.join(linked.root, 'elsewhere-modules');
+    fs.mkdirSync(path.join(elsewhere, 'keep'), { recursive: true });
+    fs.rmSync(path.join(linked.live, 'node_modules'), { recursive: true });
+    fs.symlinkSync(elsewhere, path.join(linked.live, 'node_modules'));
+    assert.equal(await linked.run(), 0, linked.errors());
+    assert.match(linked.text(), /because node_modules is incomplete/);
+    assert.ok(!fs.lstatSync(path.join(linked.live, 'node_modules')).isSymbolicLink());
+    assert.ok(fs.existsSync(path.join(elsewhere, 'keep')), "the folder the link pointed to isn't touched");
+  });
+
+  test('if the second rename fails, the old packages and the old commit are put back', async () => {
+    const w = await deployedWorld();
+    fs.writeFileSync(path.join(w.live, 'node_modules', 'ajv', 'index.js'), '// old ajv\n');
+    w.commit('Add a package', { 'package-lock.json': LOCK_V2 });
+    const before = fs.readFileSync(deployedPath(w.live), 'utf8');
+    const liveModules = path.join(w.live, 'node_modules');
+    w.deps.fs = {
+      ...fs,
+      renameSync(from, to) {
+        if (to === liveModules && from === path.join(w.staging, 'node_modules')) throw Object.assign(new Error('cross-device link'), { code: 'EXDEV' });
+        return fs.renameSync(from, to);
+      },
+    };
+    assert.equal(await w.run(), 1);
+    assert.equal(w.liveHead(), w.first, 'back on the old commit');
+    assert.equal(ajvIn(w.live), '// old ajv\n', 'with the old packages');
+    assert.equal(fs.readFileSync(deployedPath(w.live), 'utf8'), before);
+    assert.equal(fs.existsSync(w.staging), false);
+    assert.equal(gitSync(w.live, 'status', '--porcelain'), '');
+    assert.deepEqual(w.launchctl(), []);
+    assert.match(w.errors(), new RegExp(`Couldn't move the new packages into the live copy \\(EXDEV\\), so The Desk was not restarted\\.\\nThe live copy is back on ${w.first.slice(0, 7)} with its old packages\\.`));
+  });
+
+  test("a leftover staging folder holding the live copy's moved-aside packages puts them back first", async () => {
+    const w = await deployedWorld();
+    fs.writeFileSync(path.join(w.live, 'node_modules', 'ajv', 'index.js'), '// old ajv\n');
+    fs.mkdirSync(path.join(w.staging, 'node_modules'), { recursive: true }); // cut off between the two renames
+    fs.renameSync(path.join(w.live, 'node_modules'), path.join(w.staging, 'node_modules.old'));
+    w.commit('Copy', { 'app/index.html': '<title>v2</title>\n' });
+
+    const dry = await w.run('--dry-run');
+    assert.equal(dry, 0, w.errors());
+    assert.ok(w.text().includes(`1. Put the live copy's packages back, which an interrupted deploy had moved aside: mv ${w.staging}/node_modules.old ${w.live}/node_modules`), w.text());
+    assert.match(w.text(), /Packages: node_modules is there and package-lock\.json is the same, so no npm ci\./, 'judged on the packages it would put back');
+    assert.ok(fs.existsSync(path.join(w.staging, 'node_modules.old')), 'the dry run left it there');
+
+    w.reset();
+    assert.equal(await w.run(), 0, w.errors());
+    assert.match(w.text(), /Putting back the live copy's packages/);
+    assert.equal(w.commands(w.cfg.npm).length, 0, 'nothing to reinstall');
+    assert.equal(ajvIn(w.live), '// old ajv\n');
+    assert.equal(fs.existsSync(w.staging), false);
+  });
+
+  test("npm's own error lines are shown (code and cause), not its usage text", async () => {
+    const w = await deployedWorld();
+    w.commit('Add a package', { 'package-lock.json': LOCK_V2 });
+    w.state.npmCode = 1;
+    w.state.npmStderr = NPM_EUSAGE;
+    assert.equal(await w.run(), 1);
+    const errors = w.errors();
+    assert.match(errors, /\n {2}npm error code EUSAGE\n {2}npm error `npm ci` can only install packages when your package\.json and package-lock\.json/);
+    assert.match(errors, /npm error Missing: ajv@8\.17\.1 from lock file/);
+    assert.match(errors, /npm error A complete log of this run can be found in/);
+    assert.doesNotMatch(errors, /--install-strategy|Options:|Usage:/);
+  });
+
+  test("when git can't make the live copy, its fatal: line is shown, not \"Preparing worktree\"", async () => {
+    const w = await deployedWorld();
+    fs.rmSync(w.live, { recursive: true, force: true }); // deleted by hand: git still has it registered
+    assert.equal(await w.run(), 1);
+    const errors = w.errors();
+    assert.match(errors, /^git couldn't make the live copy: fatal: '.*the-desk-live' is a missing but already registered worktree;/);
+    assert.doesNotMatch(errors, /Preparing worktree/);
+    assert.match(errors, /run git worktree prune, then npm run deploy again/);
+    assert.equal(fs.existsSync(w.staging), false);
+  });
+
+  test('a deploy that changes nothing keeps .deployed.json, deploy time and all', async () => {
+    const w = await deployedWorld();
+    const before = fs.readFileSync(deployedPath(w.live), 'utf8');
+    w.state.clock += 3 * 3600_000;
+    assert.equal(await w.run('--dry-run'), 0);
+    assert.match(w.text(), /\.deployed\.json already names this commit \(deployed 2026-11-28T09:14:03-05:00\), so it stays as it is\./);
+    w.reset();
+    assert.equal(await w.run(), 0, w.errors());
+    assert.equal(fs.readFileSync(deployedPath(w.live), 'utf8'), before);
+    assert.equal(w.out.at(-1), `The Desk is live at http://localhost:4321 on main @ ${w.first.slice(0, 7)} "First desk"`);
+  });
+
   test('when The Desk does not answer after the restart, it says so and never claims it is live', async () => {
     const w = await deployedWorld();
     w.state.health = false;
@@ -553,7 +714,7 @@ describe('deploy with the real runner', () => {
     const npm = path.join(bin, 'npm');
     fs.mkdirSync(bin);
     // A stand-in npm: notes where it ran, what it was asked and which lockfile it found, then "installs".
-    fs.writeFileSync(npm, `#!/bin/sh\npwd -P >> '${log}'\necho "$*" >> '${log}'\nhead -c 40 package-lock.json >> '${log}'\necho >> '${log}'\nmkdir -p node_modules/ajv\n`, { mode: 0o755 });
+    fs.writeFileSync(npm, `#!/bin/sh\npwd -P >> '${log}'\necho "$*" >> '${log}'\nhead -c 40 package-lock.json >> '${log}'\necho >> '${log}'\nmkdir -p node_modules/ajv\necho '{}' > node_modules/ajv/package.json\n`, { mode: 0o755 });
     const fakeRun = w.deps.run;
     w.deps.run = (cmd, args, options) => (cmd === npm ? runCommand(cmd, args, options) : fakeRun(cmd, args, options));
     assert.equal(await deploy({ ...w.cfg, npm }, w.deps), 0, w.errors());
