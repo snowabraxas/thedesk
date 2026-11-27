@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32">
+  <title>The Desk</title>
+  <defs>
+    <linearGradient id="wall" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#2c5955"/>
+      <stop offset="1" stop-color="#152e2c"/>
+    </linearGradient>
+    <radialGradient id="lamp" cx="23" cy="9" r="11" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#ffd98a" stop-opacity=".9"/>
+      <stop offset="1" stop-color="#f2b84b" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect width="32" height="32" rx="7" fill="url(#wall)"/>
+  <circle cx="23" cy="9" r="11" fill="url(#lamp)"/>
+  <path d="M6 27 C5 17 11 8 25 7 C26 20 18 27 6 27 Z" fill="#8cbf4a"/>
+  <path d="M7 26 C11 20 15 16 21 11" fill="none" stroke="#2c5955" stroke-width="1.6" stroke-linecap="round"/>
+</svg>
