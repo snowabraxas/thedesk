@@ -11,12 +11,13 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { APP_DIR, HOST, SAMPLE_FEED_PATH, SAMPLE_NEWS_PATH, expandHome, resolveDeskHome, resolvePort, servicePlistPath } from './config.js';
+import { APP_DIR, HOST, REPO_ROOT, SAMPLE_FEED_PATH, SAMPLE_NEWS_PATH, expandHome, resolveDeskHome, resolvePort, servicePlistPath } from './config.js';
+import { describeDeployed, readDeployed } from './deployed.js';
 import { createFeedLoader } from './feed.js';
-import { rotateLog } from './log-file.js';
+import { createLogger, rotateLog } from './log-file.js';
 import { createBreakingReader, createNewsLoader } from './news.js';
 import { probeDesk } from './probe.js';
-import { CorruptStateError, MAX_STATE_BYTES, createStateStore } from './state-store.js';
+import { CorruptStateError, MAX_STATE_BYTES, StateTooLargeError, createStateStore } from './state-store.js';
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -181,7 +182,7 @@ export function createServer({
   now = Date.now,
 } = {}) {
   const root = path.resolve(appDir);
-  const storeOptions = fsp ? { fsp } : {};
+  const storeOptions = fsp ? { fsp, now } : { now };
   // Each desk's saved state, by route. Both follow the same rules (state-store.js).
   const stateRoutes = new Map([
     ['/api/state', createStateStore(deskHome, 'product-feed', storeOptions)],
@@ -193,7 +194,7 @@ export function createServer({
 
   async function getState(res, state) {
     try {
-      return sendJson(res, 200, await state.read());
+      return sendJson(res, 200, await state.readForPage());
     } catch (err) {
       // Leave the file alone so it can be recovered. The app sees the 500 and doesn't save over it.
       const why = err instanceof CorruptStateError ? err.message : `can't read ${state.filePath} (${err.code || err.message})`;
@@ -228,6 +229,12 @@ export function createServer({
     try {
       await state.write(value);
     } catch (err) {
+      if (err instanceof StateTooLargeError) return tooLarge();
+      if (err instanceof CorruptStateError) {
+        // Each save is merged into the file as it is now, so a file that can't be read isn't saved over.
+        log.error(`The Desk: ${err.message}. Saving is paused until it's fixed.`);
+        return sendJson(res, 500, { error: "Your saved state couldn't be read, so it was left untouched." });
+      }
       log.error(`The Desk: couldn't save ${state.filePath} (${err.code || err.message}). The previous state is untouched.`);
       return sendJson(res, 500, { error: "Couldn't save just now. The previous state is untouched." });
     }
@@ -289,6 +296,8 @@ export function createServer({
   });
 
   server.desk = { deskHome, appDir: root };
+  /** Resolves once every state save queued so far has finished (start()'s stop waits for it). */
+  server.settled = () => Promise.all([...stateRoutes.values()].map((store) => store.settled())).then(() => {});
   return server;
 }
 
@@ -327,44 +336,62 @@ async function explainPortInUse(port, env) {
 }
 
 /**
+ * What the server says once it listens: where, on which data, and, in the live copy that
+ * npm run deploy keeps (it has a .deployed.json next to server/), which commit is live.
+ */
+export function startedLines({ port, deskHome, deployed = null }) {
+  const lines = [`The Desk is running at http://localhost:${port} (data: ${deskHome})`];
+  if (deployed) lines.push(`The Desk: this is ${describeDeployed(deployed)}${deployed.deployedAt ? `, deployed ${deployed.deployedAt}` : ''}`);
+  return lines;
+}
+
+/**
  * Starts The Desk on 127.0.0.1:PORT (default 4321). Used by `npm start`, `npm run dev` and the
  * always-on service. When DESK_LOG names the service's log file, a log over 5 MB is rotated first.
+ * Every line it writes starts with the local time (see createLogger). On SIGTERM (launchd stopping
+ * it) or SIGINT (Ctrl+C) it says so, closes the server and exits 0.
+ * @param {Record<string, string|undefined>} [env]
+ * @param {{ logger?: ReturnType<typeof createLogger>, codeDir?: string }} [options] codeDir: where to look for .deployed.json
  */
-export function start(env = process.env) {
+export function start(env = process.env, { logger = createLogger(), codeDir = REPO_ROOT } = {}) {
   let port;
   try {
     port = resolvePort(env);
   } catch (err) {
-    console.error(err.message);
+    logger.error(err.message);
     process.exit(1);
   }
   const deskHome = resolveDeskHome(env);
   const logFile = (env.DESK_LOG || '').trim();
   if (logFile) {
     const old = rotateLog(path.resolve(expandHome(logFile)));
-    if (old) console.log(`The Desk: the log passed 5 MB, so its older lines moved to ${old}.`);
+    if (old) logger.info(`The Desk: the log passed 5 MB, so its older lines moved to ${old}.`);
   }
-  const server = createServer({ deskHome });
+  const server = createServer({ deskHome, log: logger });
 
   server.on('error', async (err) => {
     if (err.code === 'EADDRINUSE') {
-      console.error(await explainPortInUse(port, env));
+      logger.error(await explainPortInUse(port, env));
     } else {
-      console.error('The Desk could not start:', err.message);
+      logger.error('The Desk could not start:', err.message);
     }
     process.exit(1);
   });
 
   server.listen(port, HOST, () => {
-    console.log(`The Desk is running at http://localhost:${port} (data: ${deskHome})`);
+    for (const line of startedLines({ port, deskHome, deployed: readDeployed(codeDir) })) logger.info(line);
   });
 
-  const stop = () => {
-    server.close(() => process.exit(0));
+  // Stopping: close the server, let the saves already queued finish (so state.json is whole and
+  // up to date), then exit; never longer than 2 s.
+  const stop = (signal) => {
+    logger.info(`The Desk is stopping (${signal})`);
+    const exit = () => process.exit(0);
+    server.close(() => server.settled().then(exit, exit));
     server.closeAllConnections?.();
-    setTimeout(() => process.exit(0), 2000).unref();
+    setTimeout(exit, 2000).unref();
   };
-  process.once('SIGINT', stop);
+  process.once('SIGINT', stop); // a signal listener is called with the signal's name
   process.once('SIGTERM', stop);
   return server;
 }

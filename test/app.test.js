@@ -300,6 +300,23 @@ describe('app/style.css', () => {
     assert.match(ph, /var\(--font-sans\)/);
   });
 
+  test("the top stories heading leaves room for its focus ring when the rail scrolls to it", () => {
+    const m = rulesFor(read('style.css'), '#newsTopTitle').join(';').match(/scroll-margin-top\s*:\s*(\d+)px/);
+    assert.ok(m && Number(m[1]) >= 16, 'scroll-margin-top of at least 16px (ring: 3px wide, 4px out)');
+  });
+
+  test("the TV's warm-up glow stays soft enough for 4.5:1 at night (reviewer's measured stops)", () => {
+    const glow = rulesFor(read('style.css'), '.backdrop[data-view=news]::after').join(';');
+    assert.match(glow, /rgba\(var\(--tv-glow\),\.3\),rgba\(var\(--tv-glow\),\.06\) 45%,rgba\(var\(--tv-glow\),0\) 80%/);
+  });
+
+  test("the section heading's shade is deep enough for strict 4.5:1 while the glow peaks behind it", () => {
+    // Measured on real pixels at 1440x900 and 1280x800, night and golden, glow frozen at 250, 300 and 360 ms.
+    const shade = rulesFor(read('style.css'), '.nh2::before').join(';');
+    const [, a, b] = shade.match(/radial-gradient\(closest-side,rgba\(10,51,35,(\.\d+)\),rgba\(10,51,35,(\.\d+)\) 62%,rgba\(10,51,35,0\)\)/) || [];
+    assert.ok(Number(a) >= 0.46 && Number(b) >= 0.37, `shade stops ${a} and ${b}`);
+  });
+
   test('buttons are at least 44px tall', () => {
     const css = read('style.css');
     const px = (body, prop) => { const m = body.match(new RegExp(`(?:^|;)\\s*${prop}\\s*:\\s*(\\d+)px`)); return m ? Number(m[1]) : 0; };
@@ -400,12 +417,56 @@ describe('app/app.js', () => {
 
   test('reading a News story pays through the same award() as the feed, once everything has loaded', () => {
     const js = read('app.js');
-    assert.match(js, /const news = createNewsPage\(\{ award, toast, isReady: \(\) => ready, canAward: \(\) => store\.canSave \}\);/);
+    assert.match(js, /const news = createNewsPage\(\{ award, toast, isReady: \(\) => ready, canAward: \(\) => store\.canSave, reloadXpState: reloadState \}\);/);
     assert.match(js, /Promise\.all\(\[loadState\(\), loadFeed\(\), news\.load\(\)\]\)\.then\(\(\) => \{ ready = true; renderAll\(\); \}\);/);
     const nj = read('news.js');
-    assert.match(nj, /const r = toggleRead\(N, s\.key, \{ canAward: store\.canSave && canAward\(\) \}\);\s*store\.save\(\);\s*if \(r\.award\) award\(READ_XP, 'story read'\);/);
-    assert.match(nj, /url: STATE_URL,\s*normalize: normalizeNewsState,\s*empty: blankNewsState,/);
+    assert.match(nj, /const r = await readStory\(\(\) => N, key, \{ canPay, peek: \(\) => store\.peek\(\), also: reloadXpState \}\);\s*store\.save\(\);\s*if \(r\.award\) award\(READ_XP, 'story read'\);\s*else if \(r\.read && sample\) toast\('Sample story: marked read, no XP\.'\);/);
+    assert.match(nj, /const canPay = !sample && store\.canSave && canAward\(\);/, 'no XP for the sample, or when a state cannot be saved');
+    assert.match(nj, /url: STATE_URL,\s*normalize: normalizeNewsState,\s*empty: blankNewsState,\s*getState: \(\) => N,/);
+    assert.doesNotMatch(nj, /merge:/, 'saves are merged on the server, not with a GET before each PUT');
     assert.match(nj, /const STATE_URL = '\/api\/news\/state';/);
+  });
+
+  test('two tabs: opening #news reloads both states, applied only if nothing changed while the reload was out', () => {
+    const nj = read('news.js');
+    assert.match(nj, /await Promise\.all\(\[store\.reload\(applyState\), reloadXpState\(\), loadEdition\(\), loadBreaking\(\)\]\);/);
+    assert.match(nj, /function applyState\(fresh\) \{\s*N = fresh;\s*\}/);
+    assert.doesNotMatch(nj, /N = state\.state/, 'never replaced after the await, only inside reload');
+    assert.match(read('app.js'), /async function reloadState\(\) \{\s*if \(!ready\) return false;\s*const before = JSON\.stringify\(S\);\s*await store\.reload\(\(fresh\) => \{ S = fresh; \}\);/);
+  });
+
+  test('leaving a tab sends what is waiting at once (hidden or blur), so the tab switched to reads it', () => {
+    const js = read('app.js');
+    assert.match(js, /function sendNow\(\) \{ if \(!ready\) return; store\.flush\(\); news\.flush\(\); \}/);
+    assert.match(js, /document\.addEventListener\('visibilitychange', \(\) => \{ if \(document\.visibilityState === 'visible'\) syncTab\(\); else sendNow\(\); \}\);/);
+    assert.match(js, /window\.addEventListener\('blur', sendNow\);/);
+    assert.match(read('news.js'), /flush: \(\) => store\.flush\(\),/);
+  });
+
+  test('a tab catches up before it can act: on becoming visible, on focus, and when the feed opens', () => {
+    const js = read('app.js');
+    assert.match(js, /window\.addEventListener\('focus', syncTab\);/);
+    assert.match(js, /const \[feedChanged\] = await Promise\.all\(\[busy \? false : reloadState\(\), news\.sync\(\)\]\);/);
+    assert.match(js, /if \(ready\) \{ renderFeed\(\); reloadState\(\)\.then\(changed => \{ if \(changed && !\$\('#feed'\)\.hidden\) keepFocus\(renderFeed\); \}\); \}/);
+  });
+
+  test('the Product Feed pays once per article, across tabs too: XP is a counter the server adds up, and it checks the server before paying', () => {
+    const js = read('app.js');
+    assert.match(js, /const store = createStateClient\(\{\s*getState: \(\) => S,\s*counters: \['xp'\],/);
+    assert.match(js, /const r = await readArticle\(\(\) => S, id, \{ canPay: store\.canSave, peek: \(\) => store\.peek\(\), also: reloadState \}\);\s*if \(r\.award\) award\(10, 'article read'\); else save\(\);/);
+    assert.doesNotMatch(js, /S\.read\[id\] = Date\.now\(\)/);
+  });
+
+  test('Mark read clicks made while a pay check is out are queued, not dropped (both desks)', () => {
+    assert.match(read('app.js'), /reads = reads\.then\(\(\) => readOne\(id\)\)\.catch\(\(\) => \{\}\);/);
+    assert.match(read('news.js'), /reads = reads\.then\(\(\) => markRead\(ref\)\)\.catch\(\(\) => \{\}\);/);
+    assert.match(read('news.js'), /if \(b\.dataset\.read\) queueRead\(b\.dataset\.read\);/);
+    assert.doesNotMatch(read('app.js') + read('news.js'), /let paying|if \(paying\)/, 'no guard that drops clicks');
+  });
+
+  test('the "where it happened" hint hides when there are no stories', () => {
+    assert.match(read('index.html'), /<p class="hint" id="newsRegionsHint">US and China weighted highest; others by relevance\.<\/p>/);
+    assert.match(read('news.js'), /\$\('#newsRegionsHint'\)\.hidden = !view\.glance\.regions\.length;/);
   });
 
   test('news.js puts agent text in the page only through textContent or news-html.js', () => {

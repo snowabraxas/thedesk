@@ -635,12 +635,12 @@ describe("Snow's News state rules", () => {
     assert.ok(!error.includes(String.fromCodePoint(0x1b)));
   });
 
-  test("each desk's rules are its own; Product Feed's are unchanged", () => {
-    assert.deepEqual(Object.keys(STATE_RULES['product-feed']), ['read', 'saved', 'folders', 'notes', 'xp', 'days', 'badges']);
-    assert.deepEqual(Object.keys(STATE_RULES.news), ['read', 'dismissed', 'shelfOpen']);
+  test("each desk's rules are its own; both gained awarded, Product Feed the _sync it never saves", () => {
+    assert.deepEqual(Object.keys(STATE_RULES['product-feed']), ['read', 'saved', 'folders', 'notes', 'xp', 'days', 'badges', 'awarded', '_sync']);
+    assert.deepEqual(Object.keys(STATE_RULES.news), ['read', 'dismissed', 'shelfOpen', 'awarded']);
     assert.deepEqual(checkState({ shelfOpen: 'yes', read: { a1: 1764250000000 } }), { ok: true }, 'Product Feed is the default and ignores News keys');
     assert.deepEqual(checkState({ xp: 'lots' }, 'news'), { ok: true }, 'XP is not a News key (it stays in Product Feed)');
-    assert.deepEqual(checkState({ xp: 'lots' }, 'product-feed'), { ok: false, error: 'xp must be a number' });
+    assert.deepEqual(checkState({ xp: 'lots' }, 'product-feed'), { ok: false, error: `xp must be a number from 0 to ${Number.MAX_SAFE_INTEGER}` });
   });
 
   test('the store takes the desk name and saves to desks/<desk>/state.json', async () => {

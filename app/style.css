@@ -108,7 +108,7 @@ svg.ic{width:22px;height:22px;flex:none;fill:none;stroke:currentColor;stroke-wid
 /* The News desk's one motion: the TV warms up. When the desk opens, a soft rosy glow opens behind the
    glass like an old screen (a line, then the full picture) and settles, in 0.9 s. It is invisible at
    rest, so with reduced motion (no animation) it simply never shows. */
-.backdrop[data-view=news]::after{content:"";position:absolute;inset:0;opacity:0;pointer-events:none;background:radial-gradient(ellipse 90% 78% at 54% 42%,rgba(var(--tv-glow),.36),rgba(var(--tv-glow),.16) 45%,rgba(var(--tv-glow),0) 80%);transform-origin:54% 42%;animation:tvwarm .9s cubic-bezier(.25,.7,.3,1) both}
+.backdrop[data-view=news]::after{content:"";position:absolute;inset:0;opacity:0;pointer-events:none;background:radial-gradient(ellipse 90% 78% at 54% 42%,rgba(var(--tv-glow),.3),rgba(var(--tv-glow),.06) 45%,rgba(var(--tv-glow),0) 80%);transform-origin:54% 42%;animation:tvwarm .9s cubic-bezier(.25,.7,.3,1) both}
 @keyframes tvwarm{0%{opacity:0;transform:scale(1,.02)}12%{opacity:1;transform:scale(1,.08)}40%{opacity:1;transform:scale(1,1)}100%{opacity:0;transform:scale(1.04,1.04)}}
 .veil{position:absolute;inset:0;background:linear-gradient(180deg,rgba(10,51,35,.28),rgba(10,51,35,0) 55%),var(--room-veil)}
 .backdrop[data-view=feed][data-phase=morning] .veil,.backdrop[data-view=feed][data-phase=golden] .veil,.backdrop[data-view=news][data-phase=morning] .veil,.backdrop[data-view=news][data-phase=golden] .veil{background:linear-gradient(180deg,rgba(10,51,35,.28),rgba(10,51,35,0) 55%),linear-gradient(var(--veil-boost),var(--veil-boost)),var(--room-veil)}
@@ -431,9 +431,12 @@ svg.ic{width:22px;height:22px;flex:none;fill:none;stroke:currentColor;stroke-wid
 /* "Today's top 3" sits straight on the room. A feathered shade behind it (no edge, so it reads as
    shadow, not a panel) keeps it over 4.5:1 on the brightest plate, even at the warm-up's peak. */
 .nh2{position:relative;isolation:isolate;width:fit-content;margin:0 0 0 8px;font:600 20px/1.2 var(--font-display);color:var(--beige);text-shadow:0 1px 10px rgba(6,30,24,.6)}
-.nh2::before{content:"";position:absolute;inset:-14px -44px;z-index:-1;pointer-events:none;background:radial-gradient(closest-side,rgba(10,51,35,.42),rgba(10,51,35,.34) 62%,rgba(10,51,35,0))}
+/* Deep enough that beige keeps 4.5:1 even when the TV's warm-up glow peaks behind it (250-360 ms). */
+.nh2::before{content:"";position:absolute;inset:-14px -44px;z-index:-1;pointer-events:none;background:radial-gradient(closest-side,rgba(10,51,35,.46),rgba(10,51,35,.37) 62%,rgba(10,51,35,0))}
 .nh2:focus{outline:none}
 #news .nh2:focus-visible{outline:3px solid var(--beige);outline-offset:4px;border-radius:6px}
+/* The rail's "Today's edition" scrolls here: leave room above for the focus ring. */
+#newsTopTitle{scroll-margin-top:24px}
 
 /* the story cards (frost) */
 .nstory{border-radius:var(--radius-lg);padding:22px 24px;display:flex;flex-direction:column;gap:14px}

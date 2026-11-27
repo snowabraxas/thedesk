@@ -8,8 +8,8 @@ import { DATE_TIME_PARTS as SERVER_DATE_TIME_PARTS, isCalendarDate as serverIsCa
 import { checkState } from '../server/state-store.js';
 import {
   DATE_TIME_PARTS, KIND_LABEL, MAX_MORE, READ_XP, REGION_LABEL, blankNewsState, breakingTime, breakingView, buildNewsView, dismissBreaking,
-  editionLine, greeting, isBreakingVisible, isCalendarDate, isDateTime, isStoryKey, kindLabel, newsLine, normalizeNewsState, readingMinutes,
-  regionOf, sourcesOf, storyKey, text, toggleRead, tvSignals,
+  editionLine, greeting, isBreakingVisible, isCalendarDate, isDateTime, isStoryKey, kindLabel, mergeNewsState, newsLine, normalizeNewsState, readingMinutes,
+  readStory, regionOf, sourcesOf, storyKey, text, toggleRead, tvSignals,
 } from '../app/news-lib.js';
 import { breakingHtml, glanceHtml, noStoriesHtml, shelfItemHtml, sourceLinksHtml, storyCardHtml } from '../app/news-html.js';
 
@@ -89,6 +89,15 @@ describe('dates and story keys (the same rules as the server)', () => {
     assert.equal(storyKey('2026-12-07', 'A_b-9'), '2026-12-07/A_b-9');
   });
 
+  test('a sample story is "<edition>/sample-<id>", still a key the server accepts', () => {
+    assert.equal(storyKey('2026-12-07', 's1', { sample: true }), '2026-12-07/sample-s1');
+    assert.equal(storyKey('2026-12-07', 's1', { sample: false }), '2026-12-07/s1');
+    assert.ok(isStoryKey(storyKey('2026-12-07', 'm7', { sample: true })));
+    assert.equal(storyKey('2026-12-07', 'x'.repeat(33), { sample: true }), `2026-12-07/sample-${'x'.repeat(33)}`, '40 characters with the prefix');
+    assert.equal(storyKey('2026-12-07', 'x'.repeat(34), { sample: true }), null, 'too long with the prefix: no key rather than a refused one');
+    assert.equal(storyKey('2026-12-07', 'x'.repeat(34)), `2026-12-07/${'x'.repeat(34)}`);
+  });
+
   test('storyKey refuses what the server would refuse, so a bad key never stops saving', () => {
     for (const [ed, id] of [['2026-02-30', 's1'], ['', 's1'], [undefined, 's1'], ['2026-12-07', ''], ['2026-12-07', 's 1'], ['2026-12-07', 's/1'],
       ['2026-12-07', EVIL], ['2026-12-07', 'x'.repeat(41)], ['2026-12-07', 7], ['2026-12-07', undefined]]) {
@@ -127,8 +136,24 @@ describe('buildNewsView', () => {
     assert.deepEqual([v.total, v.readCount], [3, 0]);
     assert.equal(v.top[0].regionLabel, 'China');
     assert.equal(v.top[0].kindLabel, 'Launch');
-    assert.equal(v.top[0].key, '2026-12-07/s1');
+    assert.equal(v.top[0].key, '2026-12-07/sample-s1', 'sample stories have their own keys');
     assert.equal(v.minutes, v.top.reduce((a, s) => a + s.minutes, 0));
+  });
+
+  test("sample reads and real reads never mix: the sample's 7 December is not the agent's 7 December", () => {
+    const real = { ...SAMPLE };
+    delete real.sample;
+    const sample = { ...SAMPLE, sample: true };
+    const readSample = { read: { '2026-12-07/sample-s1': 1, '2026-12-07/sample-m1': 1 } };
+    const readReal = { read: { '2026-12-07/s1': 1 } };
+    assert.equal(buildNewsView(real, readSample).readCount, 0, 'reading the sample leaves the real stories unread');
+    assert.equal(buildNewsView(real, readSample).more[0].read, false);
+    assert.equal(buildNewsView(sample, readReal).readCount, 0, 'a real read does not show on the sample');
+    assert.equal(buildNewsView(sample, readSample).readCount, 1);
+    assert.equal(buildNewsView(real, readReal).top[0].key, '2026-12-07/s1', 'real editions keep "<edition>/<id>"');
+    for (const s of [...buildNewsView(sample, {}).top, ...buildNewsView(sample, {}).more]) {
+      assert.deepEqual(checkState({ read: { [s.key]: 1 }, awarded: { [s.key]: 1 } }, 'news'), { ok: true }, s.key);
+    }
   });
 
   test('sorts by rank whatever order the stories come in; a story without a usable rank goes last', () => {
@@ -369,11 +394,96 @@ describe('reading pays XP once per story, ever', () => {
   });
 });
 
+describe('mergeNewsState (before every save and every payment)', () => {
+  test('awarded and dismissed become the union; read and shelfOpen stay this tab\'s', () => {
+    const local = { read: { '2026-12-07/s2': 5 }, awarded: { '2026-12-07/s2': 5 }, dismissed: {}, shelfOpen: true, later: 1 };
+    const server = { read: { '2026-12-07/s1': 1 }, awarded: { '2026-12-07/s1': 1, '2026-12-07/s2': 9 }, dismissed: { [BREAKING.at]: 2 }, shelfOpen: false };
+    assert.equal(mergeNewsState(local, server), local, 'changed in place');
+    assert.deepEqual(local, {
+      read: { '2026-12-07/s2': 5 },
+      awarded: { '2026-12-07/s2': 5, '2026-12-07/s1': 1 },
+      dismissed: { [BREAKING.at]: 2 },
+      shelfOpen: true,
+      later: 1,
+    });
+  });
+
+  test('copes with a missing or odd server copy', () => {
+    for (const server of [null, undefined, {}, { awarded: [], dismissed: 'x' }]) {
+      const local = blankNewsState();
+      mergeNewsState(local, server);
+      assert.deepEqual(local, blankNewsState(), JSON.stringify(server));
+    }
+    const odd = { read: {} };
+    mergeNewsState(odd, { awarded: { '2026-12-07/s1': 1 } });
+    assert.deepEqual(odd.awarded, { '2026-12-07/s1': 1 });
+    assert.deepEqual(odd.dismissed, {});
+  });
+
+  test('after merging, a story another tab paid for does not pay again', () => {
+    const stale = blankNewsState();
+    mergeNewsState(stale, { awarded: { '2026-12-07/s1': 1 } });
+    assert.deepEqual(toggleRead(stale, '2026-12-07/s1'), { read: true, award: false });
+  });
+});
+
+describe('readStory (checks the server before paying)', () => {
+  const KEY = '2026-12-07/s1';
+  const peekOf = (state, calls = []) => async () => { calls.push('peek'); return { ok: true, state }; };
+
+  test("pays when the server hasn't paid for it, and picks up the latest XP alongside", async () => {
+    const N = blankNewsState();
+    const calls = [];
+    const r = await readStory(() => N, KEY, { peek: peekOf({ awarded: {} }, calls), also: async () => calls.push('xp') });
+    assert.deepEqual(r, { read: true, award: true });
+    assert.deepEqual(calls.sort(), ['peek', 'xp']);
+  });
+
+  test('does not pay when the server says another tab already did', async () => {
+    const N = blankNewsState();
+    assert.deepEqual(await readStory(() => N, KEY, { peek: peekOf({ awarded: { [KEY]: 1 } }) }), { read: true, award: false });
+    assert.ok(N.awarded[KEY], 'and now this tab knows');
+  });
+
+  test("marks it read without paying (or recording) when the server's copy can't be read", async () => {
+    const N = blankNewsState();
+    assert.deepEqual(await readStory(() => N, KEY, { peek: async () => ({ ok: false }) }), { read: true, award: false });
+    assert.deepEqual(N.awarded, {});
+  });
+
+  test('asks nothing when it would not pay: un-marking, already paid, the sample or a state that cannot be saved', async () => {
+    const calls = [];
+    const peek = peekOf({}, calls);
+    const read = normalizeNewsState({ read: { [KEY]: 1 }, awarded: { [KEY]: 1 } });
+    assert.deepEqual(await readStory(() => read, KEY, { peek }), { read: false, award: false });
+    assert.deepEqual(await readStory(() => read, KEY, { peek }), { read: true, award: false });
+    assert.deepEqual(await readStory(() => blankNewsState(), KEY, { canPay: false, peek }), { read: true, award: false });
+    assert.deepEqual(calls, []);
+  });
+
+  test('a reload during the check that already has the story read keeps it read, never un-marks', async () => {
+    let N = blankNewsState();
+    const fresh = normalizeNewsState({ read: { [KEY]: 5 }, awarded: { [KEY]: 5 } });
+    const r = await readStory(() => N, KEY, { peek: async () => { N = fresh; return { ok: true, state: fresh }; } });
+    assert.deepEqual(r, { read: true, award: false });
+    assert.deepEqual(fresh.read, { [KEY]: 5 });
+  });
+
+  test('uses the state the page holds after the check (a reload may have swapped it)', async () => {
+    let N = blankNewsState();
+    const fresh = normalizeNewsState({ awarded: { '2026-12-07/s9': 1 } });
+    const r = await readStory(() => N, KEY, { peek: async () => { N = fresh; return { ok: true, state: {} }; } });
+    assert.equal(r.award, true);
+    assert.ok(fresh.read[KEY] && fresh.awarded[KEY], 'written into the state the page holds now');
+  });
+});
+
 describe('tvSignals (the hook for the TV in the room, N5)', () => {
   test('unread top stories and an undismissed breaking story', () => {
     assert.deepEqual(tvSignals(SAMPLE, BREAKING, blankNewsState()), { unread: 3, total: 3, breaking: true, sample: false });
-    const N = { read: { '2026-12-07/s1': 1, '2026-12-07/m1': 1 }, dismissed: { [BREAKING.at]: 1 } };
+    const N = { read: { '2026-12-07/sample-s1': 1, '2026-12-07/sample-m1': 1 }, dismissed: { [BREAKING.at]: 1 } };
     assert.deepEqual(tvSignals({ ...SAMPLE, sample: true }, BREAKING, N), { unread: 2, total: 3, breaking: false, sample: true });
+    assert.equal(tvSignals(SAMPLE, null, N).unread, 3, 'sample reads leave the real edition unread');
   });
 
   test('no edition and no breaking story', () => {

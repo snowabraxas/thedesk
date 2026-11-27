@@ -2,6 +2,220 @@
 
 Technical notes for the team. Snow doesn't need to read this.
 
+## N1. Live copy separate from work in progress
+
+### The problem
+
+Through Sprint 1 the always-on service ran `node server/index.js` from the main checkout in `~/Documents/Projects/the-desk`. Checking out a story branch there changed Snow's live Desk: `app/` on the next reload, `server/` on the next restart. Story work had to live in separate worktrees to stay safe.
+
+### Layout
+
+```
+~/Documents/Projects/the-desk/   the main checkout: where you work, merge and run npm run deploy
+~/Documents/Projects/the-desk-*  story worktrees (n1-live-copy, n2-news-contract, ...)
+~/the-desk-live/                 the live copy: a git worktree of the same repo, detached HEAD at
+                                 a commit of main, plus node_modules (prod only) and .deployed.json
+~/the-desk-live.staging/         only while a deploy installs packages: npm ci runs here, never in
+                                 the live copy; removed when the deploy ends
+~/agent-house/                   Snow's data and the service log (unchanged)
+~/Library/LaunchAgents/local.thedesk.server.plist
+                                 WorkingDirectory and server/index.js now point into ~/the-desk-live
+```
+
+- **Why `~/the-desk-live`.** Outside `~/Documents`, so macOS privacy never has a say over the code the service runs. Outside `~/agent-house`, so the desk agents (which write there) can't touch the code. The sprint doc's example was `~/agent-house/the-desk-live`; the lead dev chose `~/the-desk-live` for that second reason.
+- **Why a worktree.** It shares the repo's objects and refs, so deploying is a `git checkout`, with no clone, no fetch and no network. Being detached, it never holds a branch, so `main` stays free to be checked out in the main checkout.
+- **Where the path lives.** `resolveLiveDir()` in `server/config.js`. `DESK_LIVE_DIR` overrides it (tests and dry runs only).
+- **`.deployed.json`** (in the live copy, gitignored): `{ sha, shortSha, subject, ref, deployedAt }`. Written by deploy, read by the server at start and by `service:status` (`server/deployed.js` checks the sha and strips control characters before anything prints it).
+
+### How `npm run deploy` works (`scripts/deploy.js`)
+
+Run it from your work folder (any checkout of the repo except the live copy). It always takes the local `refs/heads/main`, resolved once to a sha at the start, never the working tree. Pushing to GitHub doesn't matter to it. Every check comes before any change.
+
+1. **Checks.**
+   - Run from the live copy itself, it says "Run npm run deploy from your work folder (…), not from the live copy." It refuses a live path that is the work folder or sits inside it.
+   - A staging folder left by an interrupted run is removed, but only if it holds nothing beyond `package.json`, `package-lock.json`, `node_modules` and `node_modules.old`. Otherwise it refuses and leaves the folder alone. A `node_modules.old` in it always goes back into the live copy first, replacing whatever `node_modules` is there: it only exists between a deploy's swap and that deploy's end, so it holds the packages of the last finished deploy.
+   - **The rollback target is the last finished deploy** (N1c): the commit in `.deployed.json`, not whatever HEAD is. A deploy cut off after its checkout (Ctrl+C during the load check, a crash, a rollback whose checkout failed) leaves HEAD on a commit that never went live; deploy says so ("An earlier deploy was cut off: the live copy holds …, but the last deploy that finished is …") and every rollback goes to the recorded commit. In that state the packages are reinstalled unless they were just restored from `node_modules.old`, and the code is load-checked before it can go live, even when nothing else changed.
+   - It reads main's sha and subject. It notes, without stopping, when the folder you ran it from is on another branch or has uncommitted changes. Neither is deployed.
+   - If the live copy exists, it must be a worktree of this repo (same `--git-common-dir`, top level is the folder itself), and `git status --porcelain -- . ':!/.deployed.json*'` must be empty. `.deployed.json` and its temp file are deploy's own, and an older commit's `.gitignore` may not list them, so a hand checkout to a pre-N1 commit doesn't block the repair. A dirty copy is refused: it lists up to 10 lines and suggests `git -C <live> stash --include-untracked`.
+   - Leftover `<live>/.deployed.json.tmp-*` files from an interrupted run are removed. If tidying up after an interrupted run fails, deploy stops with a plain message and changes nothing.
+2. **Packages first, outside the live copy.** This step runs only when one of these holds:
+   - it's a new copy;
+   - `node_modules` is missing;
+   - `node_modules` is incomplete (a name in the live `package.json` "dependencies" has no `node_modules/<name>/package.json`, the same test the install guard uses);
+   - no deploy is recorded;
+   - `git diff --quiet <last deployed> <new> -- package-lock.json` says the lockfile changed. The base is the sha in `.deployed.json`: the last deploy that went all the way through, whose packages are the ones in the live copy;
+   - or the live copy's server doesn't load (`loadCheck()`, the same check as the install guard): every file is there but, say, ajv can't find `fast-deep-equal`.
+
+   When it runs:
+   - `git show <sha>:package.json` and `<sha>:package-lock.json` are written into `<live>.staging`, and `npm ci --omit=dev` runs there. It uses the npm next to Homebrew node, gets the same cleaned environment as git, and has a hard 10-minute limit (see `runCommand`). On failure deploy shows npm's `npm error code` line, the cause lines after it and the log path, not the usage text.
+   - npm 11 empties `node_modules` before it installs, so it never runs in the live copy. If it fails, or the commit has no lockfile, deploy removes the staging folder and stops. The live copy's code, packages and `.deployed.json` are exactly as they were, so a launchd restart, a login or a reboot still runs the old, working version.
+3. **Move the live copy.** No live copy yet: `git -C <repo> worktree add --detach <live> <sha>`. Otherwise `git -C <live> checkout --quiet --detach <sha>`, or nothing if it's already there. git can fail after it has moved HEAD (a post-checkout hook that exits 1), so on failure deploy asks where HEAD is:
+   - at the target: it carries on with the swap and shows git's message as a warning;
+   - anywhere else: it rolls back (see below);
+   - then it removes the staging folder and stops, showing git's `fatal:` line.
+4. **Swap the packages in.** Two renames on the same disk: `<live>/node_modules` to `<live>.staging/node_modules.old`, then `<live>.staging/node_modules` to `<live>/node_modules`. The old packages stay in the staging folder until the new code has passed step 5; then the folder is removed.
+   - Whether there is an old `node_modules` is checked with `lstat`, so a symlink (dangling or not) is moved aside too. `.gitignore` says `node_modules` without the trailing slash, so such a link doesn't make the live copy look dirty.
+   - The old copy goes into the staging folder, not the live copy, so an interrupted swap never leaves untracked files in the live copy.
+   - If the second rename fails, deploy rolls back. No restart, no new `.deployed.json`.
+   - If the staging folder can't be removed after a good swap, deploy warns, then still records and restarts. The next run tidies the folder away.
+5. **Check that the new code loads** (N1b). Whenever the commit or the packages changed, `loadCheck` runs on the live copy, the same check as the install guard, with the service's own environment.
+   - If the new code doesn't load (a broken import, a package missing from the committed lockfile), deploy rolls back, records nothing, skips the restart and exits 1: "The new code doesn't load, so it wasn't put live: <error>".
+   - **Rolling back** (`rollBack()`, used by all three failures above):
+     - the packages this run moved aside go back from the staging folder;
+     - the last finished deploy's commit is checked out (judged by HEAD afterwards, not by git's exit code);
+     - then the restored state is load-checked.
+   - The message names the commit the copy actually holds: "The live copy is back on 1a2b3c4 (the last deploy that finished) with its packages, and it loads." If it doesn't load, it says so plainly: "The live copy holds …, but it doesn't load (…). The Desk keeps running in memory, but it can't start again (after a crash, a login or a reboot) until a deploy works."
+   - The running Desk keeps the last good version, and a later launchd start runs that version too.
+6. **Record it.** `.deployed.json` is written (temp file and rename) only now, so it only ever names a commit whose packages are in and whose code loads. A deploy that changed nothing (same commit, no install) leaves it as it was, deploy time included.
+7. **Restart.** It reads the installed plist's `WorkingDirectory`. Not installed, or not the live copy: it stops (exit 1) and says to run `npm run service:install` once. With a fake HOME (see "The real launchd service is shared" below) it stops before the restart with that reason; the live copy is ready but nothing touches launchd. Otherwise it calls `restart()` from `scripts/service.js` (`launchctl kickstart -k`, or bootstrap if it was stopped), uses the same health check (`/api/feed` within 15 s, log tail on failure), and ends with one line: `The Desk is live at http://localhost:4321 on main @ 1a2b3c4 "Subject"`.
+
+git always runs with `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_COMMON_DIR`, `GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES`, `GIT_CONFIG_PARAMETERS` (and `GIT_CONFIG_COUNT/KEY_n/VALUE_n`, `GIT_NAMESPACE`, `GIT_PREFIX`) removed (`gitEnv()`). If deploy is ever started from a git hook, `git -C <live>` still means the live copy.
+
+`--dry-run` runs only read-only git (`log`, `rev-parse`, `status --no-optional-locks`, `diff`, `worktree list`) and prints each step in the order above, with its exact command. It changes nothing, and it stops where the real run would refuse.
+
+Packages are installed from `package.json` and the lockfile alone, so a lifecycle script in our own `package.json` (`prepare`, `postinstall`) would run without the source next to it. There are none today. Add one only with that in mind.
+
+Between the checkout and the restart (a few seconds) the running server already serves the new `app/` files from disk. Harmless for now. If a story ever needs both halves to change at once, deploy into a fresh folder and swap the folder instead.
+
+**After deploying, reload any open Desk pages** (the Claude app's pane and any browser tab): a page keeps running the code it loaded. Since N4 the server merges every save, so a page from before a deploy can't lose data, but it only gets new behaviour once reloaded.
+
+**To undo a bad deploy:** `git revert` the commit on main, then `npm run deploy`. Avoid checking out an old commit in the live copy by hand: `.deployed.json` would no longer match it.
+
+**What no code can cover: `kill -9` of deploy itself** (or a power cut) part way through. Nothing runs to roll back. The live copy may be left on a commit that never went live, with the old packages in `<live>.staging/node_modules.old`, while the running Desk carries on in memory. The next `npm run deploy` recovers: it puts those packages back, notices HEAD isn't the recorded commit, and rolls back to it if the new attempt fails. Until then, a launchd restart would run the unverified code. A Ctrl+C or SIGTERM to deploy is handled differently: the signal reaches the command it is running, and deploy then stops without its own rollback, which the next deploy does the same way. (Trapping signals during steps 2 to 4 to roll back on the spot is possible, but not done.)
+
+### `service:install` and `service:status`
+
+- `serviceConfig()` takes `runDir` (default: the live copy) instead of the old `repoRoot`. The plist is otherwise unchanged: same label, RunAtLoad, KeepAlive, ThrottleInterval 10, PATH, `DESK_HOME=~/agent-house`, `PORT=4321`, `DESK_LOG`, `DESK_SERVICE=1`, same log path.
+- `install` refuses, changing nothing and calling no launchctl (so the running service is left alone), unless the live copy is fully deployed (`liveCopyState()`):
+  - no `<live>/server/index.js`: "The live copy isn't there yet … run npm run deploy first".
+  - Otherwise, any of these: no `node_modules`; a package from the live `package.json` "dependencies" missing (`node_modules is incomplete (no ajv)`); no readable `package.json` or `.deployed.json`; `git -C <live> rev-parse HEAD` (with `gitEnv`) not equal to the sha in `.deployed.json` ("it holds 1a2b3c4, but the last deploy that finished was main @ 9f8e7d6 …"); changes of its own (the same `git status` as deploy, e.g. `D server/feed.js`).
+  - When all of that holds, the load check must pass. A child `node --input-type=module -e …`, run in the live copy, imports `server/index.js` and exits. It uses the service's node and its environment from the plist (`cfg.env` plus `HOME`), not the caller's, so a `NODE_PATH` or `NODE_OPTIONS` in the shell can't make it pass when the service would crash. Importing it doesn't start the server: it only listens when it is the program node was started with, and `test/server.test.js` holds it to that. This catches a missing package of a package (ajv without `fast-deep-equal`) or a module that throws: "its server doesn't load: Error: Cannot find module 'fast-deep-equal'".
+  - The message is "The live copy isn't fully deployed yet (<dir>: <problems>), so nothing was changed. Run npm run deploy until it finishes (it repairs this, or says what to do)". Deploy reinstalls on the same package and load checks, so it repairs whatever the guard refuses, except changes of its own, which deploy refuses with the stash hint.
+
+  The dry run says which at the top. It runs only read-only commands: `git rev-parse`, `git status` and the load check.
+- `runCommand` (spawn-based) takes `cwd`, `timeoutMs`, `graceMs` and `env`.
+  - The command runs in its own process group (`detached: true`). Every stop goes to the whole group (`process.kill(-pid, …)`), so nothing it started survives a timeout.
+  - Because the group no longer gets the terminal's Ctrl+C, one shared process-level handler (installed while any command runs, with a set of the running groups, so no MaxListenersExceededWarning) handles SIGINT, SIGTERM, SIGHUP and SIGQUIT:
+    - it passes the signal that arrived on to every group: SIGINT stays SIGINT, which npm obeys;
+    - it waits up to `SIGNAL_WAIT_MS` (2 s) for them to exit, SIGKILLs whatever is left of each group, then re-raises the signal so the script stops the usual way;
+    - from the first signal on, the process is *stopping* (N1c). `runCommand` starts nothing new and settles nothing, and the handler is never put back, so the caller can't carry on and swallow the re-raise;
+    - the time limits keep running meanwhile. A second signal during the wait SIGKILLs the groups at once and re-raises.
+  - The limit is hard: SIGTERM at `timeoutMs`, then SIGKILL `graceMs` (10 s) later, because npm ignores SIGTERM on a hung registry connection. It counts as timed out only if the command was still running at the deadline ("(stopped after N s: it took too long)").
+  - Once the command exits, its output gets a drain of at most `min(graceMs, 2 s)`. If something it left running still holds the pipes open after that, the group is SIGKILLed (nothing else would ever stop it); the command's real exit code stands.
+  - Output keeps its first and last 1 MB (`outputKeeper`), so npm's error lines at the end survive.
+- `gitEnv()` and `GIT` now live in `scripts/service.js` (deploy re-exports them), so the guard and deploy share them.
+- `status` shows `Runs from:` (the installed plist's WorkingDirectory) and `Deployed:` (that folder's `.deployed.json`). When the plist still points elsewhere, it says to run `service:install` (or `deploy` first, if there is no live copy).
+- `service:restart` now says "Restarted with the code in ~/the-desk-live."
+- The macOS-privacy hints stay, keyed on the folder the service runs from. With the live copy outside Documents they no longer appear.
+
+### The real launchd service is shared
+
+launchd's label `local.thedesk.server` in `gui/<uid>` is the same whatever HOME says. A run with a fake HOME that reaches the real `/bin/launchctl` acts on Snow's live service: on 27 Nov a review run restarted it (runs = 2). So:
+- `launchdRefusal()` names a reason when any of these holds:
+  - this is a test run (`NODE_TEST_CONTEXT` is set: `node --test` sets it, and every child inherits it);
+  - the program isn't `scripts/service.js` or `scripts/deploy.js` (`process.argv[1]`, symlinks resolved; N1c). This is a belt for test runs without `NODE_TEST_CONTEXT` (`--test-isolation=none`, a test file run directly) and for any other program that imports the module;
+  - HOME isn't the account's real home (`os.userInfo().homedir`);
+  - no config is bound to the runner;
+  - the config's home isn't the real home;
+  - `DESK_LIVE_DIR` or the live copy sits outside the real home.
+- `realDeps(cfg)` binds the config the run works on (`main()` in service.js passes its config, deploy passes `cfg.service`), and its runner is wrapped in `guardLaunchctl()` (N1b: an allow-list, no longer a deny-list):
+  - launchctl is matched by its name, in any case. Only reading verbs (`print`, `print-disabled`, `list`, `blame`, `version`, `help`) go through when there is a reason.
+  - Every other verb (`bootstrap`, `bootout`, `kickstart`, `enable`, `asuser`, `bsexec`, `submit`, `setenv`, `start`, `stop`, …) is refused with the reason, for example "HOME (…) is not your real home folder (…), so I won't touch the real launchd service (its name is shared). Use --dry-run or the test hooks."
+  - A `bootstrap` is also refused unless its plist is `servicePlistPath(realHome)`.
+- `service.js` `main()` refuses `install` (not `--dry-run`), `uninstall`, `start`, `stop` and `restart` up front for the same reasons. `deploy` stops before its restart.
+- **Rule for tests and fake-HOME runs: inject the runner** (`deps.run`) and the rest of `deps`. Never hand `realDeps()` to code that may reach launchctl. The tests do this throughout. The tests that touch the real runner always point it at a `launchctl` path that doesn't exist, so even a broken guard could only fail with ENOENT. One of them removes `NODE_TEST_CONTEXT` for a moment to check the entry-script belt. The one test that lets a state change through the guard (with the entry standing in for `scripts/service.js`) needs the real HOME, and skips itself when HOME isn't the real home.
+
+### Server log
+
+- Every line starts with the local time and offset: `2026-11-28T09:14:03-05:00 The Desk is running at ...`. `createLogger()` in `server/log-file.js` stamps each line of a multi-line message (validator reasons, stack traces). Node's own crash output (an uncaught exception) is still unstamped. launchd's next start line dates it.
+- At start, in the live copy: `The Desk: this is main @ 1a2b3c4 "Subject", deployed <time>`.
+- SIGTERM (launchd stop, logout, shutdown) or SIGINT (Ctrl+C): `The Desk is stopping (SIGTERM)`, close, exit 0. A second signal while stopping ends it at once. A reboot now reads as a "stopping" line followed by a "running at" line after login.
+
+### Preview button (port 3000)
+
+`.claude/launch.json` ran `npm run dev` from the main checkout, against Snow's real `~/agent-house`. It now runs `npm run preview`, which is `PORT=3000 DESK_HOME=.desk-preview node --watch server/index.js`. That folder is gitignored and starts empty (sample edition, no reads), so a preview tab can't overwrite Snow's saves. The configuration keeps the name `dev`, so the desktop app's button still finds it.
+
+### Tests
+
+- `test/deploy.test.js`: real git on small temp repos. Their git runs with every inherited `GIT_*` variable removed, plus `GIT_CONFIG_GLOBAL=/dev/null` and `GIT_CONFIG_NOSYSTEM=1`, so no hooks, no signing, and no hook-exported `GIT_DIR` pointing at the real repo.
+  - npm, launchctl, lsof and the health check are fakes. The fake npm empties `node_modules` first, as npm 11 does.
+  - Covers: the first deploy (service not moved, not installed, already moved; npm failing leaves no live copy); the happy path; lockfile changed (npm in staging before the checkout, old `node_modules` swapped out) or not; `node_modules` missing; no deploy recorded; already on main; uncommitted work and story branches never going live.
+  - Refusals: a dirty live copy (nothing staged), a foreign folder or repo at the live path, running from the live copy, a live path in the work folder, no main, a commit with no lockfile.
+  - Failures and leftovers: npm failing (live copy's commit, packages and record untouched, no restart) and the retry after it; a leftover staging folder removed, a foreign one left alone; the restart failing.
+  - Also: git and npm getting the cleaned environment, and dry runs that only read.
+  - Round three: `node_modules` incomplete (repaired); a symlinked `node_modules` (dangling or not) moved aside; the second rename failing (old packages and commit put back); a leftover `node_modules.old` restored before cleanup (and the dry run judging those packages); npm's code and cause lines shown, not usage; git's `fatal:` line shown when `worktree add` fails on a hand-deleted live copy; an unchanged deploy keeping `.deployed.json` byte for byte; the repo's `.gitignore` rules.
+  - One test drives a stand-in `npm` shell script through the real `runCommand`: it must run in `<live>.staging`, never the work folder.
+- Closing round: `runCommand` with a background grandchild (done in 0.5 s, exit 0), the hard stop reaching the whole group (an orphan `sleep` that ignores SIGTERM is gone), Ctrl+C on the script stopping its command, long output keeping start and end. Plus `launchdRefusal` and `guardLaunchctl` cases, the guarded real runner under a fake HOME, `main()` refusing state-changing commands, the guard on a dirty copy and a server that doesn't load, `loadCheck` for real (a missing `fast-deep-equal`, and this repo), and deploy on:
+  - a post-checkout hook that fails after the move;
+  - a checkout that lands elsewhere, or doesn't move;
+  - a server that doesn't load (repaired);
+  - a pre-N1 `.gitignore`;
+  - leftover temp files;
+  - staging cleanup failing after a swap, or at the start;
+  - a fake HOME at restart.
+- `test/service.test.js`: the plist points at the live copy; install refuses without it, without `node_modules` or without a readable `.deployed.json` (no launchctl at all); an old plist from the work folder gets moved; status shows the folder and deployed commit. `runCommand` is tested for real: it runs in the given `cwd`, a `timeoutMs` stops a long child, a child that ignores SIGTERM is SIGKILLed after the grace period (and is gone afterwards), and `env` is passed. The guard is tested on every half-deployed state: no or incomplete `node_modules`, no `package.json`, no or broken `.deployed.json`, a stale `.deployed.json` (HEAD differs) and an unreadable HEAD. Assertions check the actual work-folder path, not the word "Documents", so a `TMPDIR` containing "Documents" passes.
+- `test/server.test.js` and `test/log-file.test.js`: timestamps (winter, summer, the local day, offsets east and on the half hour), every line stamped, the stopping line on SIGTERM and SIGINT with exit 0, the deployed line at start. `test/deployed.test.js`: reading and cleaning `.deployed.json`. `test/preview.test.js`: the preview script and `launch.json`.
+- N1c tests:
+  - deploys after one was cut off: after its swap, with main still broken (the old packages come back, rollback to the record); after its checkout, then a good commit (reinstall, goes live); in a packages-only deploy (old packages back, no reinstall);
+  - a rollback whose checkout fails (said plainly: the copy can't start again), with the next deploy still going back to the record, not to HEAD;
+  - after a signal the caller can't carry on (two commands, one finishing during the wait), a second signal stops everything at once, and the group still holding the pipes is killed when the drain ends;
+  - the entry-script belt.
+
+  Mutation checks: rolling back to HEAD fails 2 deploy tests; settling while stopping fails the carry-on test; without the belt, 2 guard tests fail.
+- N1b: deploy putting the old commit (and the old packages, from staging) back when the new code doesn't load. That covers a broken import in a fake world, and for real an import of a package nobody installed, plus a first deploy that records nothing. The load check runs between the checkout and the restart, with the service's environment (a real `NODE_OPTIONS` preload doesn't count). The guard's allow-list, any-case matching, test-run and no-config refusals, the bootstrap plist rule and `realDeps(cfg)`. Signal forwarding: SIGINT, SIGHUP and SIGQUIT reach the command as themselves; a command that ignores SIGINT is SIGKILLed after about 2 s with no orphan; 15 commands at once share one handler per signal. Mutation checks: without the load check after the swap 5 deploy tests fail; with the old deny-list 2 guard tests fail.
+- Scratch servers in this story used ports 4399–4404 with `DESK_HOME` under `.tmp-*/` (gitignored). Dry runs used a fake `HOME` outside the repo: deploy refuses a live path inside the checkout.
+
+### One-time cutover (lead dev, with Snow's OK)
+
+Done on 27 Nov 2026 at 13:42: the service runs from `/Users/snow/the-desk-live`, the done-when check gave 404, and the next two deploys (Board: N1 done, then N3) each restarted in about a second. The steps stay here for reference and for the rollback.
+
+Snow's OK is needed because this reinstalls the always-on service. Expect about two seconds when 4321 doesn't answer. Her data in `~/agent-house` is untouched.
+
+1. **Record the rollback point, then merge.** In `~/Documents/Projects/the-desk`, with `git status` clean and on `main`:
+   ```
+   # main before N1, kept outside the repo for a rollback; only while N1 isn't merged yet
+   git merge-base --is-ancestor n1-live-copy main || git rev-parse main > ~/the-desk-pre-n1.sha
+   git merge --no-ff --no-edit n1-live-copy && npm test
+   ```
+   Until step 5 the service still runs from this folder, now on N1's code (`app/` is unchanged by N1, so 4321 looks the same).
+2. **Look first:** `npm run deploy -- --dry-run`. It should plan `npm ci --omit=dev` in `/Users/snow/the-desk-live.staging`, then `git worktree add --detach /Users/snow/the-desk-live <sha>`, the swap, and `.deployed.json`. Then it stops because the service "still runs from /Users/snow/Documents/Projects/the-desk".
+3. **Make the live copy:** `npm run deploy`. It installs the packages beside the live copy, makes `~/the-desk-live`, swaps them in and records the commit. Then it stops (exit 1 is expected here) with "Run npm run service:install once to move the service to the live copy." If npm fails, nothing is made. Fix it and run it again.
+4. **Look first:** `npm run service:install -- --dry-run`. Check that the line "The service will run The Desk from the live copy: …" names `/Users/snow/the-desk-live, main @ <sha>`, and that the plist's `WorkingDirectory` and `server/index.js` are inside `/Users/snow/the-desk-live`.
+5. **Move the service:** `npm run service:install`. It writes the new plist, boots out the old service, starts the new one, and waits for `OK: The Desk is running at http://localhost:4321`.
+6. **Check:**
+   - `npm run service:status`: `Runs from: /Users/snow/the-desk-live`, `Deployed: main @ <sha> ...`, `Answers: yes`, and no "still runs from" warning.
+   - `grep -E 'running at|this is main' ~/agent-house/logs/the-desk.log | tail -n 2`: timestamped `running at` and `this is main @ <sha>` lines.
+   - **The story's "done when", part 1: work in the work folder no longer reaches 4321.** Under Sprint 1 this check gives 200, because the service served `app/` straight from this folder. After N1 it must give 404. The file is never committed; delete it straight away:
+     ```
+     cd ~/Documents/Projects/the-desk
+     echo 'N1 check' > app/n1-check.txt
+     curl -s -o /dev/null -w '%{http_code}\n' http://localhost:4321/n1-check.txt   # must be 404 (Sprint 1: 200)
+     rm app/n1-check.txt && git status --short                                     # nothing left over
+     npm run service:status                         # Runs from: /Users/snow/the-desk-live, Deployed: main @ <sha>
+     PID=$(lsof -nP -iTCP:4321 -sTCP:LISTEN -t)
+     lsof -a -p "$PID" -d cwd -Fn | grep '^n'       # n/Users/snow/the-desk-live
+     ```
+   - **Part 2: `npm run deploy` brings it up to date.** Commit the board update ("Board: N1 done") on `main` as usual, then `npm run deploy`. It should say "Moving the live copy from <old> to <new>…", restart, and end with `The Desk is live at http://localhost:4321 on main @ <new sha> "Board: N1 done"`. `service:status` then shows that sha. The log shows `The Desk is stopping (SIGTERM)` followed by a new `running at` and `this is main @ <new sha>`.
+7. Nothing else to commit (`.deployed.json` lives only in the live copy). Update `docs/status.md` as usual, then `npm run deploy` again if you like (a deploy that changes nothing keeps `.deployed.json` as it is). Keep `~/the-desk-pre-n1.sha` until N1 has run a few days, then delete it.
+
+**Afterwards:** merge to main, then `npm run deploy`. That's the whole release. Don't delete `~/the-desk-live` by hand. If it ever has to go, run `npm run service:uninstall`, then `git worktree remove ~/the-desk-live`. If it was deleted anyway, `git worktree prune` before the next deploy.
+
+**Rollback** (only if the cutover fails, with Snow's OK). Neither way switches branches in the main checkout.
+
+- **The rollback point** is main before the N1 merge, in `~/the-desk-pre-n1.sha` (step 1). If that file is gone, use the merge's first parent: `git rev-parse "$(git log --merges --first-parent --grep='n1-live-copy' -1 --format=%H main)^1" > ~/the-desk-pre-n1.sha`. Don't use a later sha: anything after the merge contains N1, and its install would just put the service back on the live copy.
+- **Quick: run the pre-N1 code from its own folder.** Sprint 1's `service:install` points the service at whatever folder it runs from, so give it a detached worktree of that commit, outside `~/Documents` (not `/tmp`, which macOS empties on restart). One chained block, so any failed check stops it:
+  ```
+  cd ~/Documents/Projects/the-desk && PRE=$(cat ~/the-desk-pre-n1.sha) && git worktree add --detach ~/the-desk-rollback "$PRE" && test -f ~/the-desk-rollback/server/index.js && test ! -e ~/the-desk-rollback/scripts/deploy.js && cd ~/the-desk-rollback && npm ci --omit=dev && npm run service:install
+  ```
+  (`test ! -e …/scripts/deploy.js` proves it is pre-N1 code: deploy.js only exists with N1.) Check:
+  - `npm run service:status` says it runs and answers. It must NOT show `Runs from: /Users/snow/the-desk-live`: Sprint 1's status has no "Runs from" line at all.
+  - `plutil -extract WorkingDirectory raw ~/Library/LaunchAgents/local.thedesk.server.plist` prints `/Users/snow/the-desk-rollback`.
+  - `lsof -a -p "$(lsof -nP -iTCP:4321 -sTCP:LISTEN -t)" -d cwd -Fn` shows `n/Users/snow/the-desk-rollback`.
+
+  `main` keeps N1. To return to the live copy after a fix: merge it, then redo the cutover from step 2 (keeping `~/the-desk-pre-n1.sha`), and finally `git worktree remove ~/the-desk-rollback`.
+- **Withdraw N1 from main:** on `main` in the work folder, `git revert --no-edit -m 1 <merge sha>`, then `npm run service:install` (the Sprint 1 version runs the service from the work folder again, with the old branch-switching problem). The same checks apply, with the work folder in place of `~/the-desk-rollback`. To bring N1 back later, `git revert --no-edit <that revert's sha>`, then redo the cutover from step 2, keeping `~/the-desk-pre-n1.sha`.
+- In both cases `~/the-desk-live` stays but is unused. Remove it with `git worktree remove ~/the-desk-live` once it's no longer needed.
+
 ## N2. News contract: schemas and validator
 
 **Files.** `data/schema/news.schema.json` (the morning edition) and `data/schema/breaking.schema.json` (one breaking story), JSON Schema 2020-12. `server/news-schema.js` is the validator, shared by `npm run validate-news` now and by the server from N3. `server/schema-common.js` holds what Product Feed and News share (ajv setup, error wording, file reading, date and link checks); `server/feed-schema.js` now uses it, with Product Feed's messages unchanged except for the stricter link rules from the review (below). Fixtures for tests and N3: `test/fixtures/news/news.json` (3 stories, 2 on the shelf, every region and kind) and `test/fixtures/news/breaking.json`. Paths: `newsDir`, `newsPath`, `breakingPath` in `server/config.js`.
@@ -126,7 +340,7 @@ News keys:
 **Wila's line.** "Three stories today, about 3 minutes." → "Two left, about 2 minutes." → "All three read. You're up to date." ("No top stories in this edition." when there are none). The agent's `note`, when not blank, shows under the capsule as "Note from the News desk: …". Greeting by Toronto hour: morning 5 to 11, afternoon 12 to 16, evening 17 to 23, "Hello, Snow" overnight. The date line is "Monday 7 December · Morning edition", plus "Sample stories" when the server sent `sample: true`.
 
 **State and XP.**
-- `read`: `"<edition>/<id>"` → `Date.now()`. `storyKey` returns null for a key the server would refuse (and the card then has no Mark read button), because one refused key would make every later PUT fail with a 400. For the same reason `normalizeNewsState` drops `read`, `dismissed` and `awarded` entries the server would refuse, and keeps unknown keys.
+- `read`: `"<edition>/<id>"` → `Date.now()` (`"<edition>/sample-<id>"` for The Desk's sample edition: see review fix 2). `storyKey` returns null for a key the server would refuse (and the card then has no Mark read button), because one refused key would make every later PUT fail with a 400. For the same reason `normalizeNewsState` drops `read`, `dismissed` and `awarded` entries the server would refuse, and keeps unknown keys.
 - `awarded`: `"<edition>/<id>"` → time, the stories already paid. `toggleRead` pays `READ_XP` (10) only the first time a key is read; un-marking and re-marking never pays twice, and neither does a reload. The pay goes through `app.js`'s `award(10, 'story read')`, so XP, level, the streak's day and the toast are exactly the feed's, saved in Product Feed's state. It pays only when both states can be saved (`canAward: store.canSave && feedStore.canSave`); otherwise the story is marked read but neither paid nor recorded.
 - `shelfOpen`: saved on every toggle; closed by default. Which shelf items are opened is not saved.
 - `dismissed`: `dismissed[at] = Date.now()`, keyed by `at` exactly as served. `isBreakingVisible` also needs a real `at` and a headline.
@@ -139,7 +353,20 @@ News keys:
 
 **For the designer.** The markup is plain and complete; restyle freely. Hooks: `.region-<us|china|eu|global|other>` on region tags and region bars, `.nstory.read` / `.nitem.read`, `.ab.nread.on`, `#newsRail .rb[aria-current]` (rosy brown already). Not built from version C: the rail's Past editions, Sources and Lenses icons (not in Phase 1), and the "paywalls" number (we don't know it). Copy you may want to change: the greeting hours, Wila's lines, "Note from the News desk", "No top stories yet".
 
-**Follow-up.** `read` and `awarded` each gain up to 10 entries a day (about 30 bytes each), so reading every story fills roughly 220 KB a year of the 1 MB state cap. Pruning entries older than a few months would be safe (those editions don't come back); not done yet.
+**Growth.** `read` and `awarded` each gain up to 10 entries a day (about 30 bytes each). Since N4b the server keeps the newest 2000 of each (and of `dismissed`), so they can't fill the 1 MB cap.
+
+**Review fixes (after Snow's OK and the tester's pass).** Each has tests.
+1. **Two tabs: nothing lost, nothing paid twice.** Snow keeps The Desk open in the Claude app's pane and in a browser; each tab loads both states and every save sends the whole state, so a tab that loaded earlier used to write back old values. (A first fix merged on the client, with a GET before each PUT; the final check showed it still lost data on page close and in races, so it was replaced by the design below.)
+   - **The server merges every save** (`server/state-store.js`). Inside the queued write it reads `state.json` as it is now and folds the incoming state into it (`mergeIncoming`), so no other save can land between the read and the write, and it covers every client: the page-close flush, a GET/PUT race, and old tabs still running main's code. `awarded` (both desks) and `dismissed` (News) are unions; `badges` a union keeping the earliest time; `days` a union, sorted, the last 120. `xp` is a counter: the page sends `_sync` with the XP it last synced (checked, never saved), and the server adds only the page's own change, so a stale tab adds only its own XP and XP never goes down through a save; a page that sends no base gets `max(current, sent)`. N4b added a per-tab high-water mark so a resent save is added once (see N4b). A file that can't be read answers 500 and is left alone (it isn't saved over); a merged state over 1 MB answers 413. N4b also checks the union keys' values and caps them.
+   - **Folders, saved items, notes, reads and the shelf stay last-save-wins between tabs.** A stale tab saving them writes its own copy. The reloads below make that rare; a read undone this way is never paid again.
+   - **The client** (`createStateClient` in `lib.js`): no GET before a PUT, and nothing is awaited between taking the state and sending it, so there's no moment when a change is neither waiting nor on its way. `counters: ['xp']` (Product Feed) adds `_sync` and moves the base to what was sent once the PUT lands (never backwards, as two replies can arrive in either order). Since N4b a page-close flush counts from that confirmed base, and the server's high-water mark covers a PUT still on its way. `reload(apply)` hands over the fresh state only when nothing is waiting to be saved and no PUT is out, checked in the same instant it applies, so a change made while the GET was out is never replaced. `flushOnExit` sends nothing after a failed read and keeps the change waiting. `peek()` reads without changing anything. A client whose first GET failed still never reads, reloads or saves.
+   - **Stale tabs catch up before they act.** A tab can't be clicked before it is shown or focused, so `visibilitychange` (to visible), window `focus`, and opening `#feed` or `#news` reload both states when idle and redraw if something changed (not while a folder is being renamed or the notes drawer is open). Before paying, `readStory` / `readArticle` still check the server's `awarded` with `peek()` and reload Product Feed's state alongside, so the 10 XP lands on the latest total. Mark read clicks made while a check is out are queued, not dropped.
+   - **Before and after** (`.tmp-n4/scenarios.mjs`, the same scenarios against the code at b235b65 and now, each building its tabs the way its pages do): a stale tab saving a note after the other tab reached 40 XP: 15 before, 40 after. Closing a stale page: `awarded` erased on both desks and the two items paid twice (4 payments for 2) before; kept, 2 payments, after. The refresh race (Snow opens the shelf while a reload is out): lost before, kept after. A page running main's code saving after another tab paid for two articles: `awarded` gone and XP back to 15 before; both kept and 35 after. Five seeded 120-step sessions: XP short by 10 to 40 in four of five and one double payment before; after, no XP lost and no double payment in those sessions. They have no cut replies: until N4b, a PUT that landed but whose reply was lost (a restart mid-save) was added again by its retry.
+   - **Tests.** `test/two-tabs.test.js` (two tabs on the real server: the stale note save, a stale tab's own XP on top, an old page lowering nothing, the page-close flush, the stale pay check, old states with no `awarded` or `dismissed`, un-marking, the refresh race, and three seeded sessions checking that, in those sessions, XP equals 10 per payment, every payment is recorded and nothing is paid twice; switching the server merge off fails 9 of the 11), `test/state-merge.test.js` (the merge rules, `_sync`, 20 queued writes, 500 on a corrupt file, 413 once merged), `test/lib.test.js` (counters, reload's race, exit rules, nothing awaited before a PUT), `test/helpers/tabs.js` (tabs built as the pages build them).
+2. **Sample reads have their own keys.** The sample's edition is a real day (2026-12-07) with ids s1 to s3 and m1 to m7, so reading it used to mark the agent's real stories of that day read and pay for them. A story in a `sample: true` edition is now keyed `<edition>/sample-<id>` (the server's key rule still holds; an id over 33 characters gets no key, so no Mark read, rather than a refused one), and reading it pays no XP: the toast says "Sample story: marked read, no XP." Real editions keep `<edition>/<id>`.
+3. **Warm-up glow at night.** The glow's first two stops are now `.3` and `.06` (were `.36` and `.16`); the 80% stop and the keyframes are unchanged. Measured at the real viewport (a copy of `.tmp-design/audit.mjs` that doesn't stretch the page to its full height), night, glow frozen: Wila's line is 5.00 at 1440x900 (300 and 360 ms) and 4.67 / 4.61 at 1280x800 (was 4.62 to 4.64 and 4.32 to 4.33 with the old stops on the same setup). That left the darkest pixel behind "Today's top 3" at 4.45 (1440x900, night, 250 to 300 ms; 4.61 with no glow). The house rule is a strict 4.5:1 with no large-text exception, so the heading's feathered shade (`.nh2::before`) is now a touch deeper: `.46` / `.37` (was `.42` / `.34`). Softening the glow's first stop didn't help (`.25` to `.3` all gave 4.45): the heading sits at the far left of the glow, where only the `.06` second stop reaches it, and lowering that to `.04` barely passed (4.53) while changing the motion. With the deeper shade, the darkest pixel behind every text run, measured on two test Desks (a real edition with no banner, and the sample with today's breaking banner) at 1440x900 and 1280x800, glow frozen at 250, 300 and 360 ms: night 4.54 or better (the heading 4.59 to 4.60, Wila's line 4.54 to 4.75), golden 4.81 or better, morning 4.80 or better. A test keeps the shade at least that deep.
+4. **Nits.** `#newsTopTitle` has `scroll-margin-top: 24px`, so the rail's "Today's edition" jump keeps its focus ring on screen. The "US and China weighted highest" hint (`#newsRegionsHint`) hides when the edition has no stories.
+5. **Product Feed pays once per article** (the Sprint 1 follow-up). Its state has `awarded` too (`{ "<article id>": time }`); `toggleArticleRead` in `lib.js` pays only the first time, so un-marking and re-marking no longer pays again. A state saved before `awarded` existed counts every article already read as paid (`normalizeState` seeds `awarded` from `read` when it is missing or broken), so nothing is paid twice after the upgrade. The server's Product Feed rules now know `awarded` (must be an object; 400 otherwise); it was kept before as an unknown key. Badges are unchanged. Across tabs see fix 1: the read button goes through `readArticle`, which checks the server's `awarded` with `peek()` and reloads the state when idle before paying. Read or unread is decided at the click, so a reload landing during the check can't un-mark (the same in News's `readStory`, via `markStoryRead`). While saving is paused, an article is marked read without paying (it can't be checked).
 
 ## N4 (look). The News desk in Lotus glass (designer)
 
@@ -166,6 +393,18 @@ News keys:
 **Screenshots.** `node scripts/screens-home.js <dir>` makes a test Desk (the sample edition, plus today's breaking story at 08:30 Toronto; refuses ~/agent-house), then `DESK_HOME=<dir> PORT=4423 node server/index.js` and `node scripts/screens.js http://127.0.0.1:4423 docs/screens/news app`. The script now shoots the room, the Product Feed and the News desk in all three lights at 1440 and 390 (first screen and full page), plus News with story 1 read and the shelf open. Golden and night are shot at 16:00 and 20:30 so Wila's greeting fits the light. It answers every save itself (PUT `/api/state`, `/api/news/state`), so it never changes the Desk it looks at, and it never un-reads a story or closes a shelf that was saved open. The developer's plain-styled shots are in `docs/screens/news/before/`.
 
 **For the developer (not done here).** Version C's "paywalls" number and "Sample numbers" caption are left out (we don't know paywalls; the capsule already says "Sample stories"). The day's edition stamp (read all 3) is a new mechanic, so it waits for a later sprint.
+
+## N4b. State hardening (after N4 went live)
+
+The closing check's attack found edge cases in the two-tab saves. Each fix has tests (`test/state-merge.test.js`, `test/two-tabs.test.js`, `test/lib.test.js`, `test/app.test.js`).
+
+1. **A resent save pays once: a per-tab high-water mark.** A reply cut after the save landed (a deploy restart's SIGTERM did it in 3 of 121 timings) made the 15 s retry add the same XP again. Now each page load has a random tab id, and every Product Feed PUT carries `_sync: { xp: <base, the XP last confirmed>, tab: <id>, sent: <the xp in this PUT> }`. The server adds `max(0, sent - max(base, seen[tab]))` and then sets `seen[tab] = sent`. `seen` lives in `state.json` as `_seen` (`{ tab: { xp, at } }`, the newest 50 tabs by time), so it survives a restart; every GET strips it, and a page's own `_seen` is ignored. So the exact same PUT three times pays once, and a retry after a cut reply adds only what was earned since. Before (main at 14bc32b) and after, 40 XP synced and 10 earned: the same PUT three times gave 70, now 50; a cut reply then the retry gave 60, now 50 (`.tmp-n4/scenarios2.mjs`). `flushOnExit` counts from the confirmed base again (not from the PUT still on its way): if that PUT lands too, the mark stops it counting twice. What's left: a page from before N4b (no tab id) still has no replay protection until it is reloaded; and a tab whose mark was pruned (50 newer page loads since) and then replays a cut save would add it again, which is very unlikely.
+2. **Union values are checked, because union keys are permanent.** Product Feed: `days` entries must be real calendar days, at most a day ahead of the server's clock (`2026-11-30` on 27 Nov is refused); `awarded` and `badges` values must be times (a number, or an ISO time with a zone) under names of 1 to 200 characters. When merging, days and times already in the file that wouldn't pass (a hand edit) are dropped. The page mends its own copy on load (`normalizeState`: a time that isn't a number becomes now, so the entry still counts; a bad name or day is dropped; XP is clamped to 0 to `MAX_SAFE_INTEGER`), so one bad old value can't get every save refused.
+3. **Caps.** `awarded` (both desks), `dismissed` and News `read` keep their newest 2000 entries (by time) on every merge, so the unions can't fill the 1 MB cap: years of Snow's use. `badges` and `days` are small by nature (`days` already keeps 120).
+4. **XP sanity.** `xp`, `_sync.xp` and `_sync.sent` must be 0 to `Number.MAX_SAFE_INTEGER`; `_sync.tab` is 1 to 64 letters, digits, dashes or underscores, never `__proto__`. `mergeXp` never saves a sum past the safe range (it keeps what is saved).
+5. **A quick tab switch no longer loses a note or a read.** A tab that came into view inside the other tab's 600 ms save delay reloaded before that save landed, and its next save then dropped it (last-save-wins). Now the page sends what is waiting at once when it is hidden (`visibilitychange`) or loses focus (`blur`), not only on `pagehide`, and a GET waits for saves already queued on the server, so the tab switched to reads it. In the browser, the other tab had the note 30 ms after the switch, and its next save kept the note and the News read.
+6. **Clean files and a clean stop.** On start, each state store sweeps `.state.json.*.tmp` files older than a minute from its desk folder (a crash's leftovers; the age limit leaves a second server's write in progress alone). `server.settled()` resolves once the queued saves are done, and `start()`'s stop waits for it before exiting, still never longer than 2 s. A request that arrives after the stop began is cut, and the page retries it (the high-water mark keeps that retry from paying twice).
+7. **Still last-save-wins between tabs:** folders, saved items, notes, reads and the shelf. The catch-up on focus and the send-on-leave make that rare.
 
 ## N5. The TV in the room (designer)
 

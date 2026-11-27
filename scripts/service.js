@@ -3,25 +3,27 @@
 // npm run service:install -- --dry-run     prints the plist and the launchctl commands, changes nothing
 //
 // Keeps The Desk always on with a per-user launchd agent, ~/Library/LaunchAgents/local.thedesk.server.plist.
-// launchd starts `node server/index.js` from this folder when Snow logs in (RunAtLoad) and starts it
-// again whenever it stops, crash or clean exit alike (KeepAlive true; ThrottleInterval keeps a crash
-// loop to one try every 10 s). Only bootout (service:stop / service:uninstall) keeps it stopped.
-// It runs on 127.0.0.1:4321 with DESK_HOME=~/agent-house, and logs to ~/agent-house/logs/the-desk.log.
+// launchd starts `node server/index.js` from the live copy (~/the-desk-live, a main-only git worktree
+// that npm run deploy keeps up to date; never the checkout you work in) when Snow logs in (RunAtLoad)
+// and starts it again whenever it stops, crash or clean exit alike (KeepAlive true; ThrottleInterval
+// keeps a crash loop to one try every 10 s). Only bootout (service:stop / service:uninstall) keeps it
+// stopped. It runs on 127.0.0.1:4321 with DESK_HOME=~/agent-house, and logs to ~/agent-house/logs/the-desk.log.
 //
 // Uses the modern launchctl verbs: bootstrap gui/<uid> <plist>, bootout gui/<uid>/<label>,
 // kickstart -k, print, print-disabled and enable. Every command goes through an injected runner,
 // so the tests never call launchctl.
 //
-// macOS privacy: this repo lives in ~/Documents, which macOS protects. A node started by launchd
-// may be refused ("Operation not permitted") until node is allowed in System Settings; the health
-// check spots that in the log and prints the steps.
-import { execFile } from 'node:child_process';
+// macOS privacy: the live copy sits outside ~/Documents, so macOS has nothing to ask. If DESK_LIVE_DIR
+// ever puts it in a protected folder, a node started by launchd may be refused ("Operation not
+// permitted") until node is allowed in System Settings; the health check spots that and prints the steps.
+import { spawn } from 'node:child_process';
 import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
-import { DEFAULT_PORT, HOST, REPO_ROOT, SERVICE_LABEL, servicePlistPath } from '../server/config.js';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { DEFAULT_PORT, HOST, SERVICE_LABEL, resolveLiveDir, servicePlistPath } from '../server/config.js';
+import { describeDeployed, oneLine, readDeployed } from '../server/deployed.js';
 import { rotateLog } from '../server/log-file.js';
 import { probeDesk } from '../server/probe.js';
 
@@ -33,15 +35,45 @@ export const LSOF = '/usr/sbin/lsof';
 export const THROTTLE_SECONDS = 10;
 export const HEALTH_TIMEOUT_MS = 15_000;
 export const SERVICE_PATH = '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin';
+export const GIT = 'git';
+export const KILL_GRACE_MS = 10_000;
+export const OUTPUT_HEAD = 1024 * 1024;
+export const OUTPUT_TAIL = 1024 * 1024;
+
+// Environment variables that tell git which repo, index or object store to use. A git hook,
+// `git rebase -x` or `git bisect run` exports them; left in, they would point `git -C <folder>`
+// at whatever repo started us instead of the folder named.
+export const GIT_LOCATION_VARS = [
+  'GIT_DIR',
+  'GIT_WORK_TREE',
+  'GIT_INDEX_FILE',
+  'GIT_COMMON_DIR',
+  'GIT_OBJECT_DIRECTORY',
+  'GIT_ALTERNATE_OBJECT_DIRECTORIES',
+  'GIT_CONFIG_PARAMETERS',
+  'GIT_CONFIG_COUNT',
+  'GIT_NAMESPACE',
+  'GIT_PREFIX',
+];
+
+/** A copy of env without the variables that would redirect git (GIT_CONFIG_KEY_n / _VALUE_n too). */
+export function gitEnv(env = process.env) {
+  const clean = { ...env };
+  for (const name of Object.keys(clean)) {
+    if (GIT_LOCATION_VARS.includes(name) || /^GIT_CONFIG_(KEY|VALUE)_\d+$/.test(name)) delete clean[name];
+  }
+  return clean;
+}
 
 const USAGE = `Usage: npm run service:<command>
 
-  service:install     install the always-on service and start it
+  service:install     install the always-on service and start it, running the live copy
+                      (~/the-desk-live; make it first with npm run deploy)
                       (add "-- --dry-run" to see what it would do, changing nothing)
-  service:status      is it running, does http://localhost:${DEFAULT_PORT} answer, where is the log
+  service:status      is it running, which commit is live, does http://localhost:${DEFAULT_PORT} answer, where is the log
   service:stop        stop it (it stays off until service:start, or until you next log in)
   service:start       start it again
-  service:restart     restart it (after changing server code)
+  service:restart     restart it (npm run deploy does this for you after updating the live copy)
   service:uninstall   stop it and remove it (your data and logs stay in ~/agent-house)`;
 
 // ---------- arguments ----------
@@ -85,8 +117,11 @@ export function resolveNodePath({ exists = isExecutable, execPath = process.exec
   return exists(HOMEBREW_NODE) ? HOMEBREW_NODE : execPath;
 }
 
-/** Everything about the service, derived from the home folder, the user id and this repo. */
-export function serviceConfig({ home = os.homedir(), uid = process.getuid?.() ?? 0, repoRoot = REPO_ROOT, nodePath = resolveNodePath() } = {}) {
+/**
+ * Everything about the service, derived from the home folder, the user id and the folder it runs
+ * The Desk from: the live copy (runDir, default ~/the-desk-live or DESK_LIVE_DIR), not this checkout.
+ */
+export function serviceConfig({ home = os.homedir(), uid = process.getuid?.() ?? 0, env = process.env, runDir = resolveLiveDir(env, home), nodePath = resolveNodePath() } = {}) {
   const deskHome = path.join(home, 'agent-house');
   const logDir = path.join(deskHome, 'logs');
   return {
@@ -97,8 +132,8 @@ export function serviceConfig({ home = os.homedir(), uid = process.getuid?.() ??
     home,
     plistPath: servicePlistPath(home),
     nodePath,
-    repoRoot,
-    serverPath: path.join(repoRoot, 'server', 'index.js'),
+    runDir,
+    serverPath: path.join(runDir, 'server', 'index.js'),
     deskHome,
     logDir,
     logPath: path.join(logDir, 'the-desk.log'),
@@ -142,7 +177,7 @@ export function buildPlist(cfg) {
 \t\t${str(cfg.serverPath)}
 \t</array>
 \t${key('WorkingDirectory')}
-\t${str(cfg.repoRoot)}
+\t${str(cfg.runDir)}
 \t${key('EnvironmentVariables')}
 \t<dict>
 ${env}
@@ -160,6 +195,29 @@ ${env}
 </dict>
 </plist>
 `;
+}
+
+const XML_ENTITIES = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'" };
+const xmlUnescape = (text) =>
+  text.replace(/&(amp|lt|gt|quot|apos|#\d+|#x[0-9a-f]+);/gi, (_, e) =>
+    e[0] === '#' ? String.fromCodePoint(e[1].toLowerCase() === 'x' ? parseInt(e.slice(2), 16) : Number(e.slice(1))) : XML_ENTITIES[e],
+  );
+
+/** The WorkingDirectory an installed plist runs the server in, or null when it names none. */
+export function plistWorkingDirectory(text) {
+  const m = /<key>WorkingDirectory<\/key>\s*<string>([^<]*)<\/string>/.exec(String(text));
+  return m ? xmlUnescape(m[1]) : null;
+}
+
+/** Reads the installed plist: { installed, text, runDir } (runDir: its WorkingDirectory, or null). */
+export function readInstalledPlist(cfg, deps) {
+  let text;
+  try {
+    text = deps.fs.readFileSync(cfg.plistPath, 'utf8');
+  } catch {
+    return { installed: deps.fs.existsSync(cfg.plistPath), text: '', runDir: null };
+  }
+  return { installed: true, text, runDir: plistWorkingDirectory(text) };
 }
 
 // ---------- launchctl ----------
@@ -204,13 +262,177 @@ export function isDisabled(printDisabledText, label) {
   return new RegExp(`"${escaped}"\\s*=>\\s*(disabled|true)`).test(String(printDisabledText));
 }
 
-/** Runs a command; resolves { code, stdout, stderr } and never rejects. */
-export function runCommand(cmd, args, { timeoutMs = 20_000 } = {}) {
+/**
+ * Keeps the start and the end of a long output, at most head + tail characters (npm puts its error
+ * lines last, so the end matters as much as the start).
+ */
+export function outputKeeper(headMax = OUTPUT_HEAD, tailMax = OUTPUT_TAIL) {
+  let head = '';
+  let tail = '';
+  let dropped = 0;
+  const trim = () => {
+    if (tail.length > tailMax) {
+      dropped += tail.length - tailMax;
+      tail = tail.slice(-tailMax);
+    }
+  };
+  return {
+    add(chunk) {
+      let rest = String(chunk);
+      if (head.length < headMax) {
+        const room = headMax - head.length;
+        head += rest.slice(0, room);
+        rest = rest.slice(room);
+      }
+      if (rest) {
+        tail += rest;
+        if (tail.length > 2 * tailMax) trim();
+      }
+    },
+    text() {
+      trim();
+      return dropped ? `${head}\n… (${dropped} characters left out) …\n${tail}` : head + tail;
+    },
+  };
+}
+
+// Commands run in their own process group, so the terminal's Ctrl+C (or launchd's SIGTERM) no longer
+// reaches them by itself. One shared handler, installed while any command runs, takes over:
+// - the first signal (SIGINT, SIGTERM, SIGHUP or SIGQUIT) goes on, as itself, to every running group
+//   (SIGINT stays SIGINT, which npm obeys); after up to SIGNAL_WAIT_MS, whatever is left is SIGKILLed
+//   and the signal is raised again, so this process stops the way it would have;
+// - from that moment this process is stopping: runCommand starts nothing new and settles nothing, so
+//   the caller can't carry on (and can't put the handler back to swallow the re-raise);
+// - a second signal while it waits SIGKILLs the groups at once and stops this process.
+export const FORWARDED_SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT'];
+export const SIGNAL_WAIT_MS = 2000;
+const liveGroups = new Set();
+let stopping = null; // { sig, groups } once a signal has arrived
+
+function signalGroup(group, sig) {
+  try {
+    process.kill(-group.pid, sig);
+  } catch {
+    try {
+      group.child.kill(sig);
+    } catch {
+      /* already gone */
+    }
+  }
+}
+
+function stopNow(sig) {
+  for (const group of new Set([...(stopping?.groups ?? []), ...liveGroups])) signalGroup(group, 'SIGKILL');
+  for (const s of FORWARDED_SIGNALS) process.off(s, onProcessSignal);
+  process.kill(process.pid, sig);
+}
+
+function onProcessSignal(sig) {
+  if (stopping) return stopNow(sig); // a second signal: no more waiting
+  stopping = { sig, groups: [...liveGroups] };
+  for (const group of stopping.groups) signalGroup(group, sig);
+  const allExited = Promise.all(stopping.groups.map((group) => group.exited));
+  const waited = new Promise((resolve) => setTimeout(resolve, SIGNAL_WAIT_MS));
+  Promise.race([allExited, waited]).then(() => stopNow(sig));
+}
+
+function trackGroup(group) {
+  if (liveGroups.size === 0 && !stopping) for (const s of FORWARDED_SIGNALS) process.on(s, onProcessSignal);
+  liveGroups.add(group);
+}
+
+function untrackGroup(group) {
+  // While stopping, the handler stays: it must catch a second signal and raise the first one again.
+  if (liveGroups.delete(group) && liveGroups.size === 0 && !stopping) for (const s of FORWARDED_SIGNALS) process.off(s, onProcessSignal);
+}
+
+/** How many commands are running right now, each in its own process group (for the tests). */
+export const runningGroups = () => liveGroups.size;
+
+/**
+ * Runs a command; resolves { code, stdout, stderr } and never rejects.
+ * - The command runs in its own process group, and every stop goes to the whole group, so nothing it
+ *   started is left behind. If this process gets SIGINT, SIGTERM, SIGHUP or SIGQUIT, the same signal
+ *   goes to the group first (see onProcessSignal). The time limit keeps running meanwhile.
+ * - The time limit is hard: at timeoutMs the group gets SIGTERM, and if it is still there graceMs
+ *   later (npm ignores SIGTERM while it waits on a hung registry connection), SIGKILL. It only counts
+ *   as timed out if the command was still running at the deadline.
+ * - Once the command exits, its output gets a short drain (at most 2 s). If something it left running
+ *   still holds the pipes open after that, the group is SIGKILLed; the command's exit code stands.
+ * - Output keeps its first and last OUTPUT_HEAD / OUTPUT_TAIL characters.
+ * @param {{ timeoutMs?: number, graceMs?: number, cwd?: string, env?: Record<string, string|undefined> }} [options]
+ *   cwd: the folder to run it in (npm ci depends on it); env: its environment (default: this process's)
+ */
+export function runCommand(cmd, args, { timeoutMs = 20_000, graceMs = KILL_GRACE_MS, cwd, env } = {}) {
+  if (stopping) return new Promise(() => {}); // this process is about to stop: start nothing new
   return new Promise((resolve) => {
-    execFile(cmd, args, { timeout: timeoutMs, encoding: 'utf8' }, (err, stdout, stderr) => {
-      if (!err) return resolve({ code: 0, stdout, stderr });
-      resolve({ code: typeof err.code === 'number' ? err.code : 1, stdout: stdout || '', stderr: stderr || err.message });
+    const limit = (ms) => (ms >= 1000 ? `${Math.round(ms / 1000)} s` : `${ms} ms`);
+    const out = outputKeeper();
+    const err = outputKeeper();
+    let child = null;
+    let group = null;
+    let timedOut = false;
+    let exited = null;
+    let done = false;
+    let killTimer = null;
+    let drainTimer = null;
+    const toGroup = (sig) => group && signalGroup(group, sig);
+    const cleanup = () => {
+      clearTimeout(termTimer);
+      clearTimeout(killTimer);
+      clearTimeout(drainTimer);
+      if (group) untrackGroup(group);
+    };
+    const finish = (code, signal, error) => {
+      if (done) return;
+      done = true;
+      cleanup();
+      if (stopping) return; // stopping: never settle, so the caller can't carry on
+      const stdout = out.text();
+      const stderr = err.text();
+      if (!error && code === 0 && !timedOut) return resolve({ code: 0, stdout, stderr });
+      const why = error ? error.message : signal ? `stopped by ${signal}` : `exit ${code}`;
+      const note = timedOut ? `\n(stopped after ${limit(timeoutMs)}: it took too long)` : '';
+      resolve({ code: typeof code === 'number' && code !== 0 ? code : 1, stdout, stderr: `${stderr || why}${note}` });
+    };
+    const termTimer = setTimeout(() => {
+      if (exited) return;
+      timedOut = true;
+      toGroup('SIGTERM');
+      killTimer = setTimeout(() => toGroup('SIGKILL'), graceMs);
+    }, timeoutMs);
+    try {
+      child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'], detached: true, ...(cwd ? { cwd } : {}), ...(env ? { env } : {}) });
+    } catch (e) {
+      return finish(null, null, e);
+    }
+    if (child.pid) {
+      let markExited;
+      group = { pid: child.pid, child, exited: new Promise((resolve) => (markExited = resolve)) };
+      child.once('exit', () => markExited());
+      child.once('error', () => markExited());
+      trackGroup(group);
+    }
+    child.stdout.setEncoding('utf8');
+    child.stderr.setEncoding('utf8');
+    child.stdout.on('data', (c) => out.add(c));
+    child.stderr.on('data', (c) => err.add(c));
+    child.on('error', (e) => finish(null, null, e));
+    child.on('exit', (code, signal) => {
+      exited = { code, signal };
+      clearTimeout(termTimer);
+      clearTimeout(killTimer);
+      if (timedOut) toGroup('SIGKILL'); // whatever of the group is left after a timeout goes too
+      // Something it started still holds its output open. That doesn't change how the command went
+      // (the real exit code stands), but nothing else will ever stop it, so its group goes.
+      drainTimer = setTimeout(() => {
+        toGroup('SIGKILL');
+        child.stdout.destroy();
+        child.stderr.destroy();
+        finish(code, signal);
+      }, Math.min(graceMs, 2000));
     });
+    child.on('close', (code, signal) => (exited ? finish(exited.code, exited.signal) : finish(code, signal)));
   });
 }
 
@@ -227,21 +449,21 @@ export function portIsFree(port, host = HOST) {
 
 const PROTECTED_FOLDERS = ['Documents', 'Desktop', 'Downloads'];
 
-/** "Documents" when the repo sits in a folder macOS guards with a privacy prompt, else null. */
-export function protectedFolder(repoRoot, home) {
+/** "Documents" when the folder sits in one macOS guards with a privacy prompt, else null. */
+export function protectedFolder(folder, home) {
   for (const name of PROTECTED_FOLDERS) {
     const dir = path.join(home, name);
-    if (repoRoot === dir || repoRoot.startsWith(dir + path.sep)) return name;
+    if (folder === dir || folder.startsWith(dir + path.sep)) return name;
   }
   return null;
 }
 
 /**
  * macOS privacy (TCC) refusals show up as EPERM / "Operation not permitted", and only matter when
- * the repo is in a protected folder.
+ * the service runs from a protected folder.
  */
 export const looksBlockedByPrivacy = (cfg, logText) =>
-  protectedFolder(cfg.repoRoot, cfg.home) !== null && /EPERM|operation not permitted/i.test(String(logText));
+  protectedFolder(cfg.runDir, cfg.home) !== null && /EPERM|operation not permitted/i.test(String(logText));
 
 // Log text is printed to the terminal: control characters other than tab and newline become "?".
 const printable = (text) => String(text).replace(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/g, '?');
@@ -281,7 +503,7 @@ export function lastLines(text, count = 20) {
 // ---------- messages ----------
 
 export function privacySteps(cfg) {
-  const folder = protectedFolder(cfg.repoRoot, cfg.home) || 'Documents';
+  const folder = protectedFolder(cfg.runDir, cfg.home) || 'Documents';
   return [
     `macOS is stopping node from reading The Desk's folder: it's inside ${folder}, which macOS protects.`,
     'To let it in:',
@@ -298,6 +520,97 @@ function describeExit(svc) {
   return svc.lastExitCode ?? 'unknown';
 }
 
+// ---------- the real launchd service is shared ----------
+
+// launchd's label (local.thedesk.server in gui/<uid>) is the same whatever HOME says. A test, a
+// review or an experiment that reached the real launchctl would restart, stop or remove Snow's live
+// Desk. So the real runner lets through only launchctl verbs that read, unless every one of these
+// holds: HOME is the real home folder, this is not a test run (NODE_TEST_CONTEXT), a service config
+// is bound to the runner (realDeps(cfg)) and it is for the real home with the live copy inside it.
+// A bootstrap must also name the real plist. Tests inject their own runner; they never reach this one.
+export const LAUNCHD_READS = new Set(['print', 'print-disabled', 'list', 'blame', 'version', 'help']);
+
+// Only these two programs may change launchd's state: npm run service:* and npm run deploy.
+const SCRIPTS_DIR = path.dirname(fileURLToPath(import.meta.url));
+export const CLI_SCRIPTS = ['service.js', 'deploy.js'].map((name) => path.join(SCRIPTS_DIR, name));
+
+/** True when entry (process.argv[1]) is scripts/service.js or scripts/deploy.js, symlinks resolved. */
+export function isCliEntry(entry) {
+  if (!entry) return false;
+  const real = (p) => {
+    try {
+      return fs.realpathSync(p);
+    } catch {
+      return null;
+    }
+  };
+  const target = real(entry);
+  return target !== null && CLI_SCRIPTS.some((p) => real(p) === target);
+}
+
+function userHome() {
+  try {
+    return os.userInfo().homedir;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Why this run must not change the real launchd service, or null when it may.
+ * @param {{ env?: Record<string, string|undefined>, cfg?: { home: string, runDir: string } | null, homedir?: string, realHome?: string|null, requireCfg?: boolean }} [facts]
+ *   homedir: what HOME says (os.homedir()); realHome: the account's real home (os.userInfo().homedir);
+ *   requireCfg: refuse when no config is given (the real runner always asks this way);
+ *   entry: the program this process runs (process.argv[1]); only scripts/service.js and scripts/deploy.js may change state
+ */
+export function launchdRefusal({ env = process.env, cfg = null, homedir = os.homedir(), realHome = userHome(), requireCfg = false, entry = process.argv[1] } = {}) {
+  const tail = "so I won't touch the real launchd service (its name is shared). Use --dry-run or the test hooks.";
+  if (!realHome) return `I can't tell your real home folder, ${tail}`;
+  const real = path.resolve(realHome);
+  const insideReal = (p) => {
+    const r = path.resolve(p);
+    return r === real || r.startsWith(real + path.sep);
+  };
+  if (env.NODE_TEST_CONTEXT) return `This is a test run (NODE_TEST_CONTEXT is set), ${tail}`;
+  // A belt for test runs that don't set NODE_TEST_CONTEXT (--test-isolation=none, a test file run
+  // directly) and for any other program that imports this module.
+  if (!isCliEntry(entry)) return `This isn't npm run service:* or npm run deploy (the program is ${entry ?? 'unknown'}), ${tail}`;
+  if (path.resolve(homedir) !== real) return `HOME (${homedir}) is not your real home folder (${real}), ${tail}`;
+  if (requireCfg && !cfg) return `No service config was bound to this runner, ${tail}`;
+  if (cfg && path.resolve(cfg.home) !== real) return `This run's home folder (${cfg.home}) is not your real one (${real}), ${tail}`;
+  if ((env.DESK_LIVE_DIR || '').trim() && !insideReal(resolveLiveDir(env, homedir))) {
+    return `DESK_LIVE_DIR (${resolveLiveDir(env, homedir)}) is outside your real home folder (${real}), ${tail}`;
+  }
+  if (cfg && !insideReal(cfg.runDir)) return `The live copy (${cfg.runDir}) is outside your real home folder (${real}), ${tail}`;
+  return null;
+}
+
+/**
+ * Wraps a runner for launchctl (matched by its name, in any case): verbs that only read go through;
+ * any other verb is refused (code 1, the reason as stderr) when refusal() names a reason, and a
+ * bootstrap is refused unless its plist is the real one (~/Library/LaunchAgents of the real home).
+ * Everything that isn't launchctl goes through untouched.
+ */
+export function guardLaunchctl(run, refusal, { realHome = userHome() } = {}) {
+  const refuse = (why) => Promise.resolve({ code: 1, stdout: '', stderr: why });
+  return (cmd, args = [], options) => {
+    if (path.basename(String(cmd)).toLowerCase() === 'launchctl') {
+      const verb = String(args[0] ?? '');
+      if (!LAUNCHD_READS.has(verb)) {
+        const why = refusal();
+        if (why) return refuse(why);
+        if (verb === 'bootstrap') {
+          const expected = realHome ? servicePlistPath(realHome) : null;
+          if (!expected || !args[2] || path.resolve(String(args[2])) !== expected) {
+            return refuse(`launchctl bootstrap may only load ${expected ?? 'the real ~/Library/LaunchAgents plist'}, not ${args[2] ?? 'nothing'}, so I won't touch the real launchd service (its name is shared).`);
+          }
+        }
+      }
+    }
+    return run(cmd, args, options);
+  };
+}
+
 // ---------- the commands ----------
 
 /**
@@ -311,11 +624,18 @@ function describeExit(svc) {
  * @property {(line: string) => void} err
  * @property {typeof fs} fs
  * @property {string} platform
+ * @property {(cfg: object) => string|null} [launchdRefusal] the real deps say why this run must not change
+ *   the real launchd service (see launchdRefusal); injected test deps leave it out
  */
 
-export function realDeps() {
+/**
+ * The real outside world. cfg is the service config the run works on: the launchctl guard checks it
+ * (launchdRefusal({ cfg })), and without one nothing may change launchd's state.
+ */
+export function realDeps(cfg = null) {
   return {
-    run: runCommand,
+    run: guardLaunchctl(runCommand, () => launchdRefusal({ cfg, requireCfg: true })),
+    launchdRefusal: (other) => launchdRefusal({ cfg: other ?? cfg, requireCfg: true }),
     portIsFree,
     probe: (port) => probeDesk(port, { timeoutMs: 2000 }),
     sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
@@ -419,7 +739,7 @@ async function reportHealth(cfg, deps, logOffset, done) {
   }
   if (!health.privacy) {
     deps.err('');
-    const folder = protectedFolder(cfg.repoRoot, cfg.home);
+    const folder = protectedFolder(cfg.runDir, cfg.home);
     if (folder) deps.err(`If macOS asked whether "node" may access your ${folder} folder, click Allow; it starts by itself within ${THROTTLE_SECONDS} seconds.`);
     deps.err('It stays installed and launchd keeps trying. Check again with: npm run service:status');
     deps.err('To take it away: npm run service:uninstall');
@@ -448,22 +768,121 @@ async function bootstrap(cfg, deps) {
   return false;
 }
 
-export function dryRunText(cfg) {
+/**
+ * The names in dir/package.json "dependencies" that have no <modulesDir>/<name>/package.json,
+ * or null when package.json can't be read. Shared by the install guard and deploy's "packages needed?".
+ * modulesDir defaults to dir/node_modules.
+ */
+export function missingPackages(dir, fsImpl = fs, modulesDir = path.join(dir, 'node_modules')) {
+  let pkg;
+  try {
+    pkg = JSON.parse(fsImpl.readFileSync(path.join(dir, 'package.json'), 'utf8'));
+  } catch {
+    return null;
+  }
+  const names = pkg && typeof pkg.dependencies === 'object' && pkg.dependencies !== null ? Object.keys(pkg.dependencies) : [];
+  return names.filter((name) => !fsImpl.existsSync(path.join(modulesDir, name, 'package.json')));
+}
+
+// Loads the server's code from the current folder in a child node, without starting the server
+// (server/index.js only listens when it is the program node was started with; a test in
+// test/server.test.js holds it to that), then exits at once in case anything was left running.
+export const LOAD_CHECK_CODE = "const { pathToFileURL } = await import('node:url'); await import(pathToFileURL('server/index.js').href); process.exit(0);";
+
+/**
+ * Does the code in dir load, packages and all, the way the service would run it (svc: a
+ * serviceConfig, for its node and its environment)? Catches what a file check can't: a package
+ * another package needs (ajv needs fast-deep-equal), a module that throws on import.
+ * @returns {Promise<{ ok: true } | { ok: false, error: string }>}
+ */
+export async function loadCheck(dir, svc, deps) {
+  // What launchd gives the service, not this shell's: NODE_PATH or NODE_OPTIONS here must not make
+  // it pass when the service itself would crash.
+  const env = { ...svc.env, HOME: svc.home };
+  const r = await deps.run(svc.nodePath, ['--input-type=module', '-e', LOAD_CHECK_CODE], { cwd: dir, timeoutMs: 30_000, env });
+  if (r.code === 0) return { ok: true };
+  const all = String(r.stderr || r.stdout || '').split('\n').map((l) => l.trim()).filter(Boolean);
+  const line = all.find((l) => /^[A-Za-z]*Error\b/.test(l)) || all.at(-1) || `exit ${r.code}`;
+  return { ok: false, error: oneLine(line, 300) };
+}
+
+// git status for the live copy, leaving out .deployed.json and its temp file: an older commit's
+// .gitignore may not list them, and they are deploy's own.
+export const liveStatusArgs = (dir) => ['-C', dir, '--no-optional-locks', 'status', '--porcelain', '--', '.', ':!/.deployed.json*'];
+
+/**
+ * Is the live copy ready to run? Anything less would crash-loop the moment launchd starts it:
+ * - its code: server/index.js, and no changes of its own (git status, as deploy checks it);
+ * - every package its package.json names, in node_modules;
+ * - a finished deploy (.deployed.json) for the very commit it holds;
+ * - and, when all of that holds, the server's modules load (loadCheck).
+ * @returns {Promise<{ ready: true, deployed: object } | { ready: false, there: boolean, problems: string[] }>}
+ */
+export async function liveCopyState(cfg, deps) {
+  if (!deps.fs.existsSync(cfg.serverPath)) return { ready: false, there: false, problems: ['no server/index.js'] };
+  const env = gitEnv(deps.env || process.env);
+  const problems = [];
+  if (!deps.fs.existsSync(path.join(cfg.runDir, 'node_modules'))) {
+    problems.push('no node_modules');
+  } else {
+    const missing = missingPackages(cfg.runDir, deps.fs);
+    if (missing === null) problems.push('no readable package.json');
+    else if (missing.length) problems.push(`node_modules is incomplete (no ${missing.join(', ')})`);
+  }
+  const deployed = readDeployed(cfg.runDir, { fsImpl: deps.fs });
+  if (!deployed) {
+    problems.push('no readable .deployed.json');
+  } else {
+    const head = await deps.run(GIT, ['-C', cfg.runDir, 'rev-parse', 'HEAD'], { env });
+    const sha = head.code === 0 ? head.stdout.trim() : '';
+    if (!sha) problems.push("git can't read which commit it holds");
+    else if (sha !== deployed.sha) problems.push(`it holds ${sha.slice(0, 7)}, but the last deploy that finished was ${describeDeployed(deployed)}`);
+  }
+  const status = await deps.run(GIT, liveStatusArgs(cfg.runDir), { env });
+  if (status.code !== 0) {
+    problems.push("git can't check it for changes");
+  } else if (status.stdout.trim()) {
+    const changed = status.stdout.split('\n').map((l) => l.trim()).filter(Boolean);
+    problems.push(`it has changes of its own (${changed.slice(0, 3).map((l) => oneLine(l, 120)).join(', ')}${changed.length > 3 ? `, and ${changed.length - 3} more` : ''})`);
+  }
+  if (!problems.length) {
+    const load = await loadCheck(cfg.runDir, cfg, deps);
+    if (!load.ok) problems.push(`its server doesn't load: ${load.error}`);
+  }
+  return problems.length ? { ready: false, there: true, problems } : { ready: true, deployed };
+}
+
+/** One line about the live copy: which commit it holds, or what is wrong with it. */
+export async function liveCopyLine(cfg, deps) {
+  const live = await liveCopyState(cfg, deps);
+  if (live.ready) return `${cfg.runDir}, ${describeDeployed(live.deployed)}${live.deployed.deployedAt ? `, deployed ${live.deployed.deployedAt}` : ''}`;
+  if (!live.there) return `${cfg.runDir} (not there yet: make it with npm run deploy)`;
+  return `${cfg.runDir} (not fully deployed: ${live.problems.join('; ')}; run npm run deploy)`;
+}
+
+/**
+ * What install would do. liveCopy: liveCopyLine() for the folder it would run, so the dry run says
+ * when the live copy is missing (install refuses until npm run deploy has made it).
+ */
+export function dryRunText(cfg, { liveCopy = cfg.runDir } = {}) {
   const plist = buildPlist(cfg);
   const L = (args) => commandLine(LAUNCHCTL, args);
   return [
     'Dry run: nothing is changed.',
     '',
-    `1. Check that port ${cfg.port} is free, or held by this service (which is then replaced). Refuse otherwise.`,
-    `2. Create the log folder: ${cfg.logDir}`,
-    `3. Write ${cfg.plistPath}:`,
+    `The service will run The Desk from the live copy: ${liveCopy}`,
+    '',
+    `1. Check that the live copy is fully deployed: server/index.js and no changes of its own, every package in its package.json, a .deployed.json for the commit it holds, and a server that loads. If not, stop and say: run npm run deploy.`,
+    `2. Check that port ${cfg.port} is free, or held by this service (which is then replaced). Refuse otherwise.`,
+    `3. Create the log folder: ${cfg.logDir}`,
+    `4. Write ${cfg.plistPath}:`,
     '',
     plist,
-    `4. Check it: ${commandLine(PLUTIL, ['-lint', cfg.plistPath])}`,
-    `5. Only if it was switched off before: ${L(launchctlArgs.enable(cfg))}`,
-    `6. Only if an older copy is loaded: ${L(launchctlArgs.bootout(cfg))}`,
-    `7. Load and start it: ${L(launchctlArgs.bootstrap(cfg))}`,
-    `8. Wait up to ${HEALTH_TIMEOUT_MS / 1000} s for http://${HOST}:${cfg.port}/api/feed to answer and say how it went`,
+    `5. Check it: ${commandLine(PLUTIL, ['-lint', cfg.plistPath])}`,
+    `6. Only if it was switched off before: ${L(launchctlArgs.enable(cfg))}`,
+    `7. Only if an older copy is loaded (the one in your work folder, too): ${L(launchctlArgs.bootout(cfg))}`,
+    `8. Load and start it: ${L(launchctlArgs.bootstrap(cfg))}`,
+    `9. Wait up to ${HEALTH_TIMEOUT_MS / 1000} s for http://${HOST}:${cfg.port}/api/feed to answer and say how it went`,
     `   (on failure: the last 20 lines of ${cfg.logPath}).`,
     '',
     'Afterwards:',
@@ -478,11 +897,24 @@ export function dryRunText(cfg) {
 export async function install(cfg, deps, { dryRun = false } = {}) {
   const plist = buildPlist(cfg);
   if (dryRun) {
-    deps.out(dryRunText(cfg));
+    deps.out(dryRunText(cfg, { liveCopy: await liveCopyLine(cfg, deps) }));
     return 0;
   }
   if (deps.platform !== 'darwin') {
     deps.err('The always-on service uses launchd, so it only works on macOS.');
+    return 1;
+  }
+  // Before anything touches the running service: a live copy without its code, its packages or a
+  // finished deploy would crash-loop the moment launchd starts it.
+  const live = await liveCopyState(cfg, deps);
+  if (!live.ready && !live.there) {
+    deps.err(`The live copy isn't there yet (${cfg.runDir}), so nothing was changed.`);
+    deps.err('Run npm run deploy first: it makes the live copy from main. Then run npm run service:install again.');
+    return 1;
+  }
+  if (!live.ready) {
+    deps.err(`The live copy isn't fully deployed yet (${cfg.runDir}: ${live.problems.join('; ')}), so nothing was changed.`);
+    deps.err('Run npm run deploy until it finishes (it repairs this, or says what to do), then run npm run service:install again.');
     return 1;
   }
   const svc = await readService(cfg, deps);
@@ -515,8 +947,8 @@ export async function install(cfg, deps, { dryRun = false } = {}) {
 
   rotateLog(cfg.logPath, { fsImpl: deps.fs });
   const offset = fileSize(deps.fs, cfg.logPath);
-  const folder = protectedFolder(cfg.repoRoot, cfg.home);
-  deps.out(`Installed ${cfg.plistPath}`);
+  const folder = protectedFolder(cfg.runDir, cfg.home);
+  deps.out(`Installed ${cfg.plistPath}, running The Desk from ${cfg.runDir}`);
   if (folder) deps.out(`(This folder is inside ${folder}. If macOS asks whether "node" may access it, click Allow.)`);
   deps.out(`Starting The Desk and waiting for http://localhost:${cfg.port} to answer…`);
   if (!(await bootstrap(cfg, deps))) return 1;
@@ -560,7 +992,7 @@ export async function stop(cfg, deps) {
   return 0;
 }
 
-export async function restart(cfg, deps) {
+export async function restart(cfg, deps, { done = `Restarted with the code in ${cfg.runDir}.` } = {}) {
   const svc = await readService(cfg, deps);
   if (!svc.loaded) {
     if (deps.fs.existsSync(cfg.plistPath)) deps.out("It wasn't running, so starting it.");
@@ -574,7 +1006,7 @@ export async function restart(cfg, deps) {
     deps.err(`launchctl couldn't restart it: ${printable((r.stderr || r.stdout).trim()) || `exit ${r.code}`}`);
     return 1;
   }
-  return reportHealth(cfg, deps, offset, 'Restarted with the code in this folder.');
+  return reportHealth(cfg, deps, offset, done);
 }
 
 export async function uninstall(cfg, deps) {
@@ -597,13 +1029,28 @@ export async function uninstall(cfg, deps) {
   return 0;
 }
 
+/** The Deployed: line for the folder the service runs (or would run) from. */
+function deployedLine(folder, deps) {
+  if (!folder) return 'unknown (the installed plist names no folder)';
+  if (!deps.fs.existsSync(folder)) return `nothing: ${printable(folder)} doesn't exist (npm run deploy makes it)`;
+  const deployed = readDeployed(folder, { fsImpl: deps.fs });
+  if (!deployed) return "not recorded (this folder isn't a live copy made by npm run deploy)";
+  return `${describeDeployed(deployed)}${deployed.deployedAt ? `, deployed ${deployed.deployedAt}` : ''}`;
+}
+
 export async function status(cfg, deps) {
-  const installed = deps.fs.existsSync(cfg.plistPath);
+  const plist = readInstalledPlist(cfg, deps);
+  const installed = plist.installed;
   const svc = await readService(cfg, deps);
   const desk = await deps.probe(cfg.port);
   const lines = [`The Desk service (${cfg.label})`];
+  // The folder the installed plist runs, which is the live copy once the service has moved there.
+  const folder = installed ? plist.runDir : cfg.runDir;
+  const running = folder ? { ...cfg, runDir: folder } : cfg;
 
   lines.push(`  Installed:  ${installed ? `yes, ${cfg.plistPath}` : 'no (npm run service:install)'}`);
+  lines.push(installed ? `  Runs from:  ${folder ? printable(folder) : 'unknown'}` : `  Live copy:  ${cfg.runDir}`);
+  lines.push(`  Deployed:   ${deployedLine(folder, deps)}`);
   if (svc.loaded) {
     lines.push('  Loaded:     yes, launchd keeps it running');
     lines.push(`  Running:    ${svc.pid ? `yes, process ${svc.pid}` : `no (${svc.state || 'unknown'}; launchd retries every ${THROTTLE_SECONDS} s)`}`);
@@ -625,21 +1072,20 @@ export async function status(cfg, deps) {
   lines.push(`  Log:        ${cfg.logPath}${deps.fs.existsSync(cfg.logPath) ? ` (${Math.ceil(fileSize(deps.fs, cfg.logPath) / 1024)} KB)` : ' (not created yet)'}`);
   deps.out(lines.join('\n'));
 
-  if (installed) {
-    let current = '';
-    try {
-      current = deps.fs.readFileSync(cfg.plistPath, 'utf8');
-    } catch {
-      /* unreadable: treated as out of date */
-    }
-    if (current !== buildPlist(cfg)) {
-      deps.out('\nThe installed plist differs from what this folder would install now (the folder moved, or Node changed).');
-      deps.out('Run npm run service:install to update it.');
-    }
+  if (installed && plist.runDir !== cfg.runDir) {
+    deps.out(`\nThe service still runs from ${plist.runDir ? printable(plist.runDir) : 'an unknown folder'}, not from the live copy ${cfg.runDir}.`);
+    deps.out(
+      deps.fs.existsSync(cfg.serverPath)
+        ? 'Run npm run service:install once to move it to the live copy.'
+        : 'Run npm run deploy to make the live copy, then npm run service:install once to move the service to it.',
+    );
+  } else if (installed && plist.text !== buildPlist(cfg)) {
+    deps.out('\nThe installed plist differs from what service:install would write now (Node moved, or the settings changed).');
+    deps.out('Run npm run service:install to update it.');
   }
   if (svc.loaded && !desk.ok) {
     const tail = lastLines(readLogSince(deps.fs, cfg.logPath, 0), 20);
-    if (looksBlockedByPrivacy(cfg, tail.join('\n'))) deps.out(`\n${privacySteps(cfg)}`);
+    if (looksBlockedByPrivacy(running, tail.join('\n'))) deps.out(`\n${privacySteps(running)}`);
     if (tail.length) {
       deps.out(`\nLast lines of ${cfg.logPath}:`);
       for (const line of tail) deps.out(`  ${printable(line)}`);
@@ -651,17 +1097,25 @@ export async function status(cfg, deps) {
 const RUNNERS = { install, uninstall, start, stop, restart, status };
 
 /** The whole CLI, with everything outside injected. Returns the exit code. */
-export async function main(argv, { env = process.env, deps = realDeps(), cfg } = {}) {
+export async function main(argv, { env = process.env, deps: given, cfg } = {}) {
   const args = parseArgs(argv, env);
-  if (args.error) {
-    deps.err(`${args.error}\n\n${USAGE}`);
-    return 2;
+  if (args.error || args.command === 'help') {
+    const deps = given || realDeps();
+    if (args.error) deps.err(`${args.error}\n\n${USAGE}`);
+    else deps.out(USAGE);
+    return args.error ? 2 : 0;
   }
-  if (args.command === 'help') {
-    deps.out(USAGE);
-    return 0;
+  const config = cfg || serviceConfig({ env });
+  const deps = given || realDeps(config); // the guard checks this very config
+  // Commands that change launchd state stop here, before anything, when this run's HOME or live copy
+  // isn't the real one (the real runner refuses those verbs too). status and dry runs only read.
+  if (args.command !== 'status' && !(args.command === 'install' && args.dryRun)) {
+    const why = deps.launchdRefusal?.(config);
+    if (why) {
+      deps.err(why);
+      return 1;
+    }
   }
-  const config = cfg || serviceConfig();
   if (args.command === 'install') return install(config, deps, { dryRun: args.dryRun });
   return RUNNERS[args.command](config, deps);
 }

@@ -4,7 +4,7 @@
 import {
   PHASE_LABEL, WEEK_GOAL, BADGES, articlesFor, autoPhase, awardText, blank, cnt, createStateClient, dayKey, esc, fmtDate, fmtDay,
   freshBadges, level as levelFor, mentorLine, moon, moonPath, readsThisWeek as readsSince, safeUrl,
-  streak as streakOf, themeScores as scoresFor, uid, wilaLine,
+  readArticle, streak as streakOf, themeScores as scoresFor, uid, wilaLine,
 } from './lib.js';
 import { createNewsPage } from './news.js';
 import { createRefresher, readSignals, tvLook } from './tv-lib.js';
@@ -54,8 +54,12 @@ let feed = { articles: [], themes: [] };
 // Nothing that depends on Snow's state is drawn until the first GET /api/state has finished,
 // and the store won't save unless that GET worked, so a blank state never overwrites hers.
 let ready = false;
+// Snow keeps The Desk open in more than one place. The server merges every save into the file as it
+// is now (awarded, badges and days as unions; server/state-store.js), and XP is sent as a counter:
+// each save carries the XP last synced, so the server adds only this tab's own XP to the latest total.
 const store = createStateClient({
   getState: () => S,
+  counters: ['xp'],
   onSaveFail: () => toast("I couldn't save that just now. I'll keep it here and keep trying."),
 });
 const save = () => store.save();
@@ -72,6 +76,37 @@ async function loadState() {
   const r = await store.load();
   S = r.state;
   if (!r.ok) toast("I couldn't open your saved reads and notes, so changes won't be saved for now. Try reloading in a bit.", 'Reload', () => location.reload());
+}
+// Another tab may have changed things since this one loaded: pick up the saved state when nothing
+// here is waiting to be saved. reload hands it over only in that case, checked in the same instant,
+// so a change made while the GET was out is never thrown away. Returns whether anything changed.
+// Called when the feed or News opens, when the tab comes back into view or focus, and before paying.
+async function reloadState() {
+  if (!ready) return false;
+  const before = JSON.stringify(S);
+  await store.reload((fresh) => { S = fresh; });
+  return JSON.stringify(S) !== before;
+}
+// Redraw the feed without losing the keyboard's place (the buttons are drawn again).
+function keepFocus(draw) {
+  const a = document.activeElement;
+  const key = a && a.dataset && ['read', 'notes', 'shelf', 'edit', 'del'].find(k => a.dataset[k] !== undefined);
+  draw();
+  if (key && !document.contains(a)) refocus(attrSel('data-' + key, a.dataset[key]));
+}
+// A tab can't be clicked before it is shown or focused: catch it up first, so a tab that sat in
+// the background acts on the latest reads, folders, notes and XP. Not while a folder is being
+// renamed or the notes drawer is open (nothing there should move under Snow's hands).
+let syncing = false;
+async function syncTab() {
+  if (!ready || syncing) return;
+  syncing = true;
+  try {
+    const busy = editing !== null || !$('#drawer').hidden;
+    const [feedChanged] = await Promise.all([busy ? false : reloadState(), news.sync()]);
+    if (!feedChanged) return;
+    if (!$('#feed').hidden) keepFocus(renderFeed); else if (!$('#room').hidden) renderRoom();
+  } finally { syncing = false; }
 }
 async function loadFeed() {
   try {
@@ -175,7 +210,10 @@ function route() {
   $('#backdrop').dataset.view = view;
   // The drawer lives outside the feed (so it stays pinned to the screen): close it when leaving.
   if (view !== 'feed') { $('#drawer').hidden = true; $('#scrim').hidden = true; setBehindDrawer(false); }
-  if (view === 'feed') { renderScene(); if (ready) renderFeed(); window.scrollTo(0, 0); }
+  if (view === 'feed') {
+    renderScene(); window.scrollTo(0, 0);
+    if (ready) { renderFeed(); reloadState().then(changed => { if (changed && !$('#feed').hidden) keepFocus(renderFeed); }); }
+  }
   else if (view === 'news') { renderScene(); news.render(); news.refresh(); window.scrollTo(0, 0); }
   else { requestAnimationFrame(() => requestAnimationFrame(() => $('#frame').classList.remove('zoom'))); renderRoom(); refreshTv(); }
 }
@@ -338,14 +376,19 @@ $('#folderForm').addEventListener('submit', e => {
   first ? award(5, 'folder made') : save();
   renderFeed();
 });
+// Pays once per article, ever: un-marking and re-marking doesn't pay again. Before paying it checks
+// the server's copy (another tab may have paid already) and reloads the state if nothing is waiting
+// to be saved, so the XP goes onto the latest total. Clicks made while a check is out are queued.
+let reads = Promise.resolve();
+async function readOne(id) {
+  const r = await readArticle(() => S, id, { canPay: store.canSave, peek: () => store.peek(), also: reloadState });
+  if (r.award) award(10, 'article read'); else save();
+  renderFeed(); refocus(attrSel('data-read', id), '#listTitle');
+}
 $('#list').addEventListener('click', e => {
   const t = e.target.closest('button'); if (!t) return;
-  if (t.dataset.read) {
-    const id = t.dataset.read;
-    if (S.read[id]) { delete S.read[id]; save(); }
-    else { S.read[id] = Date.now(); award(10, 'article read'); }
-    renderFeed(); refocus(attrSel('data-read', id), '#listTitle');
-  } else if (t.dataset.notes) openDrawer(t.dataset.notes);
+  if (t.dataset.read) { const id = t.dataset.read; reads = reads.then(() => readOne(id)).catch(() => {}); }
+  else if (t.dataset.notes) openDrawer(t.dataset.notes);
 });
 $('#list').addEventListener('change', e => {
   const c = e.target.closest('[data-save]'); if (!c) return;
@@ -446,12 +489,18 @@ $('#hideDialogue').addEventListener('click', () => { $('#dialogue').hidden = tru
 $('#wilaOrb').addEventListener('click', () => { $('#dialogue').hidden = !$('#dialogue').hidden; renderRoom(); });
 $('#phaseBtn').addEventListener('click', () => { const order = [null, 'morning', 'golden', 'night']; preview = order[(order.indexOf(preview) + 1) % order.length]; renderRoom(); });
 window.addEventListener('hashchange', route);
+// Leaving the tab (hidden, or the window losing focus): send what is waiting now rather than after
+// the 600 ms delay, so the tab Snow switches to reads it when it catches up.
+function sendNow() { if (!ready) return; store.flush(); news.flush(); }
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') syncTab(); else sendNow(); });
+window.addEventListener('focus', syncTab);
+window.addEventListener('blur', sendNow);
 setInterval(() => { if (!preview) renderRoom(); }, 60e3);
 
 /* ================= the News desk ================= */
 // Its page lives in news.js. Reading a story pays XP through the same award() as the feed, so XP,
 // level and the streak stay in Product Feed's state.
-const news = createNewsPage({ award, toast, isReady: () => ready, canAward: () => store.canSave });
+const news = createNewsPage({ award, toast, isReady: () => ready, canAward: () => store.canSave, reloadXpState: reloadState });
 
 /* ================= start ================= */
 buildHotspots();

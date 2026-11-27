@@ -58,13 +58,19 @@ const STORY_KEY = /^(\d{4}-\d{2}-\d{2})\/[A-Za-z0-9_-]{1,40}$/;
 
 /**
  * The key a story is saved under: "<edition>/<story id>", like "2026-12-07/s1" (ids repeat every
- * morning). null when the edition or id doesn't fit the server's rule, so a key the server would
- * refuse never reaches the saved state (one refused key would stop every later save).
+ * morning). A story in The Desk's sample edition is "<edition>/sample-<id>", so reading the sample
+ * never marks the agent's real stories of that day as read. null when the edition or id doesn't fit
+ * the server's rule, so a key the server would refuse never reaches the saved state (one refused
+ * key would stop every later save).
  */
-export function storyKey(edition, id) {
-  return isCalendarDate(edition) && typeof id === 'string' && STORY_ID.test(id) ? `${edition}/${id}` : null;
+export function storyKey(edition, id, { sample = false } = {}) {
+  if (!isCalendarDate(edition) || typeof id !== 'string' || !STORY_ID.test(id)) return null;
+  const key = `${edition}/${sample ? `sample-${id}` : id}`;
+  return isStoryKey(key) ? key : null;
 }
-export const isStoryKey = (k) => typeof k === 'string' && STORY_KEY.test(k) && isCalendarDate(k.slice(0, 10));
+export function isStoryKey(k) {
+  return typeof k === 'string' && STORY_KEY.test(k) && isCalendarDate(k.slice(0, 10));
+}
 const isTime = (v) => (typeof v === 'number' && Number.isFinite(v)) || isDateTime(v);
 
 /* ================= Snow's News state ================= */
@@ -98,6 +104,22 @@ export function normalizeNewsState(raw) {
 }
 
 /**
+ * Folds the server's copy into this tab's state before paying for a read: `awarded` and `dismissed`
+ * become the union of both, so a story another tab already paid for counts here. `read` and
+ * `shelfOpen` stay this tab's, so un-marking still works. (Saves are merged on the server too:
+ * server/state-store.js.)
+ * @returns the local state, changed in place
+ */
+export function mergeNewsState(local, server) {
+  for (const key of ['awarded', 'dismissed']) {
+    if (!isPlainObject(local[key])) local[key] = {};
+    const theirs = isPlainObject(server) && isPlainObject(server[key]) ? server[key] : {};
+    for (const [k, time] of Object.entries(theirs)) if (!Object.hasOwn(local[key], k)) local[key][k] = time;
+  }
+  return local;
+}
+
+/**
  * Marks a story read, or unread if it was read. Reading pays XP once per story key, ever: the key
  * goes into `awarded` the first time, so un-marking and re-marking never pays twice.
  * canAward false (Snow's saved state couldn't be opened) marks it read without paying or recording.
@@ -109,10 +131,39 @@ export function toggleRead(N, key, { now = Date.now(), canAward = true } = {}) {
     delete N.read[key];
     return { read: false, award: false };
   }
-  N.read[key] = now;
+  return markStoryRead(N, key, { now, canAward });
+}
+
+/** Marks a story read (it stays read if it already was) and pays if it hasn't been paid. Same rules as toggleRead. */
+export function markStoryRead(N, key, { now = Date.now(), canAward = true } = {}) {
+  if (!isStoryKey(key)) return { read: false, award: false };
+  if (!has(N.read, key)) N.read[key] = now;
+  if (!isPlainObject(N.awarded)) N.awarded = {};
   const award = canAward && !has(N.awarded, key);
   if (award) N.awarded[key] = now;
   return { read: true, award };
+}
+
+/**
+ * Marks a story read or unread like toggleRead, but before paying it checks the server's copy, so a
+ * story another tab already paid for doesn't pay again here. Read or unread is decided when Snow
+ * clicks: a reload that lands during the check can't turn "Mark read" into an un-mark. getState
+ * returns the current state (the page may swap it for a reloaded one while the check is on its way).
+ * peek() reads the server's copy ({ ok, state }); also() runs alongside it (the page picks up the
+ * latest XP). If the copy can't be read, the story is marked read without paying.
+ * @returns {Promise<{ read: boolean, award: boolean }>}
+ */
+export async function readStory(getState, key, { canPay = true, peek, also = async () => {} }) {
+  if (!isStoryKey(key)) return { read: false, award: false };
+  const N = getState();
+  if (has(N.read, key)) return toggleRead(N, key);
+  let pay = canPay && !has(N.awarded, key);
+  if (pay) {
+    const [server] = await Promise.all([peek(), also()]);
+    if (server && server.ok) mergeNewsState(getState(), server.state);
+    else pay = false;
+  }
+  return markStoryRead(getState(), key, { canAward: pay });
 }
 
 /* ================= reading time ================= */
@@ -146,9 +197,9 @@ export function sourcesOf(sources) {
 
 const rankOf = (v) => (Number.isInteger(v) && v > 0 ? v : null);
 
-function storyView(raw, edition, read) {
+function storyView(raw, edition, read, sample) {
   const s = isPlainObject(raw) ? raw : {};
-  const key = storyKey(edition, s.id);
+  const key = storyKey(edition, s.id, { sample });
   const region = regionOf(s.region);
   return {
     id: text(s.id),
@@ -182,6 +233,7 @@ const sum = (xs) => xs.reduce((a, b) => a + b, 0);
 
 /**
  * Everything the News page draws from an edition and Snow's News state.
+ * - sample: The Desk's own sample edition (story keys are "<edition>/sample-<id>", and reading pays no XP)
  * - top: the top stories in rank order (at most 3), each with `position` (1, 2, 3: the number on its card)
  * - more: the shelf, in rank order (at most 7)
  * - readCount / total: top stories read, for "N of 3 read"; minutes / minutesLeft: reading time of the top stories
@@ -192,8 +244,9 @@ export function buildNewsView(news, state) {
   const n = isPlainObject(news) ? news : {};
   const read = isPlainObject(state) && isPlainObject(state.read) ? state.read : {};
   const edition = isCalendarDate(n.edition) ? n.edition : '';
-  const top = inRankOrder(list(n.stories).map((s) => storyView(s, edition, read)), MAX_STORIES);
-  const more = inRankOrder(list(n.more).map((s) => storyView(s, edition, read)), MAX_MORE);
+  const sample = n.sample === true;
+  const top = inRankOrder(list(n.stories).map((s) => storyView(s, edition, read, sample)), MAX_STORIES);
+  const more = inRankOrder(list(n.more).map((s) => storyView(s, edition, read, sample)), MAX_MORE);
   const all = [...top, ...more];
 
   const regions = REGION_ORDER.map((region) => ({ region, label: REGION_LABEL[region], count: all.filter((s) => s.region === region).length })).filter((r) => r.count);
@@ -204,7 +257,7 @@ export function buildNewsView(news, state) {
 
   return {
     edition,
-    sample: n.sample === true,
+    sample,
     note: text(n.note),
     top,
     more,

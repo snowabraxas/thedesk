@@ -75,7 +75,8 @@ export function fmtDay(iso) {
 
 /* ================= state ================= */
 
-export const blank = () => ({ read: {}, saved: {}, folders: [], notes: [], xp: 0, days: [], badges: {} });
+/** awarded: articles already paid XP for reading ({ id: time }), so un-marking and re-marking never pays twice. */
+export const blank = () => ({ read: {}, saved: {}, folders: [], notes: [], xp: 0, days: [], badges: {}, awarded: {} });
 
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
 const STATE_TYPES = {
@@ -86,19 +87,117 @@ const STATE_TYPES = {
   xp: (v) => typeof v === 'number' && Number.isFinite(v),
   days: Array.isArray,
   badges: isPlainObject,
+  awarded: isPlainObject,
 };
+
+/** A real day on the calendar written YYYY-MM-DD. */
+function isCalendarDay(v) {
+  const m = typeof v === 'string' && /^(\d{4})-(\d{2})-(\d{2})$/.exec(v);
+  if (!m) return false;
+  const d = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])));
+  return d.toISOString().slice(0, 10) === v;
+}
+
+// The server checks the keys it merges as unions closely (one refused value would stop every save):
+// awarded and badges hold times under names up to 200 characters; days are real days, not in the
+// future. A value that wouldn't pass (an old or hand-edited state) is mended here: a time that isn't
+// a number becomes now (the entry still counts), a bad name or day is dropped.
+function mendTimes(map, now) {
+  const out = {};
+  for (const [k, v] of Object.entries(map)) {
+    if (k === '__proto__' || k.length === 0 || k.length > 200) continue;
+    out[k] = typeof v === 'number' && Number.isFinite(v) ? v : now;
+  }
+  return out;
+}
 
 /**
  * Turns whatever the server sent into a usable state: known keys of the wrong type fall back
  * to blank values, unknown keys are kept so a newer version's data isn't thrown away on save.
+ * A state saved before `awarded` existed counts every article already read as paid, so re-marking
+ * one of them doesn't pay a second time.
  */
-export function normalizeState(raw) {
+export function normalizeState(raw, now = Date.now()) {
   const S = blank();
   if (!isPlainObject(raw)) return S;
   for (const [k, v] of Object.entries(raw)) {
+    if (k === '__proto__') continue;
     if (!(k in STATE_TYPES) || STATE_TYPES[k](v)) S[k] = v;
   }
+  if (!isPlainObject(raw.awarded)) S.awarded = { ...S.read };
+  S.awarded = mendTimes(S.awarded, now);
+  S.badges = mendTimes(S.badges, now);
+  const latest = new Date(now + 864e5).toISOString().slice(0, 10);
+  S.days = S.days.filter((d) => isCalendarDay(d) && d <= latest);
+  if (!(Number.isFinite(S.xp) && S.xp >= 0 && S.xp <= Number.MAX_SAFE_INTEGER)) S.xp = Math.min(Math.max(0, Number.isFinite(S.xp) ? S.xp : 0), Number.MAX_SAFE_INTEGER);
   return S;
+}
+
+const isArticleId = (id) => typeof id === 'string' && id !== '' && id !== '__proto__';
+
+/**
+ * Marks a Product Feed article read, or unread if it was read. Reading pays XP once per article,
+ * ever: the id goes into `awarded` the first time, so un-marking and re-marking never pays twice.
+ * @returns {{ read: boolean, award: boolean }} award: pay the XP now.
+ */
+export function toggleArticleRead(S, id, now = Date.now()) {
+  if (!isArticleId(id)) return { read: false, award: false };
+  if (Object.hasOwn(S.read, id)) {
+    delete S.read[id];
+    return { read: false, award: false };
+  }
+  return markArticleRead(S, id, { now });
+}
+
+/** Marks an article read (it stays read if it already was) and pays if it hasn't been paid. canAward false: never pays or records. */
+export function markArticleRead(S, id, { now = Date.now(), canAward = true } = {}) {
+  if (!isArticleId(id)) return { read: false, award: false };
+  if (!Object.hasOwn(S.read, id)) S.read[id] = now;
+  if (!isPlainObject(S.awarded)) S.awarded = {};
+  const award = canAward && !Object.hasOwn(S.awarded, id);
+  if (award) S.awarded[id] = now;
+  return { read: true, award };
+}
+
+/**
+ * Before paying for a read: folds the server's `awarded` into this tab's (a union), so an article
+ * another tab already paid for counts here. Everything else stays this tab's. (Saves are merged on
+ * the server: server/state-store.js.)
+ * @returns the local state, changed in place
+ */
+export function mergeFeedState(local, server) {
+  if (!isPlainObject(local.awarded)) local.awarded = {};
+  const theirs = isPlainObject(server) && isPlainObject(server.awarded) ? server.awarded : {};
+  for (const [id, time] of Object.entries(theirs)) if (id !== '__proto__' && !Object.hasOwn(local.awarded, id)) local.awarded[id] = time;
+  return local;
+}
+
+/**
+ * Marks an article read or unread like toggleArticleRead, but before paying it checks the server's
+ * copy (peek), so an article another tab already paid for doesn't pay again here; also() runs
+ * alongside it (the page reloads its state when nothing is waiting to be saved, so the XP is added
+ * to the latest total). Read or unread is decided when Snow clicks, and getState returns the state
+ * the page holds after the check. If the copy can't be read, the article is marked read without paying.
+ * @returns {Promise<{ read: boolean, award: boolean }>}
+ */
+export async function readArticle(getState, id, { canPay = true, peek, also = async () => {} }) {
+  if (!isArticleId(id)) return { read: false, award: false };
+  const S = getState();
+  if (Object.hasOwn(S.read, id)) return toggleArticleRead(S, id);
+  let pay = canPay && !(isPlainObject(S.awarded) && Object.hasOwn(S.awarded, id));
+  if (pay) {
+    const [server] = await Promise.all([peek(), also()]);
+    if (server && server.ok) mergeFeedState(getState(), server.state);
+    else pay = false;
+  }
+  return markArticleRead(getState(), id, { canAward: pay });
+}
+
+/** An id for this page load (letters, digits and dashes), so the server can tell its saves apart. */
+function randomTabId() {
+  const c = globalThis.crypto;
+  if (c && typeof c.randomUUID === 'function') return c.randomUUID();
+  return `t${Date.now().toString(36)}${Math.random().toString(36).slice(2, 12)}`;
 }
 
 /**
@@ -107,16 +206,30 @@ export function normalizeState(raw) {
  * usable state and `empty` makes the blank one; both default to Product Feed's.
  * - Nothing is saved until load() has succeeded, so a blank state can never overwrite the saved one.
  * - save() is debounced; only one PUT is in flight at a time, and changes made meanwhile follow it.
+ *   Nothing is awaited between taking the state and sending it, so there is no moment when a change
+ *   is neither waiting nor on its way.
  * - A failed PUT keeps the state in memory, calls onSaveFail once (until a save works again),
  *   and is retried every retryDelay ms (sooner if something else changes) until a save works,
  *   so a change isn't stuck in memory when the tab sits idle after the server comes back.
- * - flushOnExit() sends whatever is still waiting, with keepalive so it outlives the page.
+ * - The server merges every save into the file as it is now (server/state-store.js). `counters:
+ *   ["xp"]` (Product Feed) makes XP a counter the server adds up: each PUT carries
+ *   `_sync: { xp: <the value last synced>, tab: <this page load's id>, sent: <the xp in it> }`, so
+ *   the server adds only this page's own change, and only once even if the same PUT arrives twice
+ *   (a reply cut by a restart, then the retry): it remembers the most each tab has sent.
+ * - flushOnExit() sends whatever is still waiting, with keepalive so it outlives the page, counting
+ *   from the last confirmed value (the server's high-water mark covers a PUT still on its way); but
+ *   not when the last read from the server failed (it stays waiting, for a retry if the page stays).
+ * - peek() reads the server's copy without changing anything. reload(apply) reads it and hands it
+ *   to apply(state) only when nothing is waiting to be saved and no PUT is on its way, checked
+ *   in the same instant it applies, so a change made while the GET was out is never thrown away.
  */
 export function createStateClient({
   getState,
   url = '/api/state',
   normalize = normalizeState,
   empty = blank,
+  counters = [],
+  tabId = randomTabId(),
   fetchFn = (...args) => globalThis.fetch(...args),
   onSaveFail = () => {},
   delay = 600,
@@ -130,6 +243,9 @@ export function createStateClient({
   let pending = false;
   let timer = null;
   let failNoted = false;
+  let lastReadOk = false;
+  let base = {}; // counters as last synced with the server
+  let running = null; // the flush on its way, if any
 
   // Read the small reply even when only the status matters, so the browser can finish the request.
   const finish = async (r) => {
@@ -140,7 +256,20 @@ export function createStateClient({
     }
   };
 
-  async function load() {
+  // Counters only grow, and two PUTs' replies can come back in either order: never move the base back.
+  const advance = (sent) => {
+    for (const [k, v] of Object.entries(sent)) base[k] = Math.max(base[k] ?? 0, v);
+  };
+  const countersOf = (state) => Object.fromEntries(counters.map((k) => [k, typeof state?.[k] === 'number' && Number.isFinite(state[k]) ? state[k] : 0]));
+  // The body of a PUT: the state, plus the XP it was last synced at, this tab's id and the XP it sends.
+  function bodyOf(state, syncedAt) {
+    if (!counters.length) return { body: JSON.stringify(state), sent: null };
+    const sent = countersOf(state);
+    return { body: JSON.stringify({ ...state, _sync: { ...syncedAt, tab: tabId, sent: sent[counters[0]] } }), sent };
+  }
+
+  // GET the server's copy, normalized. Throws when it can't be read.
+  async function readServer() {
     try {
       const r = await fetchFn(url, { cache: 'no-store' });
       if (!r.ok) {
@@ -148,12 +277,48 @@ export function createStateClient({
         throw new Error(`GET ${url} answered ${r.status}`);
       }
       const state = normalize(await r.json());
+      lastReadOk = true;
+      return state;
+    } catch (error) {
+      lastReadOk = false;
+      throw error;
+    }
+  }
+
+  async function load() {
+    try {
+      const state = await readServer();
       canSave = true;
+      base = countersOf(state);
       return { ok: true, state };
     } catch (error) {
       canSave = false;
       return { ok: false, state: empty(), error };
     }
+  }
+
+  /** The server's copy as it is now. Only after a good load(); never changes what this client will save. */
+  async function peek() {
+    if (!canSave) return { ok: false };
+    try {
+      return { ok: true, state: await readServer() };
+    } catch (error) {
+      return { ok: false, error };
+    }
+  }
+
+  const idle = () => !dirty && !writing;
+  /**
+   * The server's copy, handed to apply(state) to replace this tab's, but only when nothing is
+   * waiting to be saved, before the GET and in the instant it is applied.
+   */
+  async function reload(apply = () => {}) {
+    if (!canSave || !idle()) return { ok: false };
+    const r = await peek();
+    if (!r.ok || !idle()) return { ok: false };
+    base = countersOf(r.state);
+    apply(r.state);
+    return r;
   }
 
   function save() {
@@ -168,54 +333,80 @@ export function createStateClient({
     if (canSave && dirty && !timer) timer = setTimeout(flush, retryDelay);
   }
 
-  async function flush() {
+  /**
+   * Sends what is waiting. Resolves once everything changed up to now is saved (or has failed and
+   * waits for a retry): a call made while a PUT is on its way waits for it and for the one after it.
+   */
+  function flush() {
     clearTimeout(timer);
     timer = null;
-    if (!canSave || !dirty) return;
     if (writing) {
       pending = true;
-      return;
+      return running;
     }
+    if (!canSave || !dirty) return Promise.resolve();
     writing = true;
-    dirty = false;
-    let ok = false;
-    try {
-      const r = await fetchFn(url, { method: 'PUT', headers, body: JSON.stringify(getState()) });
-      ok = r.ok;
-      await finish(r);
-    } catch {
-      /* offline or the server is down */
-    }
-    writing = false;
-    if (ok) failNoted = false;
-    else {
-      dirty = true; // the retry (or the next change) sends everything again
-      if (!failNoted) {
-        failNoted = true;
-        onSaveFail();
+    running = (async () => {
+      try {
+        let again = true;
+        while (again) {
+          pending = false;
+          if (!canSave || !dirty) break;
+          // Take the state and send it in the same instant: nothing is awaited in between.
+          const { body, sent } = bodyOf(getState(), base);
+          dirty = false;
+          let ok = false;
+          try {
+            const r = await fetchFn(url, { method: 'PUT', headers, body });
+            ok = r.ok;
+            await finish(r);
+          } catch {
+            /* offline or the server is down */
+          }
+          if (ok) {
+            failNoted = false;
+            if (sent) advance(sent); // the server has added everything up to what was sent
+          } else {
+            dirty = true; // the retry (or the next change) sends everything again
+            if (!failNoted) {
+              failNoted = true;
+              onSaveFail();
+            }
+          }
+          again = pending; // a change came in meanwhile: send again now
+          if (!ok && !again) retryLater();
+        }
+      } finally {
+        writing = false;
+        running = null;
       }
-    }
-    if (pending) {
-      pending = false;
-      await flush();
-      return;
-    }
-    if (!ok) retryLater();
+    })();
+    return running;
+  }
+
+  /** Stops for good: no more saves or retries (a test's tab, or a page being torn down). */
+  function dispose() {
+    canSave = false;
+    clearTimeout(timer);
+    timer = null;
   }
 
   /** For pagehide. Returns true if it sent something. */
   function flushOnExit() {
-    if (!canSave || !dirty) return false;
+    if (!canSave || !dirty || !lastReadOk) return false;
     clearTimeout(timer);
     timer = null;
     pending = false;
     dirty = false;
-    const body = JSON.stringify(getState());
+    // Count from the last confirmed value: if a PUT still on its way lands too, the server's
+    // high-water mark for this tab stops its XP being added twice.
+    const { body, sent } = bodyOf(getState(), base);
     const keepalive = new TextEncoder().encode(body).length <= keepaliveMax;
     Promise.resolve()
       .then(() => fetchFn(url, { method: 'PUT', headers, body, keepalive }))
       .then((r) => {
         if (!r.ok) throw new Error(`PUT ${url} answered ${r.status}`);
+        if (sent) advance(sent);
       })
       .catch(() => {
         // Still here (the page was kept, or came back from the back/forward cache): try again later.
@@ -230,11 +421,18 @@ export function createStateClient({
     save,
     flush,
     flushOnExit,
+    peek,
+    reload,
+    dispose,
     get canSave() {
       return canSave;
     },
     get dirty() {
       return dirty;
+    },
+    /** Nothing waiting to be saved and no PUT on its way. */
+    get idle() {
+      return idle();
     },
   };
 }

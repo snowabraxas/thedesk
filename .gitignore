@@ -1,4 +1,4 @@
-node_modules/
+node_modules
 .env
 .env.*
 *.log
@@ -6,4 +6,9 @@ node_modules/
 docs/screens/*.png
 *.png
 *.pdf
+# Scratch folders for local test runs (never Snow's data)
 .tmp-*/
+# The Preview button's Desk keeps its own data here, away from ~/agent-house
+.desk-preview/
+# Written by npm run deploy into the live copy (~/the-desk-live), with its temp file while it writes
+/.deployed.json*
