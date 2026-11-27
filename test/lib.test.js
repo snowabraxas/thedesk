@@ -4,8 +4,8 @@ import { spawnSync } from 'node:child_process';
 import { describe, test } from 'node:test';
 import { REPO_ROOT } from '../server/config.js';
 import {
-  articlesFor, autoPhase, awardText, blank, createStateClient, dayKey, esc, fmtDate, freshBadges, level, moon,
-  normalizeState, readsThisWeek, safeUrl, streak, sunTimes, themeScores, wilaLine,
+  articlesFor, autoPhase, awardText, blank, createStateClient, dayKey, esc, fmtDate, fmtDay, freshBadges, level, mentorLine,
+  moon, normalizeState, readsThisWeek, safeUrl, streak, sunTimes, themeScores, wilaLine,
 } from '../app/lib.js';
 
 const MIN = 60e3;
@@ -137,6 +137,14 @@ describe('dates', () => {
     assert.equal(fmtDate('not a date'), '');
   });
 
+  test('fmtDay shows month and day only, and ignores junk', () => {
+    assert.equal(fmtDay('2026-11-26'), 'Nov 26');
+    assert.equal(fmtDay('2026-01-01'), 'Jan 1');
+    assert.equal(fmtDay(''), '');
+    assert.equal(fmtDay(undefined), '');
+    assert.equal(fmtDay('not a date'), '');
+  });
+
   test('moon names the phase', () => {
     assert.equal(moon(at('2026-11-24T15:00:00Z')).name, 'Full moon');
     assert.equal(moon(at('2026-11-09T07:00:00Z')).name, 'New moon');
@@ -218,6 +226,78 @@ describe('state and progress', () => {
     assert.match(wilaLine('golden', 1, true), /^Golden hour, Snow\. 1 pick is still/);
     assert.match(wilaLine('night', 2, true), /^Evening, Snow\./);
     assert.match(wilaLine('night', 0, true), /Rest well/);
+  });
+});
+
+describe("mentorLine (Wila's note on the Product Feed)", () => {
+  const themes = [
+    { id: 'evals', name: 'Evals' },
+    { id: 'pm-role', name: 'The AI PM role' },
+    { id: 'growth', name: 'AI growth' },
+  ];
+  const articles = [
+    { id: 'a1', source: "Lenny's Newsletter", themes: ['evals'] },
+    { id: 'a2', source: 'CX Network', themes: ['pm-role'] },
+    { id: 'a3', source: 'Product School', themes: ['pm-role'] },
+    { id: 'a4', source: 'Braintrust', themes: ['evals', 'pm-role'] },
+    { id: 'a5', source: "Lenny's Podcast", themes: ['growth'] },
+  ];
+  const feed = { themes, articles };
+  const readOf = (...ids) => ({ ...blank(), read: Object.fromEntries(ids.map((id) => [id, 1])) });
+
+  test('counts unread picks, names the theme with the most, and starts with the first unread source', () => {
+    assert.equal(mentorLine(feed, blank()), "5 picks to read, 3 on The AI PM role. Start with Lenny's Newsletter.");
+  });
+
+  test('follows what Snow has read', () => {
+    assert.equal(mentorLine(feed, readOf('a1', 'a2')), '3 picks to read, 2 on The AI PM role. Start with Product School.');
+  });
+
+  test('says "all on" when every unread pick shares the theme', () => {
+    assert.equal(mentorLine(feed, readOf('a1', 'a2', 'a5')), '2 picks to read, all on The AI PM role. Start with Product School.');
+  });
+
+  test('a tie goes to the theme listed first in the edition', () => {
+    const tie = { themes, articles: [articles[0], articles[1], { id: 'x', source: 'X', themes: ['evals'] }, { id: 'y', source: 'Y', themes: ['pm-role'] }] };
+    assert.equal(mentorLine(tie, blank()), "4 picks to read, 2 on Evals. Start with Lenny's Newsletter.");
+  });
+
+  test('leaves the theme out when no theme has more than one unread pick', () => {
+    const spread = { themes, articles: [articles[0], articles[1], articles[4]] };
+    assert.equal(mentorLine(spread, blank()), "3 picks to read. Start with Lenny's Newsletter.");
+  });
+
+  test('one pick left', () => {
+    assert.equal(mentorLine(feed, readOf('a1', 'a2', 'a3', 'a4')), "One pick to read, on AI growth. It's from Lenny's Podcast.");
+  });
+
+  test('all caught up is a short warm line with no numbers', () => {
+    const line = mentorLine(feed, readOf('a1', 'a2', 'a3', 'a4', 'a5'));
+    assert.equal(line, 'All caught up. Nicely done, Snow. What stuck with you?');
+  });
+
+  test('no picks yet', () => {
+    assert.equal(mentorLine({ articles: [], themes: [] }, blank()), 'Your Product Feed is still being set up.');
+    assert.equal(mentorLine({}, blank()), 'Your Product Feed is still being set up.');
+    assert.equal(mentorLine(undefined, undefined), 'Your Product Feed is still being set up.');
+  });
+
+  test('copes with missing themes, sources and state', () => {
+    const bare = { articles: [{ id: 'a1' }, { id: 'a2', themes: 'evals' }, null] };
+    assert.equal(mentorLine(bare, {}), '2 picks to read.');
+    assert.equal(mentorLine({ themes: [{ id: 'evals' }], articles: [{ id: 'a1', themes: ['evals'], source: '  ' }] }, blank()), 'One pick to read.');
+  });
+
+  test('agent text stays plain text: it is passed through, never turned into markup, and kept on one line', () => {
+    const odd = {
+      themes: [{ id: 't', name: '<b>Evals</b>' }],
+      articles: [
+        { id: 'a1', source: '<img src=x onerror=alert(1)>\nNews', themes: ['t'] },
+        { id: 'a2', source: 'Two', themes: ['t'] },
+      ],
+    };
+    // The caller sets it with textContent, so the angle brackets show as characters.
+    assert.equal(mentorLine(odd, blank()), '2 picks to read, all on <b>Evals</b>. Start with <img src=x onerror=alert(1)> News.');
   });
 });
 

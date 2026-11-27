@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>The Desk</title>
 <link rel="icon" href="favicon.svg" type="image/svg+xml">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -11,6 +11,15 @@
 <link rel="stylesheet" href="style.css">
 </head>
 <body>
+
+<!-- The study behind every page: the plate for the current light, blurred, then the veil.
+     Cropped to the whole room in the room, and to the laptop on the Product Feed. -->
+<div class="backdrop" id="backdrop" data-view="room" aria-hidden="true">
+  <div class="bd" data-phase="morning"></div>
+  <div class="bd" data-phase="golden"></div>
+  <div class="bd" data-phase="night"></div>
+  <div class="veil"></div>
+</div>
 
 <main id="room" class="view room" aria-label="The Desk">
   <div class="frame" id="frame">
@@ -35,7 +44,7 @@
       </div>
     </header>
 
-    <aside class="dialogue" id="dialogue" aria-live="polite">
+    <aside class="dialogue frost" id="dialogue" aria-live="polite">
       <div class="who"><span class="dot"></span>Wila</div>
       <p id="wilaLine">Settling in…</p>
       <div class="acts">
@@ -44,62 +53,85 @@
       </div>
     </aside>
   </div>
-  <div class="toast" id="toast" role="status"></div>
 </main>
 
 <section id="feed" class="view feed" hidden aria-label="Product Feed">
-  <header class="fbar">
-    <button class="back" id="backBtn">&larr; The room</button>
-    <div class="ftitle">
-      <h1>Product Feed</h1>
-      <p id="fsub">Product, AI and PM</p>
-    </div>
-    <div class="fstats">
-      <div class="ring" id="weekRing" title="Reads this week"></div>
-      <div class="stat"><b id="xpText">0 XP</b><span id="lvlText2">Level 1</span></div>
-    </div>
-  </header>
-
-  <div class="fgrid">
-    <nav class="shelves" aria-label="Shelves">
-      <h2>Shelves</h2>
-      <ul id="shelfList"></ul>
-      <form id="folderForm" class="newfolder">
-        <label for="folderName">New folder</label>
-        <div class="row"><input id="folderName" maxlength="40" placeholder="e.g. Evals reading" autocomplete="off"><button>Add</button></div>
-      </form>
+  <div class="fwrap">
+    <nav class="rail glass" id="rail" aria-label="Desk sections">
+      <a class="rb back" id="backBtn" href="#" aria-label="Back to the room" title="Back to the room">
+        <svg class="ic" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M4 11l8-7 8 7v9H4z"/><path d="M10 20v-5h4v5"/></svg></a>
+      <button class="rb" type="button" data-go="all" aria-label="Today’s edition" title="Today’s edition">
+        <svg class="ic" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><rect x="3" y="5" width="18" height="12" rx="2"/><path d="M2 20h20"/></svg></button>
+      <button class="rb" type="button" data-go="map" aria-label="Theme map" title="Theme map">
+        <svg class="ic" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="12" r="2.5"/><circle cx="5" cy="6" r="2"/><circle cx="19" cy="7" r="2"/><circle cx="17" cy="19" r="2"/><path d="M7 7l3 3M17 8l-3 2.5M16 17l-2.5-3"/></svg></button>
+      <button class="rb" type="button" data-go="notes" aria-label="My notes" title="My notes">
+        <svg class="ic" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 4h10l4 4v12H5z"/><path d="M8 12h8M8 16h5"/></svg></button>
+      <button class="rb" type="button" data-go="badges" aria-label="Badges" title="Badges">
+        <svg class="ic" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><circle cx="12" cy="9" r="5"/><path d="M9 13.5L7.5 21l4.5-2.5 4.5 2.5L15 13.5"/></svg></button>
     </nav>
 
-    <div class="list" id="list" aria-live="polite"></div>
+    <div class="fmain">
+      <header class="capsule glass">
+        <span class="orb" aria-hidden="true"></span>
+        <div class="ftitle">
+          <h1>Product Feed</h1>
+          <p id="fsub">Product, AI and PM · picked for your goals</p>
+        </div>
+        <p class="mentor pill"><strong>Wila</strong> · <span id="mentorLine">Settling in…</span><span class="caret" aria-hidden="true"></span></p>
+        <div class="fstats pill">
+          <svg class="ring" id="weekRing" width="44" height="44" viewBox="0 0 44 44" role="img" aria-label="0 of 5 reads this week">
+            <circle class="ring-track" cx="22" cy="22" r="18"/>
+            <circle class="ring-fill" id="ringFill" cx="22" cy="22" r="18" transform="rotate(-90 22 22)"/>
+            <text id="ringText" x="22" y="26" text-anchor="middle">0/5</text>
+          </svg>
+          <span class="stat"><b id="xpText">0 XP</b><span id="lvlText2">Level 1</span></span>
+        </div>
+      </header>
 
-    <aside class="side">
-      <section class="card map">
-        <div class="cardhead"><h2>Theme map</h2><span class="hint">grows with what you read and note</span></div>
-        <div class="fig" id="mapFig"><svg id="mapSvg" role="img" aria-label="Map of the themes you have been reading"></svg></div>
-      </section>
-      <section class="card prog">
-        <div class="cardhead"><h2>Progress</h2><span class="hint" id="badgeCount"></span></div>
-        <ul class="badges" id="badges"></ul>
-      </section>
-    </aside>
-  </div>
+      <div class="cols">
+        <nav class="shelves glass" aria-label="Shelves">
+          <h2>Shelves</h2>
+          <ul id="shelfList"></ul>
+          <form id="folderForm" class="newfolder">
+            <label for="folderName">New folder</label>
+            <div class="row"><input id="folderName" maxlength="40" placeholder="e.g. Evals reading" autocomplete="off"><button class="addbtn">Add</button></div>
+          </form>
+        </nav>
 
-  <div class="scrim" id="scrim" hidden></div>
-  <aside class="drawer" id="drawer" hidden aria-label="Article notes">
-    <header>
-      <div><span class="dsrc" id="dSrc"></span><h3 id="dTitle"></h3></div>
-      <button class="x" id="dClose" aria-label="Close">&times;</button>
-    </header>
-    <div class="tabs"><span class="tab">Notes</span></div>
-    <div class="pane" id="paneNotes">
-      <label for="noteText" class="sr">Your note</label>
-      <textarea id="noteText" rows="4" placeholder="What stuck with you? What would you try?"></textarea>
-      <div class="row end"><button class="primary" id="noteSave">Save note</button></div>
-      <ul class="notes" id="noteList"></ul>
+        <div class="list" id="list" aria-live="polite"></div>
+
+        <aside class="side" aria-label="Your map and progress">
+          <section class="card glass map" id="mapCard" aria-labelledby="mapTitle">
+            <div class="cardhead"><h2 id="mapTitle" tabindex="-1">Theme map</h2><span class="hint">grows as you read</span></div>
+            <div class="fig" id="mapFig"><svg id="mapSvg" role="img" aria-label="Map of the themes you have been reading"></svg></div>
+          </section>
+          <section class="card glass prog" id="badgeCard" aria-labelledby="badgeTitle">
+            <div class="cardhead"><h2 id="badgeTitle" tabindex="-1">Badges</h2><span class="hint" id="badgeCount"></span></div>
+            <ul class="badges" id="badges"></ul>
+          </section>
+        </aside>
+      </div>
     </div>
-  </aside>
-  <div class="toast" id="toast2" role="status"></div>
+  </div>
 </section>
+
+<!-- Fixed layers live directly in <body>: an ancestor with transform, filter or backdrop-filter
+     (every glass and frost panel has one) would pin them to that panel instead of the screen. -->
+<div class="scrim" id="scrim" hidden></div>
+<aside class="drawer frost" id="drawer" hidden aria-label="Article notes">
+  <header>
+    <div><span class="dsrc" id="dSrc"></span><h3 id="dTitle"></h3></div>
+    <button class="x" id="dClose" aria-label="Close notes"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
+  </header>
+  <div class="tabs"><span class="tab">Notes</span></div>
+  <div class="pane" id="paneNotes">
+    <label for="noteText" class="sr">Your note</label>
+    <textarea id="noteText" rows="4" placeholder="What stuck with you? What would you try?"></textarea>
+    <div class="row end"><button class="act primary" id="noteSave">Save note</button></div>
+    <ul class="notes" id="noteList"></ul>
+  </div>
+</aside>
+<div class="toast" id="toast" role="status"></div>
 
 <script type="module" src="app.js"></script>
 </body>

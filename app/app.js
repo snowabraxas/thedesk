@@ -1,9 +1,9 @@
-// The Desk in the browser. Ported from prototype/app.js.
+// The Desk in the browser. Ported from prototype/app.js, dressed in Lotus (docs/design/lotus).
 // Snow's reads, saves, folders, notes, XP and badges live on the local server
 // (GET and PUT /api/state); the edition comes from GET /api/feed.
 import {
-  PHASE_LABEL, WEEK_GOAL, BADGES, articlesFor, autoPhase, awardText, blank, cnt, createStateClient, dayKey, esc, fmtDate,
-  freshBadges, level as levelFor, moon, moonPath, readsThisWeek as readsSince, safeUrl,
+  PHASE_LABEL, WEEK_GOAL, BADGES, articlesFor, autoPhase, awardText, blank, cnt, createStateClient, dayKey, esc, fmtDate, fmtDay,
+  freshBadges, level as levelFor, mentorLine, moon, moonPath, readsThisWeek as readsSince, safeUrl,
   streak as streakOf, themeScores as scoresFor, uid, wilaLine,
 } from './lib.js';
 
@@ -26,6 +26,23 @@ const OBJECTS = [
 
 /* ================= helpers ================= */
 const $ = s => document.querySelector(s);
+// Inline stroke icons (Lotus: 1.8 stroke, round caps, on 22px). Static markup, never agent text.
+const icon = paths => `<svg class="ic" viewBox="0 0 24 24" aria-hidden="true" focusable="false">${paths}</svg>`;
+const ICON = {
+  check: icon('<path d="M5 12.5l4.5 4.5L19 7.5"/>'),
+  chevron: icon('<path d="M7 10l5 5 5-5"/>'),
+  note: icon('<path d="M5 4h10l4 4v12H5z"/><path d="M8 12h8M8 16h5"/>'),
+  pencil: icon('<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="M13.5 6.5l4 4"/>'),
+  trash: icon('<path d="M4 7h16"/><path d="M9.5 7V4.5h5V7"/><path d="M6.5 7l1 13h9l1-13"/>'),
+  star: icon('<path d="M12 3l2.6 5.5 6 .8-4.4 4.2 1.1 6L12 16.6 6.7 19.5l1.1-6L3.4 9.3l6-.8z"/>'),
+};
+const reducedMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
+// Re-rendering a list replaces its buttons; put the keyboard focus back where it was.
+function refocus(selector, fallback) {
+  const el = (selector && document.querySelector(selector)) || (fallback && document.querySelector(fallback));
+  if (el) el.focus({ preventScroll: true });
+}
+const attrSel = (name, value) => `[${name}="${CSS.escape(String(value))}"]`;
 
 /* ================= state + saving ================= */
 let S = blank();
@@ -93,13 +110,15 @@ function buildHotspots() {
   });
 }
 // The light, the date and the moon don't depend on Snow's state, so they show straight away.
+// The blurred study behind every page follows the same light.
 function renderScene() {
   const p = phase();
-  document.querySelectorAll('.plate').forEach(img => img.classList.toggle('on', img.dataset.phase === p));
+  document.querySelectorAll('.plate, .bd').forEach(el => el.classList.toggle('on', el.dataset.phase === p));
+  $('#backdrop').dataset.phase = p;
   const now = new Date();
   $('#when').textContent = now.toLocaleDateString('en-CA', { weekday: 'long', month: 'long', day: 'numeric' }) + ' · ' + PHASE_LABEL[p] + (preview ? ' (preview)' : ' in Toronto');
   const m = moon(now);
-  $('#moonChip').innerHTML = `<svg width="16" height="16" viewBox="0 0 100 100" aria-hidden="true"><circle cx="50" cy="50" r="40" fill="#f6ebd3"/><path d="${moonPath(m.age)}" fill="#152e2c" opacity=".88"/></svg>${esc(m.name)}`;
+  $('#moonChip').innerHTML = `<svg width="16" height="16" viewBox="0 0 100 100" aria-hidden="true"><circle class="moon-lit" cx="50" cy="50" r="40"/><path class="moon-dark" d="${moonPath(m.age)}"/></svg>${esc(m.name)}`;
   $('#phaseName').textContent = preview ? PHASE_LABEL[preview] : 'auto';
   return p;
 }
@@ -130,7 +149,10 @@ function openFeed() { $('#frame').classList.add('zoom'); setTimeout(() => { loca
 function route() {
   const inFeed = location.hash === '#feed';
   $('#feed').hidden = !inFeed; $('#room').hidden = inFeed;
-  if (inFeed) { if (ready) renderFeed(); window.scrollTo(0, 0); }
+  $('#backdrop').dataset.view = inFeed ? 'feed' : 'room';
+  // The drawer lives outside the feed (so it stays pinned to the screen): close it when leaving.
+  if (!inFeed) { $('#drawer').hidden = true; $('#scrim').hidden = true; }
+  if (inFeed) { renderScene(); if (ready) renderFeed(); window.scrollTo(0, 0); }
   else { requestAnimationFrame(() => requestAnimationFrame(() => $('#frame').classList.remove('zoom'))); renderRoom(); }
 }
 
@@ -139,14 +161,14 @@ let shelf = 'all', editing = null, confirming = null, openArticle = null;
 const noteTime = ts => new Date(ts).toLocaleString('en-CA', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' });
 function renderShelves() {
   const base = [['all', 'Everything', feed.articles.length], ['unread', 'Unread', listFor('unread').length], ['saved', 'Saved', listFor('saved').length], ['notes', 'My notes', S.notes.length]];
-  let h = base.map(([k, n, c]) => `<li class="shelf ${shelf === k ? 'on' : ''}"><button class="s" data-shelf="${k}"><span>${n}</span><span class="n">${c}</span></button></li>`).join('');
+  let h = base.map(([k, n, c]) => `<li class="shelf base ${shelf === k ? 'on' : ''}"><button class="s" data-shelf="${k}" ${shelf === k ? 'aria-current="true"' : ''}><span class="nm">${n}</span><span class="n">${c}</span></button></li>`).join('');
   h += `<li class="shelfsep">Folders</li>`;
-  if (!S.folders.length) h += `<li class="shelfsep" style="margin:0;opacity:.8">No folders yet</li>`;
+  if (!S.folders.length) h += `<li class="shelfnone">No folders yet</li>`;
   h += S.folders.map(f => {
     const k = 'f:' + f.id;
-    if (editing === f.id) return `<li class="shelf"><input data-rename="${esc(f.id)}" value="${esc(f.name)}" maxlength="40" aria-label="Folder name"></li>`;
-    if (confirming === f.id) return `<li class="shelf"><span style="flex:1;padding:0 8px;font-size:14px">Delete “${esc(f.name)}”?</span><button class="mini" data-del-yes="${esc(f.id)}" aria-label="Yes, delete">Yes</button><button class="mini" data-del-no aria-label="Keep folder">No</button></li>`;
-    return `<li class="shelf ${shelf === k ? 'on' : ''}"><button class="s" data-shelf="${esc(k)}"><span>${esc(f.name)}</span><span class="n">${listFor(k).length}</span></button><button class="mini" data-edit="${esc(f.id)}" aria-label="Rename ${esc(f.name)}">✎</button><button class="mini" data-del="${esc(f.id)}" aria-label="Delete ${esc(f.name)}">×</button></li>`;
+    if (editing === f.id) return `<li class="shelf folder"><input data-rename="${esc(f.id)}" value="${esc(f.name)}" maxlength="40" aria-label="Folder name"></li>`;
+    if (confirming === f.id) return `<li class="shelf folder confirm"><span class="q">Delete “${esc(f.name)}”?</span><button class="yes" data-del-yes="${esc(f.id)}" aria-label="Yes, delete ${esc(f.name)}">Delete</button><button class="no" data-del-no aria-label="Keep ${esc(f.name)}">Keep</button></li>`;
+    return `<li class="shelf folder ${shelf === k ? 'on' : ''}"><button class="s" data-shelf="${esc(k)}" title="${esc(f.name)}" ${shelf === k ? 'aria-current="true"' : ''}><span class="nm">${esc(f.name)}</span><span class="n">${listFor(k).length}</span></button><button class="mini" data-edit="${esc(f.id)}" aria-label="Rename ${esc(f.name)}" title="Rename">${ICON.pencil}</button><button class="mini" data-del="${esc(f.id)}" aria-label="Delete ${esc(f.name)}" title="Delete">${ICON.trash}</button></li>`;
   }).join('');
   $('#shelfList').innerHTML = h;
   const inp = document.querySelector('[data-rename]'); if (inp) { inp.focus(); inp.select(); }
@@ -155,96 +177,120 @@ function shelfTitle() {
   if (shelf.startsWith('f:')) { const f = S.folders.find(x => 'f:' + x.id === shelf); return f ? f.name : 'Folder'; }
   return { all: "Today's edition", unread: 'Unread', saved: 'Saved', notes: 'My notes' }[shelf];
 }
+// The empty messages, with their first sentence as a soft heading.
+const emptyCard = text => { const i = text.indexOf('. '); return `<div class="empty-state frost"><p>${i > 0 ? `<strong>${esc(text.slice(0, i + 1))}</strong> ${esc(text.slice(i + 2))}` : esc(text)}</p></div>`; };
 function renderList() {
-  const edition = feed.edition ? 'Edition of ' + esc(fmtDate(feed.edition)) + (feed.sample === true ? ' · sample picks from real articles' : '') : '';
-  const head = `<div class="listhead"><h2>${esc(shelfTitle())}</h2><span>${edition}</span></div>`;
+  const sample = feed.sample === true ? '<span>Sample picks from real articles</span>' : '';
+  const head = `<div class="listhead glass"><h2 id="listTitle" tabindex="-1">${esc(shelfTitle())}</h2>${sample}</div>`;
   if (shelf === 'notes') {
     const notes = [...S.notes].sort((a, b) => b.ts - a.ts);
     $('#list').innerHTML = head + (notes.length ? notes.map(n => {
       const a = feed.articles.find(x => x.id === n.a);
-      return `<article class="notecard"><div class="on">${esc(noteTime(n.ts))} · on <button class="ab" style="min-height:30px;border:0;padding:0;text-decoration:underline" data-notes="${esc(n.a)}">${esc(a ? a.title : 'an article')}</button></div><p>${esc(n.text)}</p></article>`;
-    }).join('') : `<div class="empty-state">No notes yet. Open any article's Notes to jot down what stuck with you.</div>`);
+      return `<article class="notecard frost"><div class="on"><span>${esc(noteTime(n.ts))} · on</span><button data-notes="${esc(n.a)}">${esc(a ? a.title : 'an article')}</button></div><p>${esc(n.text)}</p></article>`;
+    }).join('') : emptyCard("No notes yet. Open any article's Notes to jot down what stuck with you."));
     return;
   }
   const list = listFor(shelf);
-  if (!list.length) { $('#list').innerHTML = head + `<div class="empty-state">${shelf === 'unread' ? "All read. Your feed agent brings new picks every morning." : 'Nothing here yet. Use Save on any article to file it.'}</div>`; return; }
+  if (!list.length) { $('#list').innerHTML = head + emptyCard(shelf === 'unread' ? 'All read. Your feed agent brings new picks every morning.' : 'Nothing here yet. Use Save on any article to file it.'); return; }
   $('#list').innerHTML = head + list.map(a => {
     const read = !!S.read[a.id]; const inF = S.saved[a.id] || []; const nn = S.notes.filter(n => n.a === a.id).length;
     const url = safeUrl(a.url);
+    const meta = [a.source, a.author, a.date ? fmtDate(a.date) : ''].filter(Boolean).map(esc).join(' · ');
     const tags = (a.themes || []).map(t => { const th = feed.themes.find(x => x.id === t); return `<span class="tagchip">${esc(th ? th.name : t)}</span>`; }).join('');
-    const menu = S.folders.length ? S.folders.map(f => `<label><input type="checkbox" data-save="${esc(a.id)}" value="${esc(f.id)}" ${inF.includes(f.id) ? 'checked' : ''}>${esc(f.name)}</label>`).join('') : `<div class="empty">Make a folder on the left first.</div>`;
-    return `<article class="art ${read ? 'read' : ''}" data-id="${esc(a.id)}">
-      <div class="meta"><span>${esc(a.source)}</span>${a.author ? `<span>· ${esc(a.author)}</span>` : ''}${a.date ? `<span>· ${esc(fmtDate(a.date))}</span>` : ''}<span>· ${esc(a.minutes)} min</span></div>
-      <h3>${url ? `<a href="${esc(url)}" target="_blank" rel="noopener">${esc(a.title)}</a>` : esc(a.title)}</h3>
-      <p>${esc(a.summary)}</p>
-      <div class="tags">${tags}</div>
-      <p class="why">${esc(a.why)}</p>
+    const menu = S.folders.length ? S.folders.map(f => `<label><input type="checkbox" data-save="${esc(a.id)}" value="${esc(f.id)}" ${inF.includes(f.id) ? 'checked' : ''}>${esc(f.name)}</label>`).join('') : `<div class="empty">Make a folder in Shelves first.</div>`;
+    return `<article class="art frost ${read ? 'read' : ''}" data-id="${esc(a.id)}">
+      <p class="meta">${meta}</p>
+      <h3>${url ? `<a href="${esc(url)}" target="_blank" rel="noopener">${esc(a.title)}<span class="sr"> (opens in a new tab)</span></a>` : esc(a.title)}</h3>
+      <p class="sum">${esc(a.summary)}</p>
+      ${tags ? `<div class="tags">${tags}</div>` : ''}
+      <div class="why"><p class="lbl">Why for you</p><p class="wt">${esc(a.why)}</p></div>
       <div class="arow">
-        <button class="ab ${read ? 'on' : ''}" data-read="${esc(a.id)}">${read ? 'Read ✓' : 'Mark as read'}</button>
-        <details class="savebox"><summary class="ab ${inF.length ? 'on' : ''}" role="button">${inF.length ? 'Saved' : 'Save'} ▾</summary><div class="menu">${menu}</div></details>
-        <button class="ab" data-notes="${esc(a.id)}">Notes${nn ? ' (' + nn + ')' : ''}</button>
+        <button class="ab readbtn ${read ? 'on' : ''}" data-read="${esc(a.id)}" aria-pressed="${read}">${read ? ICON.check + 'Read' : 'Mark as read'}</button>
+        <details class="savebox"><summary class="ab ${inF.length ? 'on' : ''}" role="button"><span class="slbl">${inF.length ? 'Saved' : 'Save'}</span>${ICON.chevron}</summary><div class="menu">${menu}</div></details>
+        <button class="ab" data-notes="${esc(a.id)}">${ICON.note}Notes${nn ? ' (' + nn + ')' : ''}</button>
+        ${a.minutes ? `<span class="mins">${esc(a.minutes)} min</span>` : ''}
       </div></article>`;
   }).join('');
 }
+const RING = 2 * Math.PI * 18;
 function renderStats() {
-  const w = readsThisWeek(); const pct = Math.min(100, (w / WEEK_GOAL) * 100);
-  $('#weekRing').style.background = `radial-gradient(closest-side,var(--teal) 76%,transparent 77%),conic-gradient(var(--amber) ${pct}%,rgba(255,255,255,.15) 0)`;
-  $('#weekRing').innerHTML = `${w}/${WEEK_GOAL}<br><span style="font:500 10px Inter">this week</span>`;
+  const w = readsThisWeek(); const shown = Math.min(w, WEEK_GOAL);
+  const fill = $('#ringFill');
+  fill.setAttribute('stroke-dasharray', `${(RING * shown / WEEK_GOAL).toFixed(1)} ${RING.toFixed(1)}`);
+  fill.classList.toggle('none', !shown);
+  $('#ringText').textContent = `${w}/${WEEK_GOAL}`;
+  $('#weekRing').setAttribute('aria-label', `${w} of ${WEEK_GOAL} reads this week`);
   $('#xpText').textContent = S.xp + ' XP';
   $('#lvlText2').textContent = 'Level ' + level() + ' · ' + (100 - S.xp % 100) + ' XP to next';
-  $('#fsub').textContent = 'Product, AI and PM · picked for your goals';
+  const ed = fmtDay(feed.edition);
+  $('#fsub').textContent = 'Product, AI and PM · picked for your goals' + (ed ? ' · Edition of ' + ed : '');
+  $('#mentorLine').textContent = mentorLine(feed, S);
 }
 function renderBadges() {
-  $('#badges').innerHTML = BADGES.map(b => `<li class="${S.badges[b.id] ? 'got' : ''}"><span class="ic"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 3l2.6 5.3 5.9.9-4.3 4.1 1 5.8L12 16.4 6.8 19.1l1-5.8L3.5 9.2l5.9-.9z"/></svg></span><div><b>${esc(b.name)}</b><span>${esc(b.how)}</span></div></li>`).join('');
-  $('#badgeCount').textContent = `${cnt(S.badges)} of ${BADGES.length} badges`;
+  $('#badges').innerHTML = BADGES.map(b => { const got = !!S.badges[b.id]; return `<li class="${got ? 'got' : ''}"><span class="bic">${ICON.star}</span><span class="bt"><b>${esc(b.name)}</b><span class="how">${esc(b.how)}</span><span class="sr">${got ? 'Earned' : 'Not earned yet'}</span></span></li>`; }).join('');
+  $('#badgeCount').textContent = `${cnt(S.badges)} of ${BADGES.length}`;
 }
+// The rail fills the section you're on: Today's edition (Everything) or My notes.
+function renderRail() {
+  document.querySelectorAll('#rail [data-go]').forEach(b => {
+    if (b.dataset.go === shelf) b.setAttribute('aria-current', 'true'); else b.removeAttribute('aria-current');
+  });
+}
+// The theme map: you in the middle, the edition's themes around you. A theme starts as a dashed
+// outline, fills with moss as you read its picks, and grows with reads, notes and saves.
 const mapSvg = $('#mapSvg');
 function drawMap() {
   if (!ready) return;
   const W = mapSvg.clientWidth, H = mapSvg.clientHeight; if (!W || !H) return;
-  const T = themeScores(); const cx = W / 2, cy = H / 2 - 6, rx = W / 2 - 58, ry = H / 2 - 44;
+  const T = themeScores(); const cx = W / 2, cy = H / 2, rx = Math.max(40, W / 2 - 54), ry = Math.max(40, H / 2 - 46);
   const pos = {}; T.forEach((t, i) => { const ang = -Math.PI / 2 + i * 2 * Math.PI / T.length; pos[t.id] = [cx + rx * Math.cos(ang), cy + ry * Math.sin(ang)]; });
   const links = {};
   feed.articles.filter(a => S.read[a.id] && Array.isArray(a.themes) && a.themes.length > 1).forEach(a => {
     for (let i = 0; i < a.themes.length; i++) for (let j = i + 1; j < a.themes.length; j++) { const k = [a.themes[i], a.themes[j]].sort().join('|'); links[k] = (links[k] || 0) + 1; }
   });
+  const f1 = v => v.toFixed(1);
   let g = '';
-  T.forEach(t => { if (t.score > 0) g += `<line x1="${cx}" y1="${cy}" x2="${pos[t.id][0]}" y2="${pos[t.id][1]}" stroke="#ffd98a" stroke-opacity="${Math.min(.7, .2 + t.score * .08)}" stroke-width="1.5"/>`; });
-  Object.entries(links).forEach(([k, n]) => { const [a, b] = k.split('|'); if (pos[a] && pos[b]) g += `<line x1="${pos[a][0]}" y1="${pos[a][1]}" x2="${pos[b][0]}" y2="${pos[b][1]}" stroke="#b6d77a" stroke-opacity=".75" stroke-width="${1 + n}"/>`; });
-  g += `<circle cx="${cx}" cy="${cy}" r="16" fill="#ffd98a"/><text x="${cx}" y="${cy + 34}" text-anchor="middle" font-size="12" fill="#fbf4e4" font-family="Fredoka">you</text>`;
-  T.forEach(t => {
-    const [x, y] = pos[t.id]; const r = 10 + Math.min(24, t.score * 4); const lit = t.score > 0;
-    const name = String(t.name ?? '');
-    g += `<g><circle cx="${x}" cy="${y}" r="${r}" fill="${lit ? '#f2b84b' : 'none'}" fill-opacity="${lit ? .85 : 0}" stroke="${lit ? '#ffd98a' : '#9fb0a7'}" stroke-width="1.5" ${lit ? '' : 'stroke-dasharray="3 3"'}/>
-      <text x="${x}" y="${y + r + 15}" text-anchor="middle" font-size="12.5" fill="${lit ? '#fbf4e4' : '#bccbc2'}" font-family="Inter">${esc(W < 300 ? name.replace('The ', '') : name)}</text>
-      <text x="${x}" y="${y + 4}" text-anchor="middle" font-size="11" fill="#152e2c" font-weight="600" font-family="Inter">${t.reads ? t.reads + '/' + t.total : ''}</text></g>`;
+  T.forEach(t => { const [x, y] = pos[t.id]; g += `<line class="spoke ${t.score > 0 ? 'lit' : ''}" x1="${f1(cx)}" y1="${f1(cy)}" x2="${f1(x)}" y2="${f1(y)}"/>`; });
+  Object.entries(links).forEach(([k, n]) => { const [a, b] = k.split('|'); if (pos[a] && pos[b]) g += `<line class="link" x1="${f1(pos[a][0])}" y1="${f1(pos[a][1])}" x2="${f1(pos[b][0])}" y2="${f1(pos[b][1])}" stroke-width="${1 + n}"/>`; });
+  g += `<circle class="you-ring" cx="${f1(cx)}" cy="${f1(cy)}" r="24"/><circle class="you" cx="${f1(cx)}" cy="${f1(cy)}" r="16"/><text class="you-label" x="${f1(cx)}" y="${f1(cy + 40)}" text-anchor="middle">you</text>`;
+  T.forEach((t, i) => {
+    const [x, y] = pos[t.id]; const r = 9 + Math.min(16, t.score * 4); const full = t.total ? t.reads / t.total : 0;
+    const name = String(t.name ?? ''); const label = W < 300 ? name.replace(/^The /, '') : name;
+    const ly = y > cy + 1 ? y + r + 14 : y - r - 7;
+    const fill = full > 0 ? `<rect class="node-fill" clip-path="url(#tm${i})" x="${f1(x - r)}" y="${f1(y + r - 2 * r * full)}" width="${f1(2 * r)}" height="${f1(2 * r * full)}"/>` : '';
+    g += `<g class="node ${t.score > 0 ? 'touched' : ''}"><clipPath id="tm${i}"><circle cx="${f1(x)}" cy="${f1(y)}" r="${r}"/></clipPath>
+      <circle class="node-bg" cx="${f1(x)}" cy="${f1(y)}" r="${r}"/>${fill}<circle class="node-ring" cx="${f1(x)}" cy="${f1(y)}" r="${r}"/>
+      <text x="${f1(x)}" y="${f1(ly)}" text-anchor="middle">${esc(label)}${t.reads ? `<tspan class="cnt"> ${t.reads}/${t.total}</tspan>` : ''}</text></g>`;
   });
   mapSvg.innerHTML = g;
+  mapSvg.setAttribute('aria-label', T.length ? 'Theme map. ' + T.map(t => `${String(t.name ?? '')}: ${t.reads} of ${t.total} read`).join('. ') + '.' : 'Theme map: no themes yet.');
 }
 const mapRO = new ResizeObserver(drawMap); mapRO.observe(mapSvg);
-function renderFeed() { renderShelves(); renderList(); renderStats(); renderBadges(); drawMap(); }
+function renderFeed() { renderShelves(); renderList(); renderStats(); renderBadges(); renderRail(); drawMap(); }
 function renderAll() { renderRoom(); if (!$('#feed').hidden) renderFeed(); }
 
 /* ================= feed actions ================= */
+function pickShelf(k) { shelf = k; editing = confirming = null; renderShelves(); renderList(); renderRail(); }
 $('#shelfList').addEventListener('click', e => {
   const t = e.target.closest('button'); if (!t) return;
-  if (t.dataset.shelf) { shelf = t.dataset.shelf; editing = confirming = null; renderShelves(); renderList(); }
+  if (t.dataset.shelf) { pickShelf(t.dataset.shelf); refocus(attrSel('data-shelf', shelf)); }
   else if (t.dataset.edit) { editing = t.dataset.edit; confirming = null; renderShelves(); }
-  else if (t.dataset.del) { confirming = t.dataset.del; editing = null; renderShelves(); }
+  else if (t.dataset.del) { confirming = t.dataset.del; editing = null; renderShelves(); refocus('[data-del-no]'); }
   else if (t.dataset.delYes) {
     const f = S.folders.find(x => x.id === t.dataset.delYes); if (!f) return;
     const snapshot = JSON.parse(JSON.stringify(S.saved));
     S.folders = S.folders.filter(x => x.id !== f.id);
     Object.keys(S.saved).forEach(k => { S.saved[k] = S.saved[k].filter(id => id !== f.id); if (!S.saved[k].length) delete S.saved[k]; });
     if (shelf === 'f:' + f.id) shelf = 'all';
-    confirming = null; save(); renderFeed();
+    confirming = null; save(); renderFeed(); refocus('#folderName');
     toast(`Deleted “${f.name}”.`, 'Undo', () => { S.folders.push(f); S.saved = snapshot; save(); renderFeed(); });
-  } else if ('delNo' in t.dataset) { confirming = null; renderShelves(); }
+  } else if ('delNo' in t.dataset) { const id = confirming; confirming = null; renderShelves(); refocus(attrSel('data-del', id)); }
 });
 function finishRename(inp, keep) {
-  const f = S.folders.find(x => x.id === inp.dataset.rename); const v = inp.value.trim();
+  const id = inp.dataset.rename;
+  const f = S.folders.find(x => x.id === id); const v = inp.value.trim();
   if (keep && f && v) { f.name = v; save(); }
-  editing = null; renderFeed();
+  editing = null; renderFeed(); refocus(attrSel('data-edit', id));
 }
 $('#shelfList').addEventListener('keydown', e => { const inp = e.target.closest('[data-rename]'); if (!inp) return; if (e.key === 'Enter') finishRename(inp, true); if (e.key === 'Escape') finishRename(inp, false); });
 $('#shelfList').addEventListener('focusout', e => { const inp = e.target.closest('[data-rename]'); if (inp && editing) finishRename(inp, true); });
@@ -262,7 +308,7 @@ $('#list').addEventListener('click', e => {
     const id = t.dataset.read;
     if (S.read[id]) { delete S.read[id]; save(); }
     else { S.read[id] = Date.now(); award(10, 'article read'); }
-    renderFeed();
+    renderFeed(); refocus(attrSel('data-read', id), '#listTitle');
   } else if (t.dataset.notes) openDrawer(t.dataset.notes);
 });
 $('#list').addEventListener('change', e => {
@@ -272,10 +318,32 @@ $('#list').addEventListener('change', e => {
   if (cur.size) S.saved[a] = [...cur]; else delete S.saved[a];
   (!wasSaved && cur.size) ? award(5, 'saved to a folder') : save();
   const open = c.closest('details'); renderShelves(); renderStats(); renderBadges(); drawMap();
-  const sum = open && open.querySelector('summary'); if (sum) { sum.textContent = (cur.size ? 'Saved' : 'Save') + ' ▾'; sum.classList.toggle('on', cur.size > 0); }
+  const sum = open && open.querySelector('summary');
+  if (sum) { sum.querySelector('.slbl').textContent = cur.size ? 'Saved' : 'Save'; sum.classList.toggle('on', cur.size > 0); }
 });
 document.addEventListener('click', e => { document.querySelectorAll('details.savebox[open]').forEach(d => { if (!d.contains(e.target)) d.open = false; }); });
-$('#backBtn').addEventListener('click', () => { location.hash = ''; });
+// Escape closes an open Save menu and returns to its button.
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Escape') return;
+  const d = e.target.closest && e.target.closest('details.savebox[open]');
+  if (d) { d.open = false; d.querySelector('summary').focus(); }
+});
+
+/* ================= the rail ================= */
+function jumpTo(target, heading) {
+  target.scrollIntoView({ behavior: reducedMotion() ? 'auto' : 'smooth', block: 'start' });
+  heading.focus({ preventScroll: true });
+}
+$('#rail').addEventListener('click', e => {
+  const b = e.target.closest('[data-go]'); if (!b || !ready) return;
+  const go = b.dataset.go;
+  if (go === 'all' || go === 'notes') {
+    pickShelf(go);
+    const top = $('#list').getBoundingClientRect().top;
+    if (top < 0 || top > innerHeight * 0.6) jumpTo($('#list'), $('#listTitle')); else $('#listTitle').focus({ preventScroll: true });
+  } else if (go === 'map') jumpTo($('#mapCard'), $('#mapTitle'));
+  else if (go === 'badges') jumpTo($('#badgeCard'), $('#badgeTitle'));
+});
 
 /* ================= drawer: notes ================= */
 // The chat with Wila (the drawer's second tab) comes back with S6.
@@ -286,12 +354,15 @@ function openDrawer(id) {
   $('#dTitle').textContent = a.title;
   $('#drawer').hidden = false; $('#scrim').hidden = false;
   renderNotes();
-  $('#noteText').focus();
+  $('#noteText').focus({ preventScroll: true });
 }
-function closeDrawer() { $('#drawer').hidden = true; $('#scrim').hidden = true; renderFeed(); }
+function closeDrawer() {
+  $('#drawer').hidden = true; $('#scrim').hidden = true; renderFeed();
+  refocus(attrSel('data-notes', openArticle));
+}
 function renderNotes() {
   const list = S.notes.filter(n => n.a === openArticle).sort((a, b) => b.ts - a.ts);
-  $('#noteList').innerHTML = list.length ? list.map(n => `<li><p>${esc(n.text)}</p><div class="nrow"><span>${esc(noteTime(n.ts))}</span><button data-dn="${esc(n.id)}">Delete</button></div></li>`).join('') : `<li style="background:none;border:0;padding:0" class="tiny">No notes on this one yet.</li>`;
+  $('#noteList').innerHTML = list.length ? list.map(n => `<li><p>${esc(n.text)}</p><div class="nrow"><span>${esc(noteTime(n.ts))}</span><button data-dn="${esc(n.id)}">Delete</button></div></li>`).join('') : `<li class="none tiny">No notes on this one yet.</li>`;
 }
 $('#noteSave').addEventListener('click', () => {
   const v = $('#noteText').value.trim(); if (!v || !ready) return;
@@ -301,7 +372,7 @@ $('#noteSave').addEventListener('click', () => {
 $('#noteList').addEventListener('click', e => {
   const b = e.target.closest('[data-dn]'); if (!b) return;
   const gone = S.notes.find(n => n.id === b.dataset.dn); if (!gone) return;
-  S.notes = S.notes.filter(n => n.id !== b.dataset.dn); save(); renderNotes();
+  S.notes = S.notes.filter(n => n.id !== b.dataset.dn); save(); renderNotes(); $('#noteText').focus({ preventScroll: true });
   toast('Note deleted.', 'Undo', () => { S.notes.push(gone); save(); renderNotes(); });
 });
 $('#dClose').addEventListener('click', closeDrawer);
@@ -311,7 +382,7 @@ document.addEventListener('keydown', e => { if (e.key === 'Escape' && !$('#drawe
 /* ================= toasts ================= */
 let toastTimer;
 function toast(msg, actLabel, act) {
-  const el = location.hash === '#feed' ? $('#toast2') : $('#toast');
+  const el = $('#toast');
   el.innerHTML = `<span>${esc(msg)}</span>` + (actLabel ? `<button>${esc(actLabel)}</button>` : '');
   if (act) el.querySelector('button').onclick = () => { act(); el.classList.remove('on'); };
   el.classList.add('on'); clearTimeout(toastTimer); toastTimer = setTimeout(() => el.classList.remove('on'), actLabel ? 6000 : 3600);

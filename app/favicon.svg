@@ -2,17 +2,17 @@
   <title>The Desk</title>
   <defs>
     <linearGradient id="wall" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#2c5955"/>
-      <stop offset="1" stop-color="#152e2c"/>
+      <stop offset="0" stop-color="#105666"/>
+      <stop offset="1" stop-color="#0A3323"/>
     </linearGradient>
     <linearGradient id="beam" x1="0" y1="0" x2="0" y2="1">
-      <stop offset="0" stop-color="#ffd98a" stop-opacity=".95"/>
-      <stop offset="1" stop-color="#f2b84b" stop-opacity=".2"/>
+      <stop offset="0" stop-color="#FCFBF3" stop-opacity=".9"/>
+      <stop offset="1" stop-color="#F3CDC6" stop-opacity=".15"/>
     </linearGradient>
   </defs>
   <rect width="32" height="32" rx="7" fill="url(#wall)"/>
   <path d="M11 15 L5 24.5 H27 L21 15 Z" fill="url(#beam)"/>
-  <path d="M7 15.5 C7.5 8.5 11.2 4.5 16 4.5 C20.8 4.5 24.5 8.5 25 15.5 Z" fill="#f2b84b"/>
-  <ellipse cx="16" cy="15.6" rx="4.5" ry="2.2" fill="#fffbe9"/>
-  <rect x="4" y="24" width="24" height="3.5" rx="1.75" fill="#b9773a"/>
+  <path d="M7 15.5 C7.5 8.5 11.2 4.5 16 4.5 C20.8 4.5 24.5 8.5 25 15.5 Z" fill="#D3968C"/>
+  <ellipse cx="16" cy="15.6" rx="4.5" ry="2.2" fill="#FCFBF3"/>
+  <rect x="4" y="24" width="24" height="3.5" rx="1.75" fill="#839958"/>
 </svg>

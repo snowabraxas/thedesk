@@ -4,6 +4,7 @@
 // Screenshots The Desk at 1440x900 (laptop) and 390x844 (phone):
 //   <label>-room-<phase>-<width>.png   the room in morning, golden and night light
 //   <label>-feed-<width>.png           the Product Feed, full page
+//   <label>-feed-<width>-screen.png    the Product Feed's first screen, as it opens
 //
 // Example (the prototype, served on its own):
 //   python3 -m http.server 4400 --bind 127.0.0.1 --directory prototype
@@ -29,7 +30,9 @@ const VIEWPORTS = [
 const PHASES = ['morning', 'golden', 'night'];
 const DEFAULT_NOW = '2026-11-27T10:00:00-05:00';
 const ROOM_FONTS = ['Fredoka', 'Inter'];
-const FEED_FONTS = ['Fredoka', 'Inter', 'Caveat'];
+// Caveat is only for Snow's own notes, so the browser loads it only when a note is on screen.
+// A Caveat file that fails to load is still caught (any font with status "error" fails the run).
+const FEED_FONTS = ['Fredoka', 'Inter'];
 const STEP_TIMEOUT = 15_000;
 
 class ShotError extends Error {}
@@ -176,16 +179,35 @@ async function showPhase(page, phase, step) {
 
 // Chrome may first paint a big downscaled plate with a quick filter and sharpen it a moment
 // later, so keep shooting until two shots in a row match. Then before/after diffs are real.
-async function shoot(page, file) {
+//
+// whole: true (default) shoots the whole page. Chrome paints position:fixed layers (the blurred
+// study behind every page, the phone's bottom bar) only once, in the first screen of a full-page
+// capture, although on screen they stay put while you scroll. So the viewport is first made as tall
+// as the page, which puts those layers behind (and under) the whole page, as when scrolling.
+// whole: false shoots just the first screen, exactly as it looks when the page opens.
+async function shoot(page, file, { whole = true } = {}) {
   const target = path.join(outDir, file);
-  const opts = { fullPage: true, animations: 'disabled' };
-  let shot = await page.screenshot(opts);
+  const opts = { fullPage: whole, animations: 'disabled' };
+  const vp = page.viewportSize();
+  if (whole) {
+    const height = await page.evaluate(() => Math.ceil(document.documentElement.scrollHeight));
+    if (height > vp.height) {
+      await page.setViewportSize({ width: vp.width, height });
+      await page.evaluate(() => new Promise(r => requestAnimationFrame(() => requestAnimationFrame(r))));
+    }
+  }
+  let shot;
   let stable = false;
-  for (let i = 0; i < 10 && !stable; i++) {
-    await page.waitForTimeout(150);
-    const next = await page.screenshot(opts);
-    stable = next.equals(shot);
-    shot = next;
+  try {
+    shot = await page.screenshot(opts);
+    for (let i = 0; i < 10 && !stable; i++) {
+      await page.waitForTimeout(150);
+      const next = await page.screenshot(opts);
+      stable = next.equals(shot);
+      shot = next;
+    }
+  } finally {
+    if (whole) await page.setViewportSize(vp);
   }
   if (!stable) console.warn(`  (warning) ${file}: the page kept changing; saved the last shot.`);
   await writeFile(target, shot);
@@ -246,6 +268,7 @@ async function run() {
       }
       await settle(feed, step, FEED_FONTS);
       feedWatch.check(step);
+      written.push(await shoot(feed, `${label}-feed-${vp.width}-screen.png`, { whole: false }));
       written.push(await shoot(feed, `${label}-feed-${vp.width}.png`));
       await feed.close();
 

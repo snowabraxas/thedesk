@@ -33,6 +33,14 @@ export function fmtDate(iso) {
   return d.toLocaleDateString('en-CA', { month: 'short', day: 'numeric', year: 'numeric' });
 }
 
+/** "2026-11-26" -> "Nov 26": the short form, for the edition line. */
+export function fmtDay(iso) {
+  if (!iso) return '';
+  const d = new Date(`${iso}T12:00:00`);
+  if (Number.isNaN(d.getTime())) return '';
+  return d.toLocaleDateString('en-CA', { month: 'short', day: 'numeric' });
+}
+
 /* ================= state ================= */
 
 export const blank = () => ({ read: {}, saved: {}, folders: [], notes: [], xp: 0, days: [], badges: {} });
@@ -350,4 +358,43 @@ export function wilaLine(p, n, hasArticles) {
   if (p === 'morning') return `Good morning, Snow. ${picks} waiting in your Product Feed. Start with one over coffee?`;
   if (p === 'golden') return `Golden hour, Snow. ${picks} still on the laptop. One short read before the day winds down?`;
   return `Evening, Snow. ${picks} still on the laptop. No rush, they'll keep until morning.`;
+}
+
+/** Agent text as one tidy line: whitespace and line breaks collapse to single spaces. */
+const oneLine = (v) => String(v ?? '').replace(/\s+/g, ' ').trim();
+
+/**
+ * Wila's one-line note at the top of the Product Feed, built only from the edition and Snow's reads:
+ * how many picks are unread, the theme with the most unread picks (ties go to the theme listed first),
+ * and the source of the first unread pick. All caught up gives a short warm line instead.
+ * Returns plain text that can hold agent words (a theme name, a source): set it with textContent.
+ * @param {{ articles?: object[], themes?: object[] }} feed
+ * @param {{ read?: Record<string, number> }} S
+ */
+export function mentorLine(feed, S) {
+  const articles = (Array.isArray(feed?.articles) ? feed.articles : []).filter((a) => a && typeof a === 'object');
+  if (!articles.length) return 'Your Product Feed is still being set up.';
+  const read = S && typeof S.read === 'object' && S.read ? S.read : {};
+  const unread = articles.filter((a) => !read[a.id]);
+  if (!unread.length) return 'All caught up. Nicely done, Snow. What stuck with you?';
+
+  const n = unread.length;
+  let top = null;
+  for (const t of Array.isArray(feed.themes) ? feed.themes : []) {
+    const name = oneLine(t?.name);
+    if (!name) continue;
+    const k = unread.filter((a) => Array.isArray(a.themes) && a.themes.includes(t.id)).length;
+    if (k > (top ? top.k : 0)) top = { name, k };
+  }
+
+  let line = n === 1 ? 'One pick to read' : `${n} picks to read`;
+  if (top) {
+    if (n === 1) line += `, on ${top.name}`;
+    else if (top.k === n) line += `, all on ${top.name}`;
+    else if (top.k > 1) line += `, ${top.k} on ${top.name}`;
+  }
+  line += '.';
+  const source = oneLine(unread[0].source);
+  if (source) line += n === 1 ? ` It's from ${source}.` : ` Start with ${source}.`;
+  return line;
 }
