@@ -21,7 +21,7 @@ import fs from 'node:fs';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { DEFAULT_PORT, HOST, SERVICE_LABEL, resolveLiveDir, servicePlistPath } from '../server/config.js';
 import { describeDeployed, oneLine, readDeployed } from '../server/deployed.js';
 import { rotateLog } from '../server/log-file.js';
@@ -297,12 +297,17 @@ export function outputKeeper(headMax = OUTPUT_HEAD, tailMax = OUTPUT_TAIL) {
 }
 
 // Commands run in their own process group, so the terminal's Ctrl+C (or launchd's SIGTERM) no longer
-// reaches them by itself. One shared handler, installed while any command runs, passes the signal
-// that arrived (SIGINT stays SIGINT, which npm obeys) on to every running group, waits up to
-// SIGNAL_WAIT_MS for them to go, SIGKILLs whatever is left, and then stops this process the usual way.
+// reaches them by itself. One shared handler, installed while any command runs, takes over:
+// - the first signal (SIGINT, SIGTERM, SIGHUP or SIGQUIT) goes on, as itself, to every running group
+//   (SIGINT stays SIGINT, which npm obeys); after up to SIGNAL_WAIT_MS, whatever is left is SIGKILLed
+//   and the signal is raised again, so this process stops the way it would have;
+// - from that moment this process is stopping: runCommand starts nothing new and settles nothing, so
+//   the caller can't carry on (and can't put the handler back to swallow the re-raise);
+// - a second signal while it waits SIGKILLs the groups at once and stops this process.
 export const FORWARDED_SIGNALS = ['SIGINT', 'SIGTERM', 'SIGHUP', 'SIGQUIT'];
 export const SIGNAL_WAIT_MS = 2000;
 const liveGroups = new Set();
+let stopping = null; // { sig, groups } once a signal has arrived
 
 function signalGroup(group, sig) {
   try {
@@ -316,25 +321,29 @@ function signalGroup(group, sig) {
   }
 }
 
+function stopNow(sig) {
+  for (const group of new Set([...(stopping?.groups ?? []), ...liveGroups])) signalGroup(group, 'SIGKILL');
+  for (const s of FORWARDED_SIGNALS) process.off(s, onProcessSignal);
+  process.kill(process.pid, sig);
+}
+
 function onProcessSignal(sig) {
-  for (const s of FORWARDED_SIGNALS) process.off(s, onProcessSignal); // a second Ctrl+C stops us at once
-  const groups = [...liveGroups];
-  for (const group of groups) signalGroup(group, sig);
-  const allExited = Promise.all(groups.map((group) => group.exited));
+  if (stopping) return stopNow(sig); // a second signal: no more waiting
+  stopping = { sig, groups: [...liveGroups] };
+  for (const group of stopping.groups) signalGroup(group, sig);
+  const allExited = Promise.all(stopping.groups.map((group) => group.exited));
   const waited = new Promise((resolve) => setTimeout(resolve, SIGNAL_WAIT_MS));
-  Promise.race([allExited, waited]).then(() => {
-    for (const group of groups) signalGroup(group, 'SIGKILL'); // the rest of each group, if any
-    process.kill(process.pid, sig);
-  });
+  Promise.race([allExited, waited]).then(() => stopNow(sig));
 }
 
 function trackGroup(group) {
-  if (liveGroups.size === 0) for (const s of FORWARDED_SIGNALS) process.on(s, onProcessSignal);
+  if (liveGroups.size === 0 && !stopping) for (const s of FORWARDED_SIGNALS) process.on(s, onProcessSignal);
   liveGroups.add(group);
 }
 
 function untrackGroup(group) {
-  if (liveGroups.delete(group) && liveGroups.size === 0) for (const s of FORWARDED_SIGNALS) process.off(s, onProcessSignal);
+  // While stopping, the handler stays: it must catch a second signal and raise the first one again.
+  if (liveGroups.delete(group) && liveGroups.size === 0 && !stopping) for (const s of FORWARDED_SIGNALS) process.off(s, onProcessSignal);
 }
 
 /** How many commands are running right now, each in its own process group (for the tests). */
@@ -348,13 +357,14 @@ export const runningGroups = () => liveGroups.size;
  * - The time limit is hard: at timeoutMs the group gets SIGTERM, and if it is still there graceMs
  *   later (npm ignores SIGTERM while it waits on a hung registry connection), SIGKILL. It only counts
  *   as timed out if the command was still running at the deadline.
- * - Once the command exits, its output gets a short drain (at most 2 s): something it left running
- *   in the background may hold the pipes open, and that doesn't change how the command went.
+ * - Once the command exits, its output gets a short drain (at most 2 s). If something it left running
+ *   still holds the pipes open after that, the group is SIGKILLed; the command's exit code stands.
  * - Output keeps its first and last OUTPUT_HEAD / OUTPUT_TAIL characters.
  * @param {{ timeoutMs?: number, graceMs?: number, cwd?: string, env?: Record<string, string|undefined> }} [options]
  *   cwd: the folder to run it in (npm ci depends on it); env: its environment (default: this process's)
  */
 export function runCommand(cmd, args, { timeoutMs = 20_000, graceMs = KILL_GRACE_MS, cwd, env } = {}) {
+  if (stopping) return new Promise(() => {}); // this process is about to stop: start nothing new
   return new Promise((resolve) => {
     const limit = (ms) => (ms >= 1000 ? `${Math.round(ms / 1000)} s` : `${ms} ms`);
     const out = outputKeeper();
@@ -377,6 +387,7 @@ export function runCommand(cmd, args, { timeoutMs = 20_000, graceMs = KILL_GRACE
       if (done) return;
       done = true;
       cleanup();
+      if (stopping) return; // stopping: never settle, so the caller can't carry on
       const stdout = out.text();
       const stderr = err.text();
       if (!error && code === 0 && !timedOut) return resolve({ code: 0, stdout, stderr });
@@ -412,7 +423,10 @@ export function runCommand(cmd, args, { timeoutMs = 20_000, graceMs = KILL_GRACE
       clearTimeout(termTimer);
       clearTimeout(killTimer);
       if (timedOut) toGroup('SIGKILL'); // whatever of the group is left after a timeout goes too
+      // Something it started still holds its output open. That doesn't change how the command went
+      // (the real exit code stands), but nothing else will ever stop it, so its group goes.
       drainTimer = setTimeout(() => {
+        toGroup('SIGKILL');
         child.stdout.destroy();
         child.stderr.destroy();
         finish(code, signal);
@@ -516,6 +530,24 @@ function describeExit(svc) {
 // A bootstrap must also name the real plist. Tests inject their own runner; they never reach this one.
 export const LAUNCHD_READS = new Set(['print', 'print-disabled', 'list', 'blame', 'version', 'help']);
 
+// Only these two programs may change launchd's state: npm run service:* and npm run deploy.
+const SCRIPTS_DIR = path.dirname(fileURLToPath(import.meta.url));
+export const CLI_SCRIPTS = ['service.js', 'deploy.js'].map((name) => path.join(SCRIPTS_DIR, name));
+
+/** True when entry (process.argv[1]) is scripts/service.js or scripts/deploy.js, symlinks resolved. */
+export function isCliEntry(entry) {
+  if (!entry) return false;
+  const real = (p) => {
+    try {
+      return fs.realpathSync(p);
+    } catch {
+      return null;
+    }
+  };
+  const target = real(entry);
+  return target !== null && CLI_SCRIPTS.some((p) => real(p) === target);
+}
+
 function userHome() {
   try {
     return os.userInfo().homedir;
@@ -528,9 +560,10 @@ function userHome() {
  * Why this run must not change the real launchd service, or null when it may.
  * @param {{ env?: Record<string, string|undefined>, cfg?: { home: string, runDir: string } | null, homedir?: string, realHome?: string|null, requireCfg?: boolean }} [facts]
  *   homedir: what HOME says (os.homedir()); realHome: the account's real home (os.userInfo().homedir);
- *   requireCfg: refuse when no config is given (the real runner always asks this way)
+ *   requireCfg: refuse when no config is given (the real runner always asks this way);
+ *   entry: the program this process runs (process.argv[1]); only scripts/service.js and scripts/deploy.js may change state
  */
-export function launchdRefusal({ env = process.env, cfg = null, homedir = os.homedir(), realHome = userHome(), requireCfg = false } = {}) {
+export function launchdRefusal({ env = process.env, cfg = null, homedir = os.homedir(), realHome = userHome(), requireCfg = false, entry = process.argv[1] } = {}) {
   const tail = "so I won't touch the real launchd service (its name is shared). Use --dry-run or the test hooks.";
   if (!realHome) return `I can't tell your real home folder, ${tail}`;
   const real = path.resolve(realHome);
@@ -539,6 +572,9 @@ export function launchdRefusal({ env = process.env, cfg = null, homedir = os.hom
     return r === real || r.startsWith(real + path.sep);
   };
   if (env.NODE_TEST_CONTEXT) return `This is a test run (NODE_TEST_CONTEXT is set), ${tail}`;
+  // A belt for test runs that don't set NODE_TEST_CONTEXT (--test-isolation=none, a test file run
+  // directly) and for any other program that imports this module.
+  if (!isCliEntry(entry)) return `This isn't npm run service:* or npm run deploy (the program is ${entry ?? 'unknown'}), ${tail}`;
   if (path.resolve(homedir) !== real) return `HOME (${homedir}) is not your real home folder (${real}), ${tail}`;
   if (requireCfg && !cfg) return `No service config was bound to this runner, ${tail}`;
   if (cfg && path.resolve(cfg.home) !== real) return `This run's home folder (${cfg.home}) is not your real one (${real}), ${tail}`;
