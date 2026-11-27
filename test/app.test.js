@@ -212,6 +212,13 @@ describe('app/style.css', () => {
     assert.match(glow, /rgba\(var\(--tv-glow\),\.3\),rgba\(var\(--tv-glow\),\.06\) 45%,rgba\(var\(--tv-glow\),0\) 80%/);
   });
 
+  test("the section heading's shade is deep enough for strict 4.5:1 while the glow peaks behind it", () => {
+    // Measured on real pixels at 1440x900 and 1280x800, night and golden, glow frozen at 250, 300 and 360 ms.
+    const shade = rulesFor(read('style.css'), '.nh2::before').join(';');
+    const [, a, b] = shade.match(/radial-gradient\(closest-side,rgba\(10,51,35,(\.\d+)\),rgba\(10,51,35,(\.\d+)\) 62%,rgba\(10,51,35,0\)\)/) || [];
+    assert.ok(Number(a) >= 0.46 && Number(b) >= 0.37, `shade stops ${a} and ${b}`);
+  });
+
   test('buttons are at least 44px tall', () => {
     const css = read('style.css');
     const px = (body, prop) => { const m = body.match(new RegExp(`(?:^|;)\\s*${prop}\\s*:\\s*(\\d+)px`)); return m ? Number(m[1]) : 0; };
