@@ -20,7 +20,7 @@ import {
   newsPath,
   statePath,
 } from '../server/config.js';
-import { validateBreaking, validateNews } from '../server/news-schema.js';
+import { MAX_NEWS_BYTES, validateBreaking, validateNews } from '../server/news-schema.js';
 import { createBreakingReader, createNewsLoader, isTodayInToronto, torontoDate } from '../server/news.js';
 import { MAX_STATE_BYTES, STATE_RULES, checkState, createStateStore } from '../server/state-store.js';
 
@@ -105,7 +105,7 @@ describe('createNewsLoader: which edition GET /api/news serves', () => {
     const { news, source } = await createNewsLoader(h.home, r).load();
     assert.equal(source, 'live');
     assert.deepEqual(news, edition('2026-12-07'));
-    assert.deepEqual(h.readLastGood(), edition('2026-12-07'));
+    assert.ok(fs.readFileSync(lastGoodPath(h.home, 'news')).equals(fs.readFileSync(newsPath(h.home))), 'a byte-for-byte copy');
     assert.deepEqual(h.files(), ['editions', 'last-good.json', 'news.json'], 'no temp file left behind');
     assert.equal(r.errors.length, 0);
     assert.equal(r.infos.length, 1);
@@ -118,7 +118,10 @@ describe('createNewsLoader: which edition GET /api/news serves', () => {
     const live = await createNewsLoader(h.home, recorder()).load();
     assert.equal(live.source, 'live');
     assert.equal('sample' in live.news, false);
-    assert.equal('sample' in h.readLastGood(), false, 'the copy on disk has no sample key either');
+    h.writeNews(broken('2026-12-08'));
+    const restarted = await createNewsLoader(h.home, recorder()).load(); // the byte copy still has the key...
+    assert.equal(restarted.source, 'last-good');
+    assert.equal('sample' in restarted.news, false, '...but it is dropped when read back');
 
     const h2 = deskHome();
     h2.writeNews(broken('2026-12-08'));
@@ -338,6 +341,124 @@ describe('createNewsLoader: which edition GET /api/news serves', () => {
     h.writeNews(edition('2026-12-08'));
     for (let i = 0; i < 5; i++) await loader.load();
     assert.equal(c.reads['news.json'], 2);
+  });
+
+  // N3 review: last-good.json follows what Snow was shown, so after a restart it must not hide a
+  // newer edition the agent archived.
+  test('after a restart, a newer valid edition in editions/ wins over an older last-good.json', async () => {
+    const h = deskHome();
+    h.writeNews(edition('2026-12-07'));
+    assert.equal((await createNewsLoader(h.home, recorder()).load()).source, 'live');
+    h.writeNews(broken('2026-12-09'));
+    h.writeEdition('2026-12-08.json', edition('2026-12-08'));
+    const r = recorder();
+    const { news, source } = await createNewsLoader(h.home, r).load();
+    assert.equal(source, 'edition:2026-12-08.json');
+    assert.deepEqual(news, edition('2026-12-08'));
+    assert.match(r.errors[0], /news\.json isn't a valid edition, so it keeps showing 2026-12-08\.json from editions\//);
+  });
+
+  test('last-good stays when editions/ has only the same date, an older one, or an invalid newer file', async () => {
+    const h = deskHome();
+    h.writeNews(edition('2026-12-07'));
+    assert.equal((await createNewsLoader(h.home, recorder()).load()).source, 'live');
+    h.writeNews(broken('2026-12-09'));
+    const restart = () => createNewsLoader(h.home, recorder()).load();
+
+    h.writeEdition('2026-12-06.json', edition('2026-12-06'));
+    assert.equal((await restart()).source, 'last-good', 'older');
+    h.writeEdition('2026-12-07.json', edition('2026-12-07'));
+    assert.equal((await restart()).source, 'last-good', 'the same date: what Snow was shown wins');
+    h.writeEdition('2026-12-08.json', broken('2026-12-08'));
+    assert.equal((await restart()).source, 'last-good', 'a newer file that is invalid');
+    h.writeEdition('2026-12-09.json', edition('2026-12-05'));
+    const shown = await restart();
+    assert.equal(shown.source, 'last-good', 'the newest file name, but an older edition inside: the edition date decides');
+    assert.equal(shown.news.edition, '2026-12-07');
+  });
+
+  test('without a restart too: a newer edition archived while news.json is broken is shown, and last-good returns when it goes', async () => {
+    const h = deskHome();
+    h.writeNews(edition('2026-12-07'));
+    const loader = createNewsLoader(h.home, recorder());
+    assert.equal((await loader.load()).source, 'live');
+    h.writeNews(broken('2026-12-09'));
+    assert.equal((await loader.load()).source, 'last-good');
+    h.writeEdition('2026-12-08.json', edition('2026-12-08'));
+    assert.equal((await loader.load()).source, 'edition:2026-12-08.json');
+    fs.rmSync(path.join(editionsDir(h.home, 'news'), '2026-12-08.json'));
+    const back = await loader.load();
+    assert.equal(back.source, 'last-good');
+    assert.equal(back.news.edition, '2026-12-07');
+  });
+
+  test('last-good.json is the live file byte for byte, so a file near the size limit still fits after a restart', async () => {
+    const h = deskHome();
+    // Lots of tiny values: compact, the file is just under 1 MB; pretty-printed it would be over 3 MB.
+    const big = { ...edition('2026-12-07'), pad: [] };
+    big.pad = new Array(Math.floor((MAX_NEWS_BYTES - Buffer.byteLength(JSON.stringify(big)) - 64) / 2)).fill(0);
+    const compact = JSON.stringify(big);
+    assert.ok(Buffer.byteLength(compact) <= MAX_NEWS_BYTES && Buffer.byteLength(compact) > MAX_NEWS_BYTES - 100);
+    assert.ok(Buffer.byteLength(JSON.stringify(big, null, 2)) > MAX_NEWS_BYTES, 'pretty-printed it would not fit');
+    h.writeNews(compact);
+    const r = recorder();
+    assert.equal((await createNewsLoader(h.home, r).load()).source, 'live');
+    assert.deepEqual(r.errors, [], 'kept without trouble');
+    assert.ok(fs.readFileSync(lastGoodPath(h.home, 'news')).equals(fs.readFileSync(newsPath(h.home))));
+
+    h.writeNews(broken('2026-12-08'));
+    const r2 = recorder();
+    const { news, source } = await createNewsLoader(h.home, r2).load();
+    assert.equal(source, 'last-good');
+    assert.equal(news.pad.length, big.pad.length);
+    assert.ok(!r2.errors.some((m) => /too big|skipping/.test(m)), r2.errors.join('\n'));
+  });
+
+  test('last-good.json keeps the file exactly as written: byte-order mark, tabs, CRLF, number spelling', async () => {
+    const h = deskHome();
+    const text = `\uFEFF${JSON.stringify(edition('2026-12-07'), null, '\t').replace(/\n/g, '\r\n').replace('"rank": 1,', '"rank": 1e0,')}`;
+    h.writeNews(text);
+    const live = await createNewsLoader(h.home, recorder()).load();
+    assert.equal(live.source, 'live');
+    assert.equal(live.news.stories[0].rank, 1);
+    assert.equal(fs.readFileSync(lastGoodPath(h.home, 'news'), 'utf8'), text);
+    h.writeNews(broken('2026-12-08'));
+    const restarted = await createNewsLoader(h.home, recorder()).load();
+    assert.equal(restarted.source, 'last-good');
+    assert.deepEqual(restarted.news, edition('2026-12-07'));
+  });
+
+  test('only the newest 60 dated files in editions/ are looked at (noted once); a request stats at most 60 of them', async () => {
+    const h = deskHome();
+    h.writeNews(broken('2026-12-31'));
+    const day = (i) => new Date(Date.UTC(2026, 0, 1 + i)).toISOString().slice(0, 10);
+    // 70 dated files: the oldest is valid, the 69 newer ones are broken.
+    h.writeEdition(`${day(0)}.json`, edition(day(0)));
+    for (let i = 1; i < 70; i++) h.writeEdition(`${day(i)}.json`, '{"broken":');
+    const editionsFolder = editionsDir(h.home, 'news');
+    let stats = 0;
+    const fsp = {
+      ...fs.promises,
+      stat: (file, ...rest) => {
+        if (path.dirname(String(file)) === editionsFolder) stats++;
+        return fs.promises.stat(file, ...rest);
+      },
+    };
+    const r = recorder();
+    const loader = createNewsLoader(h.home, { ...r, fsp });
+    assert.equal((await loader.load()).source, 'sample', 'the valid file is the 70th newest, so it is not looked at');
+    for (let i = 0; i < 3; i++) {
+      stats = 0;
+      assert.equal((await loader.load()).source, 'sample');
+      assert.equal(stats, 60, 'one stat per looked-at file, none for the 10 older ones');
+    }
+    const notes = r.infos.filter((m) => /dated files/.test(m));
+    assert.equal(notes.length, 1, 'noted once');
+    assert.match(notes[0], /editions has 70 dated files; it only looks at the newest 60 \(2026-01-11\.json onward\)/);
+    assert.equal(r.errors.filter((m) => /skipping .*editions\//.test(m)).length, 60, 'each looked-at broken file logged once');
+
+    for (let i = 60; i < 70; i++) fs.rmSync(path.join(editionsFolder, `${day(i)}.json`));
+    assert.equal((await loader.load()).source, `edition:${day(0)}.json`, 'back to 60 files: the valid one is in range');
   });
 
   test('throws when even the sample is missing (the server answers 500)', async () => {
@@ -595,5 +716,25 @@ describe('the sample edition (data/samples/news.sample.json)', () => {
   test('the server never shows breaking.sample.json as breaking news', () => {
     const server = fs.readFileSync(path.join(REPO_ROOT, 'server', 'news.js'), 'utf8') + fs.readFileSync(path.join(REPO_ROOT, 'server', 'index.js'), 'utf8');
     assert.doesNotMatch(server, /SAMPLE_BREAKING_PATH|breaking\.sample/);
+  });
+});
+
+// N3 review: two regexes held a raw U+FEFF. Invisible characters belong in code as escapes.
+describe('the code itself', () => {
+  test('has no raw control or invisible characters (they are written as escapes)', () => {
+    const unsafe = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu;
+    const files = ['server', 'scripts', 'app', 'test'].flatMap((dir) =>
+      fs.readdirSync(path.join(REPO_ROOT, dir), { recursive: true }).filter((f) => /\.(js|json|html|css)$/.test(f)).map((f) => path.join(dir, f)),
+    );
+    assert.ok(files.length > 20);
+    const found = [];
+    for (const file of files) {
+      const text = fs.readFileSync(path.join(REPO_ROOT, file), 'utf8');
+      for (const m of text.matchAll(unsafe)) {
+        if (m[0] === '\n' || m[0] === '\r' || m[0] === '\t') continue;
+        found.push(`${file}: U+${m[0].codePointAt(0).toString(16).toUpperCase().padStart(4, '0')} at line ${text.slice(0, m.index).split('\n').length}`);
+      }
+    }
+    assert.deepEqual(found, []);
   });
 });

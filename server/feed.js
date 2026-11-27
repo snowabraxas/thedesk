@@ -4,7 +4,8 @@
 //   1. live       $DESK_HOME/desks/product-feed/feed.json, when it passes the feed contract
 //   2. last-good  the last valid feed.json this server served, kept in memory and on disk as
 //                 desks/product-feed/last-good.json, so a restart doesn't lose it
-//   3. edition:<file>  the newest valid editions/YYYY-MM-DD.json (invalid ones are skipped)
+//   3. edition:<file>  the newest valid editions/YYYY-MM-DD.json (invalid ones are skipped);
+//                 it wins over last-good when its edition date is later
 //   4. sample     prototype/feed.json, marked "sample": true
 //
 // Files are re-read and re-checked only when their stat changes, and each change is logged once.
@@ -14,10 +15,10 @@ import { createEditionLoader } from './edition-loader.js';
 import { checkFeedFile } from './feed-schema.js';
 import { withoutSample } from './schema-common.js';
 
-/** Reads and checks a Product Feed edition. Never throws; a valid one comes back without "sample". */
+/** Reads and checks a Product Feed edition. Never throws; a valid one comes back without "sample", with its bytes. */
 async function checkFeed(file, fsp) {
   const r = await checkFeedFile(file, { fsp });
-  return r.ok ? { ok: true, errors: [], value: withoutSample(r.feed) } : r;
+  return r.ok ? { ok: true, errors: [], value: withoutSample(r.feed), bytes: r.bytes } : r;
 }
 
 /**
