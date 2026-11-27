@@ -14,7 +14,7 @@ Update this table the moment a story changes state (Not started, In progress, In
 | L1 Lotus theme on The Desk and Product Feed | Lead dev | Done | Live on 4321 since 27 Nov. Tester leftovers (theme map label contrast, title focus ring, two small Undo fixes) moved to N6 |
 | N1 Live copy separate from work in progress | Developer | Done | Live since 27 Nov 13:42: the service runs from `~/the-desk-live`; release = merge to main, then `npm run deploy`. 498 tests; tester passed; four review rounds fixed. Small hardening follow-up (load check before restart) in progress |
 | N2 News contract: schemas and validator | Developer, tester | Done | Merged 27 Nov. `npm run validate-news`. Tester passed; 3 review rounds fixed. Product Feed links got stricter too (see sprint-2-build notes, for S5) |
-| N3 News server routes | Tester | In review | Branch n3-news-routes: built, 458 tests pass; tester and review running |
+| N3 News server routes | Developer, tester | Done | Merged and live 27 Nov. /api/news (live, last good on disk, editions, sample), /api/breaking (today in Toronto), /api/news/state. Product Feed keeps its last good edition on disk too |
 | N4 The News desk page | Developer, then designer | In progress | Branch n4-news-page (on top of N3). Logic first, then the Lotus look. Snow approves the design |
 | N5 The TV in the room | Designer, developer | Not started | |
 | N6 Polish at 390 px and contrast | Designer, tester | Not started | Snow's OK before changes land |
