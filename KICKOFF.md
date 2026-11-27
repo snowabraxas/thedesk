@@ -1,13 +1,19 @@
 # Kickoff: start Sprint 1 on the Mac mini
 
-1. **Put the repo in place.** In Terminal:
+1. **Put the repo in place.** The project lives in `~/Documents/Projects/the-desk`. If that folder isn't a git clone yet, link it to GitHub once. In Terminal:
 
    ```
-   mkdir -p ~/Code && cd ~/Code
-   git clone https://github.com/snowabraxas/thedesk.git the-desk
-   cd the-desk
+   cd ~/Documents/Projects/the-desk
+   git init -b main
+   git remote add origin https://github.com/snowabraxas/thedesk.git
+   git fetch origin
+   git reset --mixed origin/main
+   git branch -u origin/main
+   git status
    mkdir -p ~/agent-house/desks/product-feed/editions
    ```
+
+   `reset --mixed` keeps every file in the folder as it is. `git status` then shows the lead PM's latest edits as changes, and the room images and PDFs as untracked files.
 
 2. **Start Claude Code** in that folder:
 

@@ -16,15 +16,15 @@ Everything technical goes in `docs/`, where she can open it when she wants to.
 
 The Desk is an illustrated study that follows Snow's real day. Every object in the room opens a "desk", and each desk is run every day by its own agent. Wila (on Hermes) manages the house. The desk agents run on OpenClaw.
 
-- Live plan and PRDs: https://claude.ai/artifact/Mubcjhn9kF9cZiZ83tbyLJ (the Plan tab, plus Project PRDs > The Desk and Project PRDs > Product Feed).
-- The clickable prototype: https://claude.ai/artifact/AE6UobyuAofje7BVSxHBec. Its code is in `prototype/`.
+- Live plan and PRDs: https://claude.ai/artifact/XZgV82Cq3jE4LGkuj2TkAr (the Plan tab, plus Project PRDs > The Desk and Project PRDs > Product Feed).
+- The clickable prototype: https://claude.ai/artifact/PJwU5gvgvmUJMBK6WG9FEv. Its code is in `prototype/`.
 - Current sprint: `docs/sprints/sprint-1.md`.
 
 ## Working with the lead PM
 
-The lead PM (Claude in claude.ai) runs on a different account and can't see the Mac mini. This GitHub repo (`snowabraxas/thedesk`) is where you two meet.
+The lead PM (Claude in the Claude desktop app) can see this folder on the Mac mini and may write specs straight into `docs/`. This GitHub repo (`snowabraxas/thedesk`) stays the source of truth: anything the lead PM writes here, you commit and push with your next change.
 
-- **Start of a session:** `git pull`. The lead PM may have pushed new specs or sprint changes to `docs/`.
+- **Start of a session:** `git pull`, then `git status`. The lead PM may have pushed new specs, or written them straight into `docs/` without committing.
 - **End of a session:** update `docs/status.md` (what's done, what's next, any question for the lead PM, five lines or fewer), commit, and push.
 - Work on a branch per story and merge to `main` when the tester passes it. Snow reviews before anything big merges.
 - If a spec in `docs/` and the live plan disagree, ask Snow rather than guessing.
