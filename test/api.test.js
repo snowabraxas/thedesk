@@ -354,7 +354,7 @@ describe('GET and PUT /api/state', () => {
   test('a state.json that starts with a byte-order mark still loads', async () => {
     fs.mkdirSync(path.dirname(statePath(deskHome)), { recursive: true });
     fs.writeFileSync(statePath(deskHome), `${String.fromCodePoint(0xfeff)}{"xp": 12}`);
-    assert.deepEqual(await createStateStore(statePath(deskHome)).read(), { xp: 12 });
+    assert.deepEqual(await createStateStore(deskHome, 'product-feed').read(), { xp: 12 });
   });
 
   test('GET answers 500 when state.json holds something other than an object', async () => {
@@ -465,7 +465,7 @@ describe('a failed write', () => {
         return fs.promises.rename(...args);
       },
     };
-    const store = createStateStore(statePath(deskHome), { fsp });
+    const store = createStateStore(deskHome, 'product-feed', { fsp });
     await assert.rejects(store.write({ xp: 1 }));
     await store.write({ xp: 2 });
     assert.deepEqual(await store.read(), { xp: 2 });
@@ -476,7 +476,7 @@ describe('a failed write', () => {
 describe('the state store', () => {
   test('creates the folder when needed', async () => {
     const deskHome = tempHome();
-    const store = createStateStore(statePath(deskHome));
+    const store = createStateStore(deskHome, 'product-feed');
     await store.write({ xp: 1 });
     assert.deepEqual(JSON.parse(fs.readFileSync(statePath(deskHome), 'utf8')), { xp: 1 });
   });
@@ -501,7 +501,7 @@ describe('the state store', () => {
         open--;
       },
     };
-    const store = createStateStore(statePath(deskHome), { fsp });
+    const store = createStateStore(deskHome, 'product-feed', { fsp });
     await Promise.all(Array.from({ length: 10 }, (_, i) => store.write({ xp: i })));
     assert.equal(most, 1, 'never more than one write at a time');
     assert.deepEqual(await store.read(), { xp: 9 }, 'the last write wins');

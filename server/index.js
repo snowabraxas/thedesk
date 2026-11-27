@@ -1,17 +1,22 @@
 // The Desk's local server. node:http only, no framework.
-// Serves app/ on 127.0.0.1, refuses requests whose Host header isn't this machine, and answers
-// /api/feed (the edition) and /api/state (Snow's reads and notes) from under deskHome.
-// GET /api/feed says which edition it served in X-Desk-Feed-Source: live, last-good,
-// edition:<YYYY-MM-DD.json> or sample (see feed.js).
+// Serves app/ on 127.0.0.1, refuses requests whose Host header isn't this machine (every route,
+// the API included), and answers from under deskHome:
+//   GET /api/feed              Product Feed's edition; X-Desk-Feed-Source says which (feed.js)
+//   GET/PUT /api/state         Snow's Product Feed state: reads, notes, XP, streak (state-store.js)
+//   GET /api/news              News's morning edition; X-Desk-News-Source says which (news.js)
+//   GET /api/breaking          {"breaking": today's breaking story or null} (news.js)
+//   GET/PUT /api/news/state    Snow's News state: stories read, banners dismissed, shelf open
+// The edition sources are live, last-good, edition:<YYYY-MM-DD.json> or sample.
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { APP_DIR, HOST, SAMPLE_FEED_PATH, expandHome, resolveDeskHome, resolvePort, servicePlistPath, statePath } from './config.js';
+import { APP_DIR, HOST, SAMPLE_FEED_PATH, SAMPLE_NEWS_PATH, expandHome, resolveDeskHome, resolvePort, servicePlistPath } from './config.js';
 import { createFeedLoader } from './feed.js';
 import { rotateLog } from './log-file.js';
+import { createBreakingReader, createNewsLoader } from './news.js';
 import { probeDesk } from './probe.js';
-import { CorruptStateError, MAX_STATE_BYTES, checkState, createStateStore } from './state-store.js';
+import { CorruptStateError, MAX_STATE_BYTES, createStateStore } from './state-store.js';
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -161,15 +166,32 @@ const isJsonType = (header) => (header || '').split(';')[0].trim().toLowerCase()
 /**
  * Builds the server without listening, so tests can start it on a random port
  * with a temporary DESK_HOME.
- * @param {{ deskHome?: string, appDir?: string, log?: { error: Function, info?: Function }, fsp?: typeof fs.promises, samplePath?: string }} [options]
- *   fsp lets tests make a state write fail part way; samplePath is the edition shown when there is no valid one.
+ * @param {{ deskHome?: string, appDir?: string, log?: { error: Function, info?: Function }, fsp?: typeof fs.promises, samplePath?: string, newsSamplePath?: string, now?: () => number }} [options]
+ *   fsp lets tests make a state write fail part way; samplePath and newsSamplePath are the
+ *   Product Feed and News editions shown when there is no valid one; now picks the moment that
+ *   counts as "today" for /api/breaking.
  */
-export function createServer({ deskHome = resolveDeskHome(), appDir = APP_DIR, log = console, fsp, samplePath = SAMPLE_FEED_PATH } = {}) {
+export function createServer({
+  deskHome = resolveDeskHome(),
+  appDir = APP_DIR,
+  log = console,
+  fsp,
+  samplePath = SAMPLE_FEED_PATH,
+  newsSamplePath = SAMPLE_NEWS_PATH,
+  now = Date.now,
+} = {}) {
   const root = path.resolve(appDir);
-  const state = createStateStore(statePath(deskHome), fsp ? { fsp } : {});
+  const storeOptions = fsp ? { fsp } : {};
+  // Each desk's saved state, by route. Both follow the same rules (state-store.js).
+  const stateRoutes = new Map([
+    ['/api/state', createStateStore(deskHome, 'product-feed', storeOptions)],
+    ['/api/news/state', createStateStore(deskHome, 'news', storeOptions)],
+  ]);
   const feeds = createFeedLoader(deskHome, { log, samplePath });
+  const news = createNewsLoader(deskHome, { log, samplePath: newsSamplePath });
+  const breaking = createBreakingReader(deskHome, { log, now });
 
-  async function getState(res) {
+  async function getState(res, state) {
     try {
       return sendJson(res, 200, await state.read());
     } catch (err) {
@@ -180,7 +202,7 @@ export function createServer({ deskHome = resolveDeskHome(), appDir = APP_DIR, l
     }
   }
 
-  async function putState(req, res) {
+  async function putState(req, res, state) {
     if (!isJsonType(req.headers['content-type'])) {
       return sendJson(res, 415, { error: 'Send the state as application/json.' });
     }
@@ -201,7 +223,7 @@ export function createServer({ deskHome = resolveDeskHome(), appDir = APP_DIR, l
     } catch {
       return sendJson(res, 400, { error: 'The state is not valid JSON.' });
     }
-    const check = checkState(value);
+    const check = state.check(value);
     if (!check.ok) return sendJson(res, 400, { error: check.error });
     try {
       await state.write(value);
@@ -219,9 +241,19 @@ export function createServer({ deskHome = resolveDeskHome(), appDir = APP_DIR, l
       const { feed, source } = await feeds.load();
       return sendJson(res, 200, feed, { 'X-Desk-Feed-Source': source });
     }
-    if (pathname === '/api/state') {
-      if (isRead) return getState(res);
-      if (req.method === 'PUT') return putState(req, res);
+    if (pathname === '/api/news') {
+      if (!isRead) return sendJson(res, 405, { error: 'Method not allowed' }, { Allow: 'GET, HEAD' });
+      const { news: edition, source } = await news.load();
+      return sendJson(res, 200, edition, { 'X-Desk-News-Source': source });
+    }
+    if (pathname === '/api/breaking') {
+      if (!isRead) return sendJson(res, 405, { error: 'Method not allowed' }, { Allow: 'GET, HEAD' });
+      return sendJson(res, 200, { breaking: await breaking.load() });
+    }
+    const state = stateRoutes.get(pathname);
+    if (state) {
+      if (isRead) return getState(res, state);
+      if (req.method === 'PUT') return putState(req, res, state);
       return sendJson(res, 405, { error: 'Method not allowed' }, { Allow: 'GET, HEAD, PUT' });
     }
     return sendJson(res, 404, { error: 'Not found' });
