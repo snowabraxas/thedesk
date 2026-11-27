@@ -27,7 +27,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { HOST, REPO_ROOT, resolveLiveDir } from '../server/config.js';
-import { deployedPath, deployedRecord, describeDeployed, oneLine, readDeployed } from '../server/deployed.js';
+import { DEPLOYED_FILE, deployedPath, deployedRecord, describeDeployed, oneLine, readDeployed } from '../server/deployed.js';
 import { localTimestamp } from '../server/log-file.js';
 import {
   GIT,
@@ -36,6 +36,8 @@ import {
   LAUNCHCTL,
   gitEnv,
   launchctlArgs,
+  liveStatusArgs,
+  loadCheck,
   missingPackages,
   readInstalledPlist,
   realDeps,
@@ -154,14 +156,11 @@ export function npmErrorLines(text, max = 5) {
   if (!errors.length) return all.slice(-15);
   const message = (l) => l.replace(/^npm (error|ERR!)\s?/, '').trim();
   const code = errors.find((l) => /^npm (error|ERR!) code /.test(l));
-  const shown = code ? [code] : [];
-  for (const l of errors) {
-    const m = message(l);
-    if (/^(Usage|Options):?$/.test(m) || shown.length >= max) break;
-    if (!m || l === code || /complete log of this run/i.test(m)) continue;
-    shown.push(l);
-  }
   const log = errors.find((l) => /complete log of this run/i.test(l));
+  let body = errors.filter((l) => l !== code && l !== log && message(l));
+  const usage = body.findIndex((l) => /^(Usage|Options):?$/.test(message(l)));
+  if (usage >= 0) body = body.slice(0, Math.max(0, usage - 1)); // the line above "Usage:" is npm's one-line summary of the command
+  const shown = [...(code ? [code] : []), ...body].slice(0, max);
   return log ? [...shown, log] : shown;
 }
 
@@ -197,7 +196,19 @@ export async function deploy(cfg, deps, { dryRun = false } = {}) {
     for (const line of msg) deps.err(line);
     return 1;
   };
-  const removeStaging = () => deps.fs.rmSync(staging, { recursive: true, force: true });
+  // Removes the staging folder; returns the error instead of throwing (failure paths ignore it).
+  const removeStaging = () => {
+    try {
+      deps.fs.rmSync(staging, { recursive: true, force: true });
+      return null;
+    } catch (err) {
+      return err;
+    }
+  };
+  const headOf = async (dir) => {
+    const r = await git(['-C', dir, 'rev-parse', 'HEAD']);
+    return r.code === 0 && SHA.test(r.stdout.trim()) ? r.stdout.trim() : null;
+  };
 
   // Run from the work folder, never from the live copy, and keep the live copy (and its staging
   // folder) out of the work folder.
@@ -254,7 +265,7 @@ export async function deploy(cfg, deps, { dryRun = false } = {}) {
     if (top.code !== 0 || ours.code !== 0 || liveTop !== realpath(deps.fs, live) || liveCommon !== ours.stdout.trim()) {
       return fail(`${live} is there, but it isn't a live copy of this repo (a git worktree of it), so nothing was changed.`, 'Move that folder out of the way, then run npm run deploy again.');
     }
-    const dirty = await git(['-C', live, '--no-optional-locks', 'status', '--porcelain']);
+    const dirty = await git(liveStatusArgs(live)); // .deployed.json and its temp file are deploy's own
     if (dirty.code !== 0) return fail(`Couldn't check the live copy for changes, so nothing was changed. (git: ${gitError(dirty)})`);
     if (dirty.stdout.trim()) {
       const changed = lines(dirty.stdout);
@@ -272,15 +283,34 @@ export async function deploy(cfg, deps, { dryRun = false } = {}) {
   }
 
   // A deploy cut off between its two renames leaves the live copy's packages in the staging folder
-  // as node_modules.old: put them back before the staging folder goes.
+  // as node_modules.old: put them back before the staging folder goes. A deploy cut off while it wrote
+  // .deployed.json leaves its temp file.
   const restore = leftover && exists && !lexists(deps.fs, liveModules) && lexists(deps.fs, asideModules);
-  if (leftover && !dryRun) {
-    if (restore) {
-      out("Putting back the live copy's packages, which an interrupted deploy had moved aside…");
-      deps.fs.renameSync(asideModules, liveModules);
+  let tmpRecords = [];
+  if (exists) {
+    try {
+      tmpRecords = deps.fs.readdirSync(live).filter((e) => e.startsWith(`${DEPLOYED_FILE}.tmp-`));
+    } catch {
+      /* unreadable: the checks above would have failed */
     }
-    out('Removing a staging folder left by an interrupted deploy…');
-    removeStaging();
+  }
+  if (!dryRun && (leftover || tmpRecords.length)) {
+    try {
+      if (restore) {
+        out("Putting back the live copy's packages, which an interrupted deploy had moved aside…");
+        deps.fs.renameSync(asideModules, liveModules);
+      }
+      if (leftover) {
+        out('Removing a staging folder left by an interrupted deploy…');
+        deps.fs.rmSync(staging, { recursive: true, force: true });
+      }
+      for (const name of tmpRecords) deps.fs.rmSync(path.join(live, name), { force: true });
+    } catch (err) {
+      return fail(
+        `Couldn't tidy up after an interrupted deploy (${err.code || err.message}), so nothing was deployed.`,
+        `Look at ${staging}: if the live copy has no node_modules, move node_modules.old from there back to ${liveModules}; then remove the folder and run npm run deploy again.`,
+      );
+    }
   }
 
   // Do the packages need installing? Every package the live copy's package.json names must be in its
@@ -297,6 +327,12 @@ export async function deploy(cfg, deps, { dryRun = false } = {}) {
     const d = await git(['-C', repo, 'diff', '--quiet', installed.sha, sha, '--', 'package-lock.json']);
     if (d.code !== 0) why = d.code === 1 ? 'package-lock.json changed' : "git couldn't tell whether package-lock.json changed";
   }
+  // Every file can be in place and still not load (ajv without fast-deep-equal): the same load check
+  // as the install guard, so deploy repairs what the guard refuses.
+  if (!why && exists && !(dryRun && restore)) {
+    const load = await loadCheck(live, cfg.service.nodePath, deps);
+    if (!load.ok) why = `its server doesn't load: ${load.error}`;
+  }
 
   let step = 0;
   const say = (text) => out(`${++step}. ${text}`);
@@ -308,6 +344,7 @@ export async function deploy(cfg, deps, { dryRun = false } = {}) {
   if (dryRun) {
     if (restore) say(`Put the live copy's packages back, which an interrupted deploy had moved aside: mv ${shellQuote(asideModules)} ${shellQuote(liveModules)}`);
     if (leftover) say(`Remove a staging folder left by an interrupted deploy: rm -rf ${shellQuote(staging)}`);
+    if (tmpRecords.length) say(`Remove ${tmpRecords.length === 1 ? 'a temp file' : `${tmpRecords.length} temp files`} left by an interrupted deploy: ${tmpRecords.map((n) => shellQuote(path.join(live, n))).join(' ')}`);
     if (why) {
       say(`Install the packages first, outside the live copy (${why}):`);
       out(`   mkdir ${shellQuote(staging)}`);
@@ -364,15 +401,32 @@ export async function deploy(cfg, deps, { dryRun = false } = {}) {
     } else {
       out(`The live copy already holds ${ref} @ ${short(sha)}.`);
     }
+    // git can fail after it has moved HEAD (a post-checkout hook that exits 1, say). So ask where the
+    // live copy is now: at the target, carry on; anywhere else, put it back on the old commit.
     if (moves) {
       const r = await git(moveArgs);
       if (r.code !== 0) {
-        removeStaging();
-        return fail(
-          `git couldn't ${exists ? `move the live copy to ${ref}` : 'make the live copy'}: ${gitError(r)}`,
-          ...(exists ? [] : ['If it says the folder is a missing but already registered worktree, run git worktree prune, then npm run deploy again.']),
-          'The Desk was not restarted, so it keeps running what it had.',
-        );
+        const at = deps.fs.existsSync(live) ? await headOf(live) : null;
+        if (at === sha) {
+          out(`Warning: git moved the live copy to ${short(sha)} but then said: ${gitError(r)}. Carrying on.`);
+        } else {
+          let back = exists && at !== null && at === oldSha;
+          if (exists && oldSha && at !== oldSha) {
+            await git(['-C', live, 'checkout', '--quiet', '--detach', oldSha]);
+            back = (await headOf(live)) === oldSha;
+          }
+          removeStaging();
+          const where = !exists
+            ? 'The Desk was not restarted, so it keeps running what it had.'
+            : back
+              ? `The live copy is on ${short(oldSha)} as before, with its packages. The Desk was not restarted.`
+              : `The live copy is at ${at ? short(at) : 'an unknown commit'}, and The Desk was not restarted. Run npm run deploy again.`;
+          return fail(
+            `git couldn't ${exists ? `move the live copy to ${ref}` : 'make the live copy'}: ${gitError(r)}`,
+            ...(exists ? [] : ['If it says the folder is a missing but already registered worktree, run git worktree prune, then npm run deploy again.']),
+            where,
+          );
+        }
       }
     }
 
@@ -396,8 +450,8 @@ export async function deploy(cfg, deps, { dryRun = false } = {}) {
           }
         }
         if (exists && moves && oldSha) {
-          const back = await git(['-C', live, 'checkout', '--quiet', '--detach', oldSha]);
-          if (back.code !== 0) restored = false;
+          await git(['-C', live, 'checkout', '--quiet', '--detach', oldSha]);
+          if ((await headOf(live)) !== oldSha) restored = false; // checked by HEAD: a hook may fail after the move
         }
         if (restored) removeStaging(); // otherwise the old packages wait there for the next run
         return fail(
@@ -405,7 +459,8 @@ export async function deploy(cfg, deps, { dryRun = false } = {}) {
           restored ? `The live copy is back on ${oldSha ? short(oldSha) : 'its commit'} with its old packages.` : 'Run npm run deploy again: it repairs the live copy.',
         );
       }
-      removeStaging();
+      const left = removeStaging();
+      if (left) out(`(Couldn't remove ${staging} (${left.code || left.message}). It's left for the next deploy to tidy.)`);
     }
   }
 
@@ -435,6 +490,9 @@ export async function deploy(cfg, deps, { dryRun = false } = {}) {
       ];
   const liveLine = `The Desk is live at http://localhost:${svc.port} on ${describeDeployed(record)}`;
 
+  // launchd's label is the same for every HOME: a run with a fake HOME must never restart the real one.
+  const launchdRefusal = deps.launchdRefusal?.(svc) ?? null;
+
   if (dryRun) {
     say(`Check that the service runs from the live copy (WorkingDirectory in ${svc.plistPath}).`);
     if (!moved) {
@@ -443,6 +501,10 @@ export async function deploy(cfg, deps, { dryRun = false } = {}) {
       return 0;
     }
     out('   It does.');
+    if (launchdRefusal) {
+      out(`   But this run stops here without restarting it: ${launchdRefusal}`);
+      return 0;
+    }
     say(`Restart it and wait up to ${HEALTH_TIMEOUT_MS / 1000} s for http://${HOST}:${svc.port}/api/feed to answer:`);
     out(`   ${commandLine(LAUNCHCTL, launchctlArgs.kickstart(svc))}`);
     out(`   (or, if it's stopped: ${commandLine(LAUNCHCTL, launchctlArgs.bootstrap(svc))})`);
@@ -451,6 +513,7 @@ export async function deploy(cfg, deps, { dryRun = false } = {}) {
   }
 
   if (!moved) return fail(...notMoved);
+  if (launchdRefusal) return fail(`The live copy is ready (${describeDeployed(record)}), but The Desk was not restarted.`, launchdRefusal);
   const code = await restart(svc, deps, { done: `Restarted from ${live}.` });
   if (code !== 0) return code;
   out(liveLine);

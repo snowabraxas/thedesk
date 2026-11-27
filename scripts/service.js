@@ -23,7 +23,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { DEFAULT_PORT, HOST, SERVICE_LABEL, resolveLiveDir, servicePlistPath } from '../server/config.js';
-import { describeDeployed, readDeployed } from '../server/deployed.js';
+import { describeDeployed, oneLine, readDeployed } from '../server/deployed.js';
 import { rotateLog } from '../server/log-file.js';
 import { probeDesk } from '../server/probe.js';
 
@@ -37,7 +37,8 @@ export const HEALTH_TIMEOUT_MS = 15_000;
 export const SERVICE_PATH = '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin';
 export const GIT = 'git';
 export const KILL_GRACE_MS = 10_000;
-const MAX_OUTPUT = 16 * 1024 * 1024;
+export const OUTPUT_HEAD = 1024 * 1024;
+export const OUTPUT_TAIL = 1024 * 1024;
 
 // Environment variables that tell git which repo, index or object store to use. A git hook,
 // `git rebase -x` or `git bisect run` exports them; left in, they would point `git -C <folder>`
@@ -262,54 +263,128 @@ export function isDisabled(printDisabledText, label) {
 }
 
 /**
+ * Keeps the start and the end of a long output, at most head + tail characters (npm puts its error
+ * lines last, so the end matters as much as the start).
+ */
+export function outputKeeper(headMax = OUTPUT_HEAD, tailMax = OUTPUT_TAIL) {
+  let head = '';
+  let tail = '';
+  let dropped = 0;
+  const trim = () => {
+    if (tail.length > tailMax) {
+      dropped += tail.length - tailMax;
+      tail = tail.slice(-tailMax);
+    }
+  };
+  return {
+    add(chunk) {
+      let rest = String(chunk);
+      if (head.length < headMax) {
+        const room = headMax - head.length;
+        head += rest.slice(0, room);
+        rest = rest.slice(room);
+      }
+      if (rest) {
+        tail += rest;
+        if (tail.length > 2 * tailMax) trim();
+      }
+    },
+    text() {
+      trim();
+      return dropped ? `${head}\n… (${dropped} characters left out) …\n${tail}` : head + tail;
+    },
+  };
+}
+
+/**
  * Runs a command; resolves { code, stdout, stderr } and never rejects.
- * The time limit is hard: at timeoutMs it sends SIGTERM, and if the command is still there graceMs
- * later (npm ignores SIGTERM while it waits on a hung registry connection), SIGKILL.
+ * - The command runs in its own process group, and every stop goes to the whole group, so nothing it
+ *   started is left behind. If this process is stopped (Ctrl+C, launchd), the group is stopped too.
+ * - The time limit is hard: at timeoutMs the group gets SIGTERM, and if it is still there graceMs
+ *   later (npm ignores SIGTERM while it waits on a hung registry connection), SIGKILL. It only counts
+ *   as timed out if the command was still running at the deadline.
+ * - Once the command exits, its output gets a short drain (at most 2 s): something it left running
+ *   in the background may hold the pipes open, and that doesn't change how the command went.
+ * - Output keeps its first and last OUTPUT_HEAD / OUTPUT_TAIL characters.
  * @param {{ timeoutMs?: number, graceMs?: number, cwd?: string, env?: Record<string, string|undefined> }} [options]
  *   cwd: the folder to run it in (npm ci depends on it); env: its environment (default: this process's)
  */
 export function runCommand(cmd, args, { timeoutMs = 20_000, graceMs = KILL_GRACE_MS, cwd, env } = {}) {
   return new Promise((resolve) => {
     const limit = (ms) => (ms >= 1000 ? `${Math.round(ms / 1000)} s` : `${ms} ms`);
-    let stdout = '';
-    let stderr = '';
+    const out = outputKeeper();
+    const err = outputKeeper();
+    let child = null;
     let timedOut = false;
+    let exited = null;
     let done = false;
     let killTimer = null;
-    let child;
+    let drainTimer = null;
+    const signalGroup = (sig) => {
+      if (!child?.pid) return;
+      try {
+        process.kill(-child.pid, sig);
+      } catch {
+        try {
+          child.kill(sig);
+        } catch {
+          /* already gone */
+        }
+      }
+    };
+    const onSignal = (sig) => {
+      signalGroup('SIGTERM');
+      cleanup();
+      process.kill(process.pid, sig); // then stop the way we would have without this listener
+    };
+    const cleanup = () => {
+      clearTimeout(termTimer);
+      clearTimeout(killTimer);
+      clearTimeout(drainTimer);
+      process.off('SIGINT', onSignal);
+      process.off('SIGTERM', onSignal);
+    };
     const finish = (code, signal, error) => {
       if (done) return;
       done = true;
-      clearTimeout(termTimer);
-      clearTimeout(killTimer);
+      cleanup();
+      const stdout = out.text();
+      const stderr = err.text();
       if (!error && code === 0 && !timedOut) return resolve({ code: 0, stdout, stderr });
       const why = error ? error.message : signal ? `stopped by ${signal}` : `exit ${code}`;
       const note = timedOut ? `\n(stopped after ${limit(timeoutMs)}: it took too long)` : '';
       resolve({ code: typeof code === 'number' && code !== 0 ? code : 1, stdout, stderr: `${stderr || why}${note}` });
     };
     const termTimer = setTimeout(() => {
+      if (exited) return;
       timedOut = true;
-      child?.kill('SIGTERM');
-      killTimer = setTimeout(() => child?.kill('SIGKILL'), graceMs);
+      signalGroup('SIGTERM');
+      killTimer = setTimeout(() => signalGroup('SIGKILL'), graceMs);
     }, timeoutMs);
     try {
-      child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'], ...(cwd ? { cwd } : {}), ...(env ? { env } : {}) });
-    } catch (err) {
-      return finish(null, null, err);
+      child = spawn(cmd, args, { stdio: ['ignore', 'pipe', 'pipe'], detached: true, ...(cwd ? { cwd } : {}), ...(env ? { env } : {}) });
+    } catch (e) {
+      return finish(null, null, e);
     }
+    process.on('SIGINT', onSignal);
+    process.on('SIGTERM', onSignal);
     child.stdout.setEncoding('utf8');
     child.stderr.setEncoding('utf8');
-    child.stdout.on('data', (c) => (stdout = stdout.length < MAX_OUTPUT ? stdout + c : stdout));
-    child.stderr.on('data', (c) => (stderr = stderr.length < MAX_OUTPUT ? stderr + c : stderr));
-    child.on('error', (err) => finish(null, null, err));
-    child.on('close', (code, signal) => finish(code, signal));
-    // A killed command's own children can keep its output pipes open; don't wait on them.
+    child.stdout.on('data', (c) => out.add(c));
+    child.stderr.on('data', (c) => err.add(c));
+    child.on('error', (e) => finish(null, null, e));
     child.on('exit', (code, signal) => {
-      if (!timedOut) return;
-      child.stdout.destroy();
-      child.stderr.destroy();
-      finish(code, signal);
+      exited = { code, signal };
+      clearTimeout(termTimer);
+      clearTimeout(killTimer);
+      if (timedOut) signalGroup('SIGKILL'); // whatever of the group is left after a timeout goes too
+      drainTimer = setTimeout(() => {
+        child.stdout.destroy();
+        child.stderr.destroy();
+        finish(code, signal);
+      }, Math.min(graceMs, 2000));
     });
+    child.on('close', (code, signal) => (exited ? finish(exited.code, exited.signal) : finish(code, signal)));
   });
 }
 
@@ -397,6 +472,59 @@ function describeExit(svc) {
   return svc.lastExitCode ?? 'unknown';
 }
 
+// ---------- the real launchd service is shared ----------
+
+// launchd's label (local.thedesk.server in gui/<uid>) is the same whatever HOME says. A test, a
+// review or an experiment run with a fake HOME that reached the real launchctl would restart, stop
+// or remove Snow's live Desk. So the real runner refuses every launchctl verb that changes state
+// unless HOME is the real home folder and the live copy sits inside it. Read-only verbs (print,
+// print-disabled) still run. Tests must inject their own runner; they never reach the real one.
+export const LAUNCHD_CHANGES = new Set(['bootstrap', 'bootout', 'kickstart', 'enable', 'disable', 'kill', 'load', 'unload', 'remove']);
+
+function userHome() {
+  try {
+    return os.userInfo().homedir;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Why this run must not change the real launchd service, or null when it may.
+ * @param {{ env?: Record<string, string|undefined>, cfg?: { home: string, runDir: string } | null, homedir?: string, realHome?: string|null }} [facts]
+ *   homedir: what HOME says (os.homedir()); realHome: the account's real home (os.userInfo().homedir)
+ */
+export function launchdRefusal({ env = process.env, cfg = null, homedir = os.homedir(), realHome = userHome() } = {}) {
+  const tail = "so I won't touch the real launchd service (its name is shared). Use --dry-run or the test hooks.";
+  if (!realHome) return `I can't tell your real home folder, ${tail}`;
+  const real = path.resolve(realHome);
+  const insideReal = (p) => {
+    const r = path.resolve(p);
+    return r === real || r.startsWith(real + path.sep);
+  };
+  if (path.resolve(homedir) !== real) return `HOME (${homedir}) is not your real home folder (${real}), ${tail}`;
+  if (cfg && path.resolve(cfg.home) !== real) return `This run's home folder (${cfg.home}) is not your real one (${real}), ${tail}`;
+  if ((env.DESK_LIVE_DIR || '').trim() && !insideReal(resolveLiveDir(env, homedir))) {
+    return `DESK_LIVE_DIR (${resolveLiveDir(env, homedir)}) is outside your real home folder (${real}), ${tail}`;
+  }
+  if (cfg && !insideReal(cfg.runDir)) return `The live copy (${cfg.runDir}) is outside your real home folder (${real}), ${tail}`;
+  return null;
+}
+
+/**
+ * Wraps a runner so launchctl verbs that change state are refused (code 1, the reason as stderr)
+ * whenever refusal() names a reason. Everything else goes through untouched.
+ */
+export function guardLaunchctl(run, refusal) {
+  return (cmd, args = [], options) => {
+    if (path.basename(String(cmd)) === 'launchctl' && LAUNCHD_CHANGES.has(args[0])) {
+      const why = refusal();
+      if (why) return Promise.resolve({ code: 1, stdout: '', stderr: why });
+    }
+    return run(cmd, args, options);
+  };
+}
+
 // ---------- the commands ----------
 
 /**
@@ -410,11 +538,14 @@ function describeExit(svc) {
  * @property {(line: string) => void} err
  * @property {typeof fs} fs
  * @property {string} platform
+ * @property {(cfg: object) => string|null} [launchdRefusal] the real deps say why this run must not change
+ *   the real launchd service (see launchdRefusal); injected test deps leave it out
  */
 
 export function realDeps() {
   return {
-    run: runCommand,
+    run: guardLaunchctl(runCommand, () => launchdRefusal()),
+    launchdRefusal: (cfg) => launchdRefusal({ cfg }),
     portIsFree,
     probe: (port) => probeDesk(port, { timeoutMs: 2000 }),
     sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
@@ -563,14 +694,39 @@ export function missingPackages(dir, fsImpl = fs, modulesDir = path.join(dir, 'n
   return names.filter((name) => !fsImpl.existsSync(path.join(modulesDir, name, 'package.json')));
 }
 
+// Loads the server's code from the current folder in a child node, without starting the server
+// (server/index.js only listens when it is the program node was started with; a test in
+// test/server.test.js holds it to that), then exits at once in case anything was left running.
+export const LOAD_CHECK_CODE = "const { pathToFileURL } = await import('node:url'); await import(pathToFileURL('server/index.js').href); process.exit(0);";
+
 /**
- * Is the live copy ready to run? It needs its code (server/index.js), every package its package.json
- * names, and a finished deploy (.deployed.json) for the very commit it holds. Anything less would
- * crash-loop the moment launchd starts it.
+ * Does the code in dir load, packages and all? Catches what a file check can't: a package another
+ * package needs (ajv needs fast-deep-equal), a module that throws on import.
+ * @returns {Promise<{ ok: true } | { ok: false, error: string }>}
+ */
+export async function loadCheck(dir, nodePath, deps) {
+  const r = await deps.run(nodePath, ['--input-type=module', '-e', LOAD_CHECK_CODE], { cwd: dir, timeoutMs: 30_000 });
+  if (r.code === 0) return { ok: true };
+  const all = String(r.stderr || r.stdout || '').split('\n').map((l) => l.trim()).filter(Boolean);
+  const line = all.find((l) => /^[A-Za-z]*Error\b/.test(l)) || all.at(-1) || `exit ${r.code}`;
+  return { ok: false, error: oneLine(line, 300) };
+}
+
+// git status for the live copy, leaving out .deployed.json and its temp file: an older commit's
+// .gitignore may not list them, and they are deploy's own.
+export const liveStatusArgs = (dir) => ['-C', dir, '--no-optional-locks', 'status', '--porcelain', '--', '.', ':!/.deployed.json*'];
+
+/**
+ * Is the live copy ready to run? Anything less would crash-loop the moment launchd starts it:
+ * - its code: server/index.js, and no changes of its own (git status, as deploy checks it);
+ * - every package its package.json names, in node_modules;
+ * - a finished deploy (.deployed.json) for the very commit it holds;
+ * - and, when all of that holds, the server's modules load (loadCheck).
  * @returns {Promise<{ ready: true, deployed: object } | { ready: false, there: boolean, problems: string[] }>}
  */
 export async function liveCopyState(cfg, deps) {
   if (!deps.fs.existsSync(cfg.serverPath)) return { ready: false, there: false, problems: ['no server/index.js'] };
+  const env = gitEnv(deps.env || process.env);
   const problems = [];
   if (!deps.fs.existsSync(path.join(cfg.runDir, 'node_modules'))) {
     problems.push('no node_modules');
@@ -583,10 +739,21 @@ export async function liveCopyState(cfg, deps) {
   if (!deployed) {
     problems.push('no readable .deployed.json');
   } else {
-    const head = await deps.run(GIT, ['-C', cfg.runDir, 'rev-parse', 'HEAD'], { env: gitEnv(deps.env || process.env) });
+    const head = await deps.run(GIT, ['-C', cfg.runDir, 'rev-parse', 'HEAD'], { env });
     const sha = head.code === 0 ? head.stdout.trim() : '';
     if (!sha) problems.push("git can't read which commit it holds");
     else if (sha !== deployed.sha) problems.push(`it holds ${sha.slice(0, 7)}, but the last deploy that finished was ${describeDeployed(deployed)}`);
+  }
+  const status = await deps.run(GIT, liveStatusArgs(cfg.runDir), { env });
+  if (status.code !== 0) {
+    problems.push("git can't check it for changes");
+  } else if (status.stdout.trim()) {
+    const changed = status.stdout.split('\n').map((l) => l.trim()).filter(Boolean);
+    problems.push(`it has changes of its own (${changed.slice(0, 3).map((l) => oneLine(l, 120)).join(', ')}${changed.length > 3 ? `, and ${changed.length - 3} more` : ''})`);
+  }
+  if (!problems.length) {
+    const load = await loadCheck(cfg.runDir, cfg.nodePath, deps);
+    if (!load.ok) problems.push(`its server doesn't load: ${load.error}`);
   }
   return problems.length ? { ready: false, there: true, problems } : { ready: true, deployed };
 }
@@ -611,7 +778,7 @@ export function dryRunText(cfg, { liveCopy = cfg.runDir } = {}) {
     '',
     `The service will run The Desk from the live copy: ${liveCopy}`,
     '',
-    `1. Check that the live copy is fully deployed: server/index.js, every package in its package.json, and a .deployed.json for the commit it holds. If not, stop and say: run npm run deploy.`,
+    `1. Check that the live copy is fully deployed: server/index.js and no changes of its own, every package in its package.json, a .deployed.json for the commit it holds, and a server that loads. If not, stop and say: run npm run deploy.`,
     `2. Check that port ${cfg.port} is free, or held by this service (which is then replaced). Refuse otherwise.`,
     `3. Create the log folder: ${cfg.logDir}`,
     `4. Write ${cfg.plistPath}:`,
@@ -653,7 +820,7 @@ export async function install(cfg, deps, { dryRun = false } = {}) {
   }
   if (!live.ready) {
     deps.err(`The live copy isn't fully deployed yet (${cfg.runDir}: ${live.problems.join('; ')}), so nothing was changed.`);
-    deps.err('Run npm run deploy until it finishes (it repairs this), then run npm run service:install again.');
+    deps.err('Run npm run deploy until it finishes (it repairs this, or says what to do), then run npm run service:install again.');
     return 1;
   }
   const svc = await readService(cfg, deps);
@@ -847,6 +1014,15 @@ export async function main(argv, { env = process.env, deps = realDeps(), cfg } =
     return 0;
   }
   const config = cfg || serviceConfig({ env });
+  // Commands that change launchd state stop here, before anything, when this run's HOME or live copy
+  // isn't the real one (the real runner refuses those verbs too). status and dry runs only read.
+  if (args.command !== 'status' && !(args.command === 'install' && args.dryRun)) {
+    const why = deps.launchdRefusal?.(config);
+    if (why) {
+      deps.err(why);
+      return 1;
+    }
+  }
   if (args.command === 'install') return install(config, deps, { dryRun: args.dryRun });
   return RUNNERS[args.command](config, deps);
 }

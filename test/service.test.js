@@ -2,16 +2,23 @@
 // a fake that keeps launchd's state in memory. Files go to a temp home folder, and the live copy the
 // service runs from is a stand-in folder at <temp home>/the-desk-live.
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { after, describe, test } from 'node:test';
+import { pathToFileURL } from 'node:url';
 import { REPO_ROOT } from '../server/config.js';
 import { deployedPath, deployedRecord } from '../server/deployed.js';
 import {
   GIT,
   HOMEBREW_NODE,
+  LOAD_CHECK_CODE,
+  guardLaunchctl,
+  launchdRefusal,
+  liveStatusArgs,
+  loadCheck,
+  outputKeeper,
   missingPackages,
   runCommand,
   LAUNCHCTL,
@@ -27,6 +34,7 @@ import {
   plistWorkingDirectory,
   protectedFolder,
   readLogSince,
+  realDeps,
   resolveNodePath,
   serviceConfig,
   shellQuote,
@@ -67,6 +75,9 @@ const tree = (dir) => fs.readdirSync(dir, { recursive: true }).map(String).sort(
 
 const SHA = 'c0ffee00c0ffee00c0ffee00c0ffee00c0ffee00';
 
+// What node prints when ajv can't find fast-deep-equal.
+const LOAD_FAIL = "node:internal/modules/cjs/loader:1386\n  throw err;\n  ^\n\nError: Cannot find module 'fast-deep-equal'\nRequire stack:\n- /x/node_modules/ajv/dist/compile/resolve.js\n";
+
 const RECORD = deployedRecord({ sha: SHA, subject: 'N1: live copy', deployedAt: '2026-11-28T09:14:03-05:00' });
 
 /**
@@ -89,7 +100,8 @@ function fakeMac({ loaded = false, pid = null, portHolder = null, deskUp = false
     fs.writeFileSync(path.join(runDir, 'node_modules', 'ajv', 'package.json'), '{ "name": "ajv" }');
     fs.writeFileSync(deployedPath(runDir), JSON.stringify(RECORD));
   }
-  const state = { loaded, pid, portHolder, deskUp, disabled, runs: loaded ? 1 : 0, lastExit: '(never exited)', clock: 0, nextPid: 4242, liveHead: SHA };
+  // liveHead: the commit git says the live copy holds; liveStatus: its git status; loads: whether its server loads.
+  const state = { loaded, pid, portHolder, deskUp, disabled, runs: loaded ? 1 : 0, lastExit: '(never exited)', clock: 0, nextPid: 4242, liveHead: SHA, liveStatus: '', loads: true };
   const calls = [];
   const out = [];
   const err = [];
@@ -114,11 +126,20 @@ function fakeMac({ loaded = false, pid = null, portHolder = null, deskUp = false
     state.pid = null;
   };
   const deps = {
-    async run(cmd, args) {
+    async run(cmd, args, options = {}) {
       calls.push([cmd, ...args].join(' '));
-      if (cmd === GIT) {
-        assert.deepEqual(args, ['-C', cfg.runDir, 'rev-parse', 'HEAD'], 'the only git the service runs');
+      if (cmd === GIT && args[2] === 'rev-parse') {
+        assert.deepEqual(args, ['-C', cfg.runDir, 'rev-parse', 'HEAD']);
         return state.liveHead ? ok(`${state.liveHead}\n`) : { code: 128, stdout: '', stderr: 'fatal: not a git repository\n' };
+      }
+      if (cmd === GIT) {
+        assert.deepEqual(args, liveStatusArgs(cfg.runDir), 'the only other git the service runs');
+        return ok(state.liveStatus);
+      }
+      if (cmd === cfg.nodePath) {
+        assert.deepEqual(args, ['--input-type=module', '-e', LOAD_CHECK_CODE]);
+        assert.equal(options.cwd, cfg.runDir, 'the load check runs in the live copy');
+        return state.loads ? ok() : { code: 1, stdout: '', stderr: LOAD_FAIL };
       }
       if (cmd === PLUTIL) return lint === 0 ? ok(`${args[1]}: OK\n`) : { code: 1, stdout: `${args[1]}: Encountered unexpected element\n`, stderr: '' };
       if (cmd === LSOF) return state.portHolder ? ok(`${state.portHolder}\n`) : { code: 1, stdout: '', stderr: '' };
@@ -351,7 +372,12 @@ describe('service:install', () => {
     fs.writeFileSync(deployedPath(mac.cfg.runDir), JSON.stringify(deployedRecord({ sha: SHA, subject: 'N1: live copy', deployedAt: '2026-11-28T09:14:03-05:00' })));
     const before = tree(mac.home);
     assert.equal(await mac.run('install', '--dry-run'), 0);
-    assert.deepEqual(mac.calls, [`git -C ${mac.cfg.runDir} rev-parse HEAD`], 'only a read-only look at which commit the live copy holds');
+    assert.deepEqual(mac.launchctl(), [], 'no launchctl');
+    assert.deepEqual(
+      mac.calls.map((c) => c.split(' ').slice(0, 4).join(' ')),
+      [`git -C ${mac.cfg.runDir} rev-parse`, `git -C ${mac.cfg.runDir} --no-optional-locks`, `${HOMEBREW_NODE} --input-type=module -e const`],
+      'only read-only looks: its commit, its git status, and whether its server loads',
+    );
     assert.deepEqual(tree(mac.home), before, 'no file or folder was written');
     const text = mac.text();
     assert.ok(text.startsWith('Dry run: nothing is changed.'));
@@ -387,7 +413,7 @@ describe('service:install', () => {
     assert.equal(await mac.run('install'), 1);
     const errors = mac.errors();
     assert.ok(errors.startsWith(`The live copy isn't fully deployed yet (${mac.cfg.runDir}: ${problem}), so nothing was changed.\n`), errors);
-    assert.match(errors, /Run npm run deploy until it finishes \(it repairs this\), then run npm run service:install again\./);
+    assert.match(errors, /Run npm run deploy until it finishes \(it repairs this, or says what to do\), then run npm run service:install again\./);
     assert.deepEqual(mac.launchctl(), [], 'no launchctl at all: the running service is left alone');
     assert.deepEqual(tree(mac.home), before);
   }
@@ -436,6 +462,46 @@ describe('service:install', () => {
     await refusesHalfDeployed(mac, "git can't read which commit it holds");
   });
 
+  test('refuses a live copy with changes of its own (a deleted tracked file)', async () => {
+    const mac = fakeMac({ loaded: true, pid: 4100, portHolder: 4100, deskUp: true });
+    mac.state.liveStatus = ' D server/feed.js\n';
+    await refusesHalfDeployed(mac, 'it has changes of its own (D server/feed.js)');
+    assert.ok(!mac.calls.some((c) => c.startsWith(HOMEBREW_NODE)), 'no load check once something else is wrong');
+  });
+
+  test("refuses a live copy whose server doesn't load (ajv without fast-deep-equal)", async () => {
+    const mac = fakeMac({ loaded: true, pid: 4100, portHolder: 4100, deskUp: true });
+    mac.state.loads = false;
+    await refusesHalfDeployed(mac, "its server doesn't load: Error: Cannot find module 'fast-deep-equal'");
+    assert.equal(mac.state.pid, 4100);
+  });
+
+  test('the live copy git status leaves out .deployed.json and its temp file, nothing else', () => {
+    assert.deepEqual(liveStatusArgs('/x/live'), ['-C', '/x/live', '--no-optional-locks', 'status', '--porcelain', '--', '.', ':!/.deployed.json*']);
+    const dir = tempDir();
+    const git = (...args) => spawnSync('git', args, { cwd: dir, encoding: 'utf8', env: { PATH: process.env.PATH, GIT_CONFIG_GLOBAL: '/dev/null', GIT_CONFIG_NOSYSTEM: '1' } });
+    git('init', '-q', '-b', 'main');
+    fs.writeFileSync(path.join(dir, '.deployed.json'), '{}');
+    fs.writeFileSync(path.join(dir, '.deployed.json.tmp-123'), '{}');
+    assert.equal(git(...liveStatusArgs(dir)).stdout, '', 'an older .gitignore without them: still clean');
+    fs.writeFileSync(path.join(dir, 'stray.txt'), 'x');
+    assert.equal(git(...liveStatusArgs(dir)).stdout, '?? stray.txt\n');
+  });
+
+  test('loadCheck imports the server in a child node: a missing package fails, the real repo loads', async () => {
+    const dir = tempDir();
+    fs.mkdirSync(path.join(dir, 'server'));
+    fs.mkdirSync(path.join(dir, 'node_modules', 'ajv'), { recursive: true });
+    fs.writeFileSync(path.join(dir, 'server', 'index.js'), "import 'ajv';\n");
+    fs.writeFileSync(path.join(dir, 'node_modules', 'ajv', 'package.json'), '{ "name": "ajv", "main": "index.js" }');
+    fs.writeFileSync(path.join(dir, 'node_modules', 'ajv', 'index.js'), "require('fast-deep-equal');\n");
+    const deps = { run: runCommand };
+    assert.deepEqual(await loadCheck(dir, process.execPath, deps), { ok: false, error: "Error: Cannot find module 'fast-deep-equal'" });
+    fs.writeFileSync(path.join(dir, 'node_modules', 'ajv', 'index.js'), 'module.exports = {};\n');
+    assert.deepEqual(await loadCheck(dir, process.execPath, deps), { ok: true });
+    assert.deepEqual(await loadCheck(REPO_ROOT, process.execPath, deps), { ok: true }, 'this repo: server/index.js imports without starting');
+  });
+
   test('missingPackages lists dependencies (not devDependencies) with no package.json in node_modules', () => {
     const dir = tempDir();
     fs.writeFileSync(path.join(dir, 'package.json'), JSON.stringify({ dependencies: { ajv: '1', '@scope/x': '1' }, devDependencies: { dev: '1' } }));
@@ -456,7 +522,7 @@ describe('service:install', () => {
     fs.rmSync(deployedPath(mac.cfg.runDir));
     assert.equal(await mac.run('install', '--dry-run'), 0);
     assert.ok(mac.text().includes(`from the live copy: ${mac.cfg.runDir} (not fully deployed: no node_modules; no readable .deployed.json; run npm run deploy)`), mac.text());
-    assert.match(mac.text(), /1\. Check that the live copy is fully deployed: server\/index\.js, every package in its package\.json, and a \.deployed\.json for the commit it holds\./);
+    assert.match(mac.text(), /1\. Check that the live copy is fully deployed: server\/index\.js and no changes of its own, every package in its package\.json, a \.deployed\.json for the commit it holds, and a server that loads\./);
   });
 
   test('moves a service that ran from the work folder over to the live copy', async () => {
@@ -810,12 +876,163 @@ describe('runCommand (the real runner deploy and the service use)', () => {
     assert.throws(() => process.kill(pid, 0), { code: 'ESRCH' }, 'the child is gone');
   });
 
+  test('a command that exits while something it started keeps running is done, with its real exit code', async () => {
+    const pidFile = path.join(tempDir(), 'bg.pid');
+    const started = Date.now();
+    const r = await runCommand('/bin/sh', ['-c', `echo hi; sleep 6 & echo $! > '${pidFile}'; exit 0`], { timeoutMs: 1000, graceMs: 500 });
+    try {
+      assert.ok(Date.now() - started < 2500, `didn't wait for the background sleep (${Date.now() - started} ms)`);
+      assert.deepEqual(r, { code: 0, stdout: 'hi\n', stderr: '' });
+    } finally {
+      try {
+        process.kill(Number(fs.readFileSync(pidFile, 'utf8')), 'SIGKILL');
+      } catch {
+        /* already gone */
+      }
+    }
+  });
+
+  /** Waits up to 3 s for a process to be gone. */
+  async function gone(pid) {
+    for (let i = 0; i < 30; i++) {
+      try {
+        process.kill(pid, 0);
+      } catch (err) {
+        if (err.code === 'ESRCH') return true;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    return false;
+  }
+
+  test("the hard stop reaches the command's own children too (its whole process group)", async () => {
+    const pidFile = path.join(tempDir(), 'child.pid');
+    // sh and its sleep both ignore SIGTERM (an ignored signal is inherited), so only SIGKILL to the group stops them.
+    const r = await runCommand('/bin/sh', ['-c', `trap '' TERM; sleep 30 & echo $! > '${pidFile}'; wait`], { timeoutMs: 500, graceMs: 300 });
+    assert.notEqual(r.code, 0);
+    assert.match(r.stderr, /stopped after 500 ms: it took too long/);
+    assert.ok(await gone(Number(fs.readFileSync(pidFile, 'utf8'))), 'the orphan sleep was stopped as well');
+  });
+
+  test('when this process is stopped (Ctrl+C), the command it is running is stopped too', async () => {
+    const dir = tempDir();
+    const pidFile = path.join(dir, 'sleep.pid');
+    const wrapper = path.join(dir, 'wrapper.mjs');
+    const serviceUrl = pathToFileURL(path.join(REPO_ROOT, 'scripts', 'service.js')).href;
+    fs.writeFileSync(wrapper, `import { runCommand } from ${JSON.stringify(serviceUrl)};\nawait runCommand('/bin/sh', ['-c', ${JSON.stringify(`echo $$ > '${pidFile}'; exec sleep 30`)}], { timeoutMs: 60000 });\n`);
+    const child = spawn(process.execPath, [wrapper], { stdio: 'ignore' });
+    try {
+      for (let i = 0; i < 50 && !fs.existsSync(pidFile); i++) await new Promise((resolve) => setTimeout(resolve, 100));
+      const pid = Number(fs.readFileSync(pidFile, 'utf8'));
+      const ended = new Promise((resolve) => child.on('exit', (code, signal) => resolve(signal || code)));
+      child.kill('SIGINT');
+      assert.equal(await ended, 'SIGINT', 'the wrapper still stops the way Ctrl+C stops it');
+      assert.ok(await gone(pid), 'and its sleep, in its own process group, was stopped with it');
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    }
+  });
+
+  test('a very long output keeps its start and its end (npm puts its error lines last)', async () => {
+    const script = "process.stderr.write('START' + 'x'.repeat(3_000_000) + 'END'); process.exitCode = 1;";
+    const r = await runCommand(process.execPath, ['-e', script], { timeoutMs: 10_000 });
+    assert.equal(r.code, 1);
+    assert.ok(r.stderr.startsWith('START'));
+    assert.ok(r.stderr.endsWith('END'));
+    assert.match(r.stderr, /… \(\d+ characters left out\) …/);
+    assert.ok(r.stderr.length < 2.2 * 1024 * 1024, `${r.stderr.length} characters`);
+  });
+
+  test('outputKeeper keeps everything when it fits, else the head and the tail', () => {
+    const small = outputKeeper(5, 5);
+    small.add('abc');
+    small.add('def');
+    assert.equal(small.text(), 'abcdef');
+    const big = outputKeeper(3, 3);
+    for (const chunk of ['abc', 'defgh', 'ijklmnop', 'xyz']) big.add(chunk);
+    assert.equal(big.text(), 'abc\n… (13 characters left out) …\nxyz');
+  });
+
   test('passes env when given one, and never rejects', async () => {
     const r = await runCommand(process.execPath, ['-e', 'console.log(process.env.DESK_RUNNER_CHECK)'], { env: { DESK_RUNNER_CHECK: 'yes' } });
     assert.equal(r.stdout.trim(), 'yes');
     const missing = await runCommand(path.join(tempDir(), 'no-such-program'), []);
     assert.notEqual(missing.code, 0);
     assert.match(missing.stderr, /ENOENT/);
+  });
+});
+
+describe('the real launchd service is shared: fake HOMEs never change it', () => {
+  // Every test here uses a fake runner. The real launchctl never runs in the tests.
+  const REAL = '/Users/snow';
+  const cfgAt = (home, runDir = path.join(home, 'the-desk-live')) => ({ home, runDir });
+
+  test('launchdRefusal: fine with the real home and a live copy inside it', () => {
+    assert.equal(launchdRefusal({ env: {}, cfg: cfgAt(REAL), homedir: REAL, realHome: REAL }), null);
+    assert.equal(launchdRefusal({ env: { DESK_LIVE_DIR: '/Users/snow/elsewhere/live' }, cfg: cfgAt(REAL, '/Users/snow/elsewhere/live'), homedir: REAL, realHome: REAL }), null);
+  });
+
+  test('launchdRefusal: refuses a fake HOME, a config for another home, or a live copy outside the real home', () => {
+    const tail = "so I won't touch the real launchd service (its name is shared). Use --dry-run or the test hooks.";
+    assert.equal(launchdRefusal({ env: {}, homedir: '/tmp/fake', realHome: REAL }), `HOME (/tmp/fake) is not your real home folder (/Users/snow), ${tail}`);
+    assert.equal(launchdRefusal({ env: {}, cfg: cfgAt('/tmp/fake'), homedir: REAL, realHome: REAL }), `This run's home folder (/tmp/fake) is not your real one (/Users/snow), ${tail}`);
+    assert.equal(launchdRefusal({ env: { DESK_LIVE_DIR: '/tmp/live' }, homedir: REAL, realHome: REAL }), `DESK_LIVE_DIR (/tmp/live) is outside your real home folder (/Users/snow), ${tail}`);
+    assert.equal(launchdRefusal({ env: {}, cfg: cfgAt(REAL, '/srv/live'), homedir: REAL, realHome: REAL }), `The live copy (/srv/live) is outside your real home folder (/Users/snow), ${tail}`);
+    assert.match(launchdRefusal({ env: {}, homedir: REAL, realHome: null }), /^I can't tell your real home folder, so I won't touch/);
+    assert.match(launchdRefusal({ env: {}, homedir: '/Users/snowy', realHome: REAL }), /is not your real home folder/, 'a look-alike prefix is not the real home');
+  });
+
+  test('guardLaunchctl refuses launchctl verbs that change state, and lets reads and everything else through', async () => {
+    const seen = [];
+    const inner = async (cmd, args) => {
+      seen.push([cmd, ...args].join(' '));
+      return { code: 0, stdout: 'ran', stderr: '' };
+    };
+    const run = guardLaunchctl(inner, () => 'HOME is not your real home folder');
+    for (const verb of ['bootstrap', 'bootout', 'kickstart', 'enable', 'disable', 'kill']) {
+      assert.deepEqual(await run(LAUNCHCTL, [verb, 'gui/501/local.thedesk.server']), { code: 1, stdout: '', stderr: 'HOME is not your real home folder' }, verb);
+      assert.equal((await run('launchctl', [verb, 'x'])).code, 1, `${verb}, by name from PATH`);
+    }
+    assert.deepEqual(seen, [], 'none of them reached the runner');
+    assert.equal((await run(LAUNCHCTL, ['print', 'gui/501/local.thedesk.server'])).stdout, 'ran');
+    assert.equal((await run(LAUNCHCTL, ['print-disabled', 'gui/501'])).stdout, 'ran');
+    assert.equal((await run(GIT, ['status'])).stdout, 'ran');
+    const open = guardLaunchctl(inner, () => null);
+    assert.equal((await open(LAUNCHCTL, ['kickstart', '-k', 'gui/501/local.thedesk.server'])).stdout, 'ran', 'no reason: it goes through');
+  });
+
+  test('the real runner is guarded: under a fake HOME a kickstart is refused before anything runs', async () => {
+    const saved = process.env.HOME;
+    process.env.HOME = tempDir(); // os.homedir() follows HOME
+    try {
+      // A launchctl that doesn't exist: even if the guard failed, this could only end in ENOENT.
+      const r = await realDeps().run(path.join(tempDir(), 'no-such-dir', 'launchctl'), ['kickstart', '-k', 'gui/501/local.thedesk.server']);
+      assert.equal(r.code, 1);
+      assert.match(r.stderr, /^HOME \(.*\) is not your real home folder .*, so I won't touch the real launchd service \(its name is shared\)\./);
+      assert.doesNotMatch(r.stderr, /ENOENT/, 'refused, not attempted');
+      assert.match(realDeps().launchdRefusal({ home: process.env.HOME, runDir: path.join(process.env.HOME, 'the-desk-live') }), /is not your real home folder/);
+    } finally {
+      process.env.HOME = saved;
+    }
+  });
+
+  test('install, start, stop, restart and uninstall stop before anything when the deps say so; status and dry runs go on', async () => {
+    for (const command of ['install', 'uninstall', 'start', 'stop', 'restart']) {
+      const mac = fakeMac({ loaded: true, pid: 4100, portHolder: 4100, deskUp: true });
+      mac.deps.launchdRefusal = () => "HOME (/tmp/fake) is not your real home folder (/Users/snow), so I won't touch the real launchd service (its name is shared). Use --dry-run or the test hooks.";
+      assert.equal(await mac.run(command), 1, command);
+      assert.match(mac.errors(), /^HOME \(\/tmp\/fake\) is not your real home folder/);
+      assert.deepEqual(mac.calls, [], `${command}: nothing ran`);
+      assert.equal(mac.state.pid, 4100);
+    }
+    const status = fakeMac({ loaded: true, pid: 4100, portHolder: 4100, deskUp: true });
+    status.deps.launchdRefusal = () => 'no';
+    assert.equal(await status.run('status'), 0);
+    assert.match(status.text(), /Running: {4}yes, process 4100/);
+    const dry = fakeMac();
+    dry.deps.launchdRefusal = () => 'no';
+    assert.equal(await dry.run('install', '--dry-run'), 0);
+    assert.match(dry.text(), /^Dry run/);
   });
 });
 

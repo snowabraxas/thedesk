@@ -104,7 +104,8 @@ function world({ service = 'moved' } = {}) {
     fs.writeFileSync(svc.plistPath, buildPlist({ ...svc, runDir, serverPath: path.join(runDir, 'server', 'index.js') }));
   }
 
-  const state = { loaded: service !== 'none', pid: service !== 'none' ? 4100 : null, deskUp: service !== 'none', health: true, npmCode: 0, npmStderr: null, clock: NOW, nextPid: 4242 };
+  // loads: whether the live copy's server loads (the load check); a successful npm ci repairs it.
+  const state = { loaded: service !== 'none', pid: service !== 'none' ? 4100 : null, deskUp: service !== 'none', health: true, npmCode: 0, npmStderr: null, loads: true, clock: NOW, nextPid: 4242 };
   const calls = [];
   const npmSaw = []; // the package files npm ci found in its folder, each time it ran
   const out = [];
@@ -114,6 +115,11 @@ function world({ service = 'moved' } = {}) {
     async run(cmd, args, options = {}) {
       calls.push({ cmd, args, ...options });
       if (cmd === GIT) return realGit(args, options);
+      if (cmd === svc.nodePath) {
+        assert.equal(args[0], '--input-type=module', 'the load check');
+        assert.equal(options.cwd, live, 'it loads the live copy');
+        return state.loads ? ok() : { code: 1, stdout: '', stderr: "node:internal/modules/cjs/loader:1386\n  throw err;\n  ^\n\nError: Cannot find module 'fast-deep-equal'\nRequire stack:\n- x\n" };
+      }
       if (cmd === cfg.npm) {
         const read = (f) => (fs.existsSync(path.join(options.cwd, f)) ? fs.readFileSync(path.join(options.cwd, f), 'utf8') : null);
         npmSaw.push({ 'package.json': read('package.json'), 'package-lock.json': read('package-lock.json') });
@@ -124,6 +130,7 @@ function world({ service = 'moved' } = {}) {
         fs.mkdirSync(path.join(modules, 'ajv'));
         fs.writeFileSync(path.join(modules, 'ajv', 'index.js'), '// new ajv\n');
         fs.writeFileSync(path.join(modules, 'ajv', 'package.json'), '{ "name": "ajv" }\n');
+        state.loads = true;
         return ok('added 1 package\n');
       }
       if (cmd === LSOF) return state.pid ? ok(`${state.pid}\n`) : { code: 1, stdout: '', stderr: '' };
@@ -212,7 +219,6 @@ describe('deploy: what it shows when git or npm fails', () => {
       'npm error code EUSAGE',
       'npm error `npm ci` can only install packages when your package.json and package-lock.json or npm-shrinkwrap.json are in sync. Please update your lock file with `npm install` before continuing.',
       'npm error Missing: ajv@8.17.1 from lock file',
-      'npm error Clean install a project',
       'npm error A complete log of this run can be found in: /Users/x/.npm/_logs/2026-11-28T14_14_03_000Z-debug-0.log',
     ]);
     assert.deepEqual(npmErrorLines('npm ERR! code ENOTFOUND\nnpm ERR! network getaddrinfo ENOTFOUND registry.npmjs.org\n'), ['npm ERR! code ENOTFOUND', 'npm ERR! network getaddrinfo ENOTFOUND registry.npmjs.org']);
@@ -696,6 +702,145 @@ describe('deploy: updating the live copy', () => {
     assert.equal(w.out.at(-1), `The Desk is live at http://localhost:4321 on main @ ${w.first.slice(0, 7)} "First desk"`);
   });
 
+  test('a checkout that fails after moving HEAD (a post-checkout hook) carries on with the swap and warns', async () => {
+    const w = await deployedWorld();
+    const second = w.commit('Add a package', { 'package-lock.json': LOCK_V2 });
+    const hook = path.join(w.repo, '.git', 'hooks', 'post-checkout');
+    fs.writeFileSync(hook, '#!/bin/sh\necho "hook says no" >&2\nexit 1\n', { mode: 0o755 });
+    assert.equal(await w.run(), 0, w.errors());
+    assert.equal(w.liveHead(), second);
+    assert.equal(ajvIn(w.live), '// new ajv\n', 'new code, new packages: they match');
+    assert.equal(readDeployed(w.live).sha, second);
+    assert.match(w.text(), new RegExp(`Warning: git moved the live copy to ${second.slice(0, 7)} but then said: hook says no\\. Carrying on\\.`));
+    assert.equal(fs.existsSync(w.staging), false);
+  });
+
+  test('a checkout that fails and leaves HEAD somewhere else: back to the old commit, packages untouched', async () => {
+    const w = await deployedWorld();
+    const middle = w.commit('Middle', { 'app/index.html': '<title>middle</title>\n' });
+    w.commit('Add a package', { 'package-lock.json': LOCK_V2 });
+    fs.writeFileSync(path.join(w.live, 'node_modules', 'ajv', 'index.js'), '// old ajv\n');
+    const realRun = w.deps.run;
+    w.deps.run = async (cmd, args, options) => {
+      if (cmd === GIT && args.includes('checkout') && !args.includes(w.first)) {
+        await realGit(['-C', w.live, 'checkout', '--quiet', '--detach', middle]); // half way, then fails
+        return { code: 1, stdout: '', stderr: 'error: something broke half way\n' };
+      }
+      return realRun(cmd, args, options);
+    };
+    assert.equal(await w.run(), 1);
+    assert.equal(w.liveHead(), w.first, 'back on the old commit');
+    assert.equal(ajvIn(w.live), '// old ajv\n', 'with its old packages');
+    assert.equal(fs.existsSync(w.staging), false);
+    assert.deepEqual(w.launchctl(), []);
+    assert.match(w.errors(), new RegExp(`^git couldn't move the live copy to main: error: something broke half way\\nThe live copy is on ${w.first.slice(0, 7)} as before, with its packages\\. The Desk was not restarted\\.`));
+  });
+
+  test('a checkout that fails without moving: nothing changed, and it says so', async () => {
+    const w = await deployedWorld();
+    w.commit('Add a package', { 'package-lock.json': LOCK_V2 });
+    const realRun = w.deps.run;
+    let checkouts = 0;
+    w.deps.run = async (cmd, args, options) => {
+      if (cmd === GIT && args.includes('checkout')) {
+        checkouts += 1;
+        return { code: 128, stdout: '', stderr: 'fatal: unable to write new index file\n' };
+      }
+      return realRun(cmd, args, options);
+    };
+    assert.equal(await w.run(), 1);
+    assert.equal(w.liveHead(), w.first);
+    assert.equal(checkouts, 1, 'no second checkout needed');
+    assert.match(w.errors(), /fatal: unable to write new index file\nThe live copy is on [0-9a-f]{7} as before/);
+  });
+
+  test("a live copy whose server doesn't load (a missing package of a package) gets a fresh npm ci", async () => {
+    const w = await deployedWorld();
+    w.state.loads = false;
+    assert.equal(await w.run(), 0, w.errors());
+    assert.equal(w.commands(w.cfg.npm).length, 1);
+    assert.match(w.text(), /because its server doesn't load: Error: Cannot find module 'fast-deep-equal'\)/);
+    assert.notEqual(w.out.at(-1).indexOf('is live at'), -1);
+  });
+
+  test('a hand checkout to an older commit whose .gitignore lacks .deployed.json still deploys (not "dirty")', async () => {
+    const w = await deployedWorld();
+    const old = w.commit('Before N1', { '.gitignore': 'node_modules\n' });
+    const latest = w.commit('After N1', { '.gitignore': 'node_modules\n/.deployed.json*\n' });
+    gitSync(w.live, 'checkout', '-q', '--detach', old);
+    assert.match(gitSync(w.live, 'status', '--porcelain'), /\?\? \.deployed\.json/, 'plain git status would call it dirty');
+    assert.equal(await w.run(), 0, w.errors());
+    assert.equal(w.liveHead(), latest);
+  });
+
+  test('leftover .deployed.json temp files are removed at the start', async () => {
+    const w = await deployedWorld();
+    fs.writeFileSync(path.join(w.live, '.deployed.json.tmp-999'), '{ "half');
+    assert.equal(await w.run('--dry-run'), 0);
+    assert.ok(w.text().includes(`Remove a temp file left by an interrupted deploy: ${w.live}/.deployed.json.tmp-999`), w.text());
+    assert.ok(fs.existsSync(path.join(w.live, '.deployed.json.tmp-999')), 'not by a dry run');
+    w.reset();
+    assert.equal(await w.run(), 0, w.errors());
+    assert.equal(fs.existsSync(path.join(w.live, '.deployed.json.tmp-999')), false);
+  });
+
+  test("if the staging folder can't be removed after a good swap, it warns and still records and restarts", async () => {
+    const w = await deployedWorld();
+    const second = w.commit('Add a package', { 'package-lock.json': LOCK_V2 });
+    w.deps.fs = {
+      ...fs,
+      rmSync(target, options) {
+        if (target === w.staging) throw Object.assign(new Error('busy'), { code: 'EBUSY' });
+        return fs.rmSync(target, options);
+      },
+    };
+    assert.equal(await w.run(), 0, w.errors());
+    assert.equal(readDeployed(w.live).sha, second);
+    assert.match(w.text(), new RegExp(`Couldn't remove ${w.staging} \\(EBUSY\\)\\. It's left for the next deploy to tidy\\.`));
+    assert.ok(w.launchctl().includes('kickstart -k gui/501/local.thedesk.server'));
+    assert.equal(w.out.at(-1), `The Desk is live at http://localhost:4321 on main @ ${second.slice(0, 7)} "Add a package"`);
+
+    w.deps.fs = fs; // the next run tidies it
+    w.reset();
+    assert.equal(await w.run(), 0, w.errors());
+    assert.equal(fs.existsSync(w.staging), false);
+  });
+
+  test("if a leftover staging folder can't be removed, it says so plainly and changes nothing", async () => {
+    const w = await deployedWorld();
+    fs.mkdirSync(path.join(w.staging, 'node_modules'), { recursive: true });
+    w.commit('Next', { 'app/index.html': '<title>v2</title>\n' });
+    w.deps.fs = {
+      ...fs,
+      rmSync(target, options) {
+        if (target === w.staging) throw Object.assign(new Error('not permitted'), { code: 'EPERM' });
+        return fs.rmSync(target, options);
+      },
+    };
+    assert.equal(await w.run(), 1);
+    assert.match(w.errors(), /^Couldn't tidy up after an interrupted deploy \(EPERM\), so nothing was deployed\.\nLook at /);
+    assert.equal(w.liveHead(), w.first);
+    assert.deepEqual(w.launchctl(), []);
+  });
+
+  test('with a fake HOME (the deps say so), it never restarts the real service, though the live copy is ready', async () => {
+    const w = await deployedWorld();
+    const second = w.commit('Next', { 'app/index.html': '<title>v2</title>\n' });
+    const why = "HOME (/tmp/fake) is not your real home folder (/Users/snow), so I won't touch the real launchd service (its name is shared). Use --dry-run or the test hooks.";
+    w.deps.launchdRefusal = (svc) => {
+      assert.equal(svc, w.svc);
+      return why;
+    };
+    assert.equal(await w.run('--dry-run'), 0);
+    assert.ok(w.text().includes(`   But this run stops here without restarting it: ${why}`));
+    w.reset();
+    assert.equal(await w.run(), 1);
+    assert.equal(w.liveHead(), second);
+    assert.equal(readDeployed(w.live).sha, second);
+    assert.deepEqual(w.launchctl(), [], 'not even launchctl print');
+    assert.equal(w.errors(), `The live copy is ready (main @ ${second.slice(0, 7)} "Next"), but The Desk was not restarted.\n${why}`);
+  });
+
   test('when The Desk does not answer after the restart, it says so and never claims it is live', async () => {
     const w = await deployedWorld();
     w.state.health = false;
@@ -731,7 +876,8 @@ describe('deploy with the real runner', () => {
 describe('deploy --dry-run', () => {
   const assertReadOnly = (w) => {
     for (const c of w.calls) {
-      assert.equal(c.cmd, GIT, `only git, got ${c.cmd} ${c.args.join(' ')}`);
+      if (c.cmd === w.svc.nodePath && c.args[0] === '--input-type=module') continue; // the load check only imports modules
+      assert.equal(c.cmd, GIT, `only git and the load check, got ${c.cmd} ${c.args.join(' ')}`);
       assert.ok(READ_ONLY.has(gitSubcommand(c.args)), `read-only git only, got git ${c.args.join(' ')}`);
     }
   };
