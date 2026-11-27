@@ -482,7 +482,7 @@ async function bootstrap(cfg, deps) {
 
 /** One line about the live copy: which commit it holds, or that it isn't there yet. */
 export function liveCopyLine(cfg, deps) {
-  if (!deps.fs.existsSync(cfg.serverPath)) return `not there yet: ${cfg.runDir} (make it with npm run deploy)`;
+  if (!deps.fs.existsSync(cfg.serverPath)) return `${cfg.runDir} (not there yet: make it with npm run deploy)`;
   const deployed = readDeployed(cfg.runDir, { fsImpl: deps.fs });
   return deployed
     ? `${cfg.runDir}, ${describeDeployed(deployed)}${deployed.deployedAt ? `, deployed ${deployed.deployedAt}` : ''}`

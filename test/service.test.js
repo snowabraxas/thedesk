@@ -354,8 +354,8 @@ describe('service:install', () => {
     assert.equal(await mac.run('install', '--dry-run'), 0);
     assert.deepEqual(mac.calls, []);
     assert.deepEqual(tree(mac.home), []);
-    assert.ok(mac.text().includes(`The service will run The Desk from the live copy: not there yet: ${mac.cfg.runDir} (make it with npm run deploy)`));
-    assert.equal(mac.text(), dryRunText(mac.cfg, { liveCopy: `not there yet: ${mac.cfg.runDir} (make it with npm run deploy)` }));
+    assert.ok(mac.text().includes(`The service will run The Desk from the live copy: ${mac.cfg.runDir} (not there yet: make it with npm run deploy)`));
+    assert.equal(mac.text(), dryRunText(mac.cfg, { liveCopy: `${mac.cfg.runDir} (not there yet: make it with npm run deploy)` }));
   });
 
   test('refuses, changing nothing, when the live copy is not there yet: run npm run deploy first', async () => {
