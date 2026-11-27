@@ -209,6 +209,7 @@ export function createStateClient({
   let lastReadOk = false;
   let base = {}; // counters as last synced with the server
   let inFlight = null; // counters in the PUT on its way, if any
+  let running = null; // the flush on its way, if any
 
   // Read the small reply even when only the status matters, so the browser can finish the request.
   const finish = async (r) => {
@@ -295,45 +296,64 @@ export function createStateClient({
     if (canSave && dirty && !timer) timer = setTimeout(flush, retryDelay);
   }
 
-  async function flush() {
+  /**
+   * Sends what is waiting. Resolves once everything changed up to now is saved (or has failed and
+   * waits for a retry): a call made while a PUT is on its way waits for it and for the one after it.
+   */
+  function flush() {
     clearTimeout(timer);
     timer = null;
-    if (!canSave || !dirty) return;
     if (writing) {
       pending = true;
-      return;
+      return running;
     }
-    // Take the state and send it in the same instant: nothing is awaited in between.
-    const { body, sent } = bodyOf(getState(), base);
+    if (!canSave || !dirty) return Promise.resolve();
     writing = true;
-    dirty = false;
-    inFlight = sent;
-    let ok = false;
-    try {
-      const r = await fetchFn(url, { method: 'PUT', headers, body });
-      ok = r.ok;
-      await finish(r);
-    } catch {
-      /* offline or the server is down */
-    }
-    writing = false;
-    inFlight = null;
-    if (ok) {
-      failNoted = false;
-      if (sent) advance(sent); // the server has added everything up to what was sent
-    } else {
-      dirty = true; // the retry (or the next change) sends everything again
-      if (!failNoted) {
-        failNoted = true;
-        onSaveFail();
+    running = (async () => {
+      try {
+        let again = true;
+        while (again) {
+          pending = false;
+          if (!canSave || !dirty) break;
+          // Take the state and send it in the same instant: nothing is awaited in between.
+          const { body, sent } = bodyOf(getState(), base);
+          dirty = false;
+          inFlight = sent;
+          let ok = false;
+          try {
+            const r = await fetchFn(url, { method: 'PUT', headers, body });
+            ok = r.ok;
+            await finish(r);
+          } catch {
+            /* offline or the server is down */
+          }
+          inFlight = null;
+          if (ok) {
+            failNoted = false;
+            if (sent) advance(sent); // the server has added everything up to what was sent
+          } else {
+            dirty = true; // the retry (or the next change) sends everything again
+            if (!failNoted) {
+              failNoted = true;
+              onSaveFail();
+            }
+          }
+          again = pending; // a change came in meanwhile: send again now
+          if (!ok && !again) retryLater();
+        }
+      } finally {
+        writing = false;
+        running = null;
       }
-    }
-    if (pending) {
-      pending = false;
-      await flush();
-      return;
-    }
-    if (!ok) retryLater();
+    })();
+    return running;
+  }
+
+  /** Stops for good: no more saves or retries (a test's tab, or a page being torn down). */
+  function dispose() {
+    canSave = false;
+    clearTimeout(timer);
+    timer = null;
   }
 
   /** For pagehide. Returns true if it sent something. */
@@ -367,6 +387,7 @@ export function createStateClient({
     flushOnExit,
     peek,
     reload,
+    dispose,
     get canSave() {
       return canSave;
     },

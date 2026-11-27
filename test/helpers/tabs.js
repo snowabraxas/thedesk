@@ -13,6 +13,19 @@ import { createStateClient, readArticle } from '../../app/lib.js';
 import { blankNewsState, normalizeNewsState, readStory } from '../../app/news-lib.js';
 import { createServer } from '../../server/index.js';
 
+const opened = new Set();
+/**
+ * Stops every tab opened so far (no more saves or retries), so a test that fails part way can't
+ * leave a client retrying against a stopped server and keep the test process alive.
+ */
+export function disposeAll() {
+  for (const tab of opened) {
+    tab.feed.dispose();
+    tab.news.dispose();
+  }
+  opened.clear();
+}
+
 /** A real server on a free port with its own temp DESK_HOME. */
 export async function startDesk() {
   const home = fs.mkdtempSync(path.join(os.tmpdir(), 'the-desk-tabs-'));
@@ -60,6 +73,7 @@ export async function openTab(desk, { old = false, fetchFn, delay = 0 } = {}) {
   };
   tab.feed = createStateClient({ url: desk.feedUrl, getState: () => tab.S, counters: old ? [] : ['xp'], delay, ...opts });
   tab.news = createStateClient({ url: desk.newsUrl, normalize: normalizeNewsState, empty: blankNewsState, getState: () => tab.N, delay, ...opts });
+  opened.add(tab);
   const [f, n] = await Promise.all([tab.feed.load(), tab.news.load()]);
   if (!f.ok || !n.ok) throw new Error('a tab could not load');
   tab.S = f.state;

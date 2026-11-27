@@ -77,6 +77,8 @@ Packages are installed from `package.json` and the lockfile alone, so a lifecycl
 
 Between the checkout and the restart (a few seconds) the running server already serves the new `app/` files from disk. Harmless for now. If a story ever needs both halves to change at once, deploy into a fresh folder and swap the folder instead.
 
+**After deploying, reload any open Desk pages** (the Claude app's pane and any browser tab): a page keeps running the code it loaded. Since N4 the server merges every save, so a page from before a deploy can't lose data, but it only gets new behaviour once reloaded.
+
 **To undo a bad deploy:** `git revert` the commit on main, then `npm run deploy`. Avoid checking out an old commit in the live copy by hand: `.deployed.json` would no longer match it.
 
 **What no code can cover: `kill -9` of deploy itself** (or a power cut) part way through. Nothing runs to roll back. The live copy may be left on a commit that never went live, with the old packages in `<live>.staging/node_modules.old`, while the running Desk carries on in memory. The next `npm run deploy` recovers: it puts those packages back, notices HEAD isn't the recorded commit, and rolls back to it if the new attempt fails. Until then, a launchd restart would run the unverified code. A Ctrl+C or SIGTERM to deploy is handled differently: the signal reaches the command it is running, and deploy then stops without its own rollback, which the next deploy does the same way. (Trapping signals during steps 2 to 4 to roll back on the spot is possible, but not done.)

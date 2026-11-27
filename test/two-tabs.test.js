@@ -2,8 +2,8 @@
 // The server merges every save into the file as it is now (server/state-store.js); the pages check
 // the server before paying and reload when idle. Each scenario below lost XP or paid twice before.
 import assert from 'node:assert/strict';
-import { after, before, beforeEach, describe, test } from 'node:test';
-import { openTab, startDesk } from './helpers/tabs.js';
+import { after, afterEach, before, beforeEach, describe, test } from 'node:test';
+import { disposeAll, openTab, startDesk } from './helpers/tabs.js';
 
 const S1 = '2026-12-07/s1';
 const AT = '2026-12-07T12:04:00-05:00';
@@ -14,6 +14,7 @@ before(async () => {
 });
 after(() => desk.stop());
 beforeEach(() => desk.reset());
+afterEach(() => disposeAll());
 
 const feedState = () => desk.get('/api/state');
 const newsState = () => desk.get('/api/news/state');
@@ -131,7 +132,7 @@ describe('the refresh race', () => {
       }
       return fetch(url, opts);
     };
-    const pane = await openTab(desk, { fetchFn });
+    const pane = await openTab(desk, { fetchFn, delay: 60_000 }); // the change waits, as the app's 600 ms debounce does
     const browser = await openTab(desk);
     await browser.readStory(S1);
     holding = true; // hold the next GET

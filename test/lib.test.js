@@ -867,6 +867,49 @@ describe('createStateClient', () => {
       assert.equal(A.client.flushOnExit(), true, 'a good read lets it go again');
     });
 
+    test('flush resolves only once everything changed up to now is saved, including the PUT that follows one on its way', async () => {
+      const srv = memoryServer({ xp: 0 });
+      let release;
+      let first = true;
+      const fetchFn = (url, opts = {}) => {
+        if (opts.method === 'PUT' && first) {
+          first = false;
+          return new Promise((r) => (release = () => r(srv.fetchFn(url, opts))));
+        }
+        return srv.fetchFn(url, opts);
+      };
+      const A = tab(srv, { fetchFn });
+      A.S = (await A.client.load()).state;
+      A.S.xp = 10;
+      A.client.save();
+      const one = A.client.flush();
+      A.S.xp = 20;
+      A.client.save();
+      let done = false;
+      const two = A.client.flush().then(() => { done = true; });
+      await settle();
+      assert.equal(done, false, 'still waiting on the first PUT');
+      release();
+      await Promise.all([one, two]);
+      assert.equal(srv.puts.length, 2);
+      assert.equal(srv.value.xp, 20, 'the second flush waited for the follow-up PUT');
+      assert.equal(A.client.idle, true);
+    });
+
+    test('dispose stops saving and retrying for good', async (t) => {
+      t.mock.timers.enable({ apis: ['setTimeout'] });
+      const srv = memoryServer({ xp: 0 });
+      const A = tab(srv);
+      A.S = (await A.client.load()).state;
+      A.client.save();
+      A.client.dispose();
+      t.mock.timers.tick(60_000);
+      await A.client.flush();
+      assert.equal(A.client.flushOnExit(), false);
+      assert.equal(srv.puts.length, 0);
+      assert.equal(A.client.canSave, false);
+    });
+
     test('a client whose first GET failed never reads, reloads or saves', async (t) => {
       t.mock.timers.enable({ apis: ['setTimeout'] });
       const srv = memoryServer({ xp: 1 });
