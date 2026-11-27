@@ -359,6 +359,29 @@ describe('deploy: updating the live copy', () => {
     assert.ok(!w.launchctl().includes('kickstart -k gui/501/local.thedesk.server'));
   });
 
+  test('after a failed npm ci, the next deploy installs the packages again (even though the copy already moved)', async () => {
+    const w = await deployedWorld();
+    const second = w.commit('Add a package', { 'package-lock.json': LOCK_V2 });
+    const realRun = w.deps.run;
+    w.deps.run = async (cmd, args, options) => (cmd === w.cfg.npm ? { code: 1, stdout: '', stderr: 'npm error network\n' } : realRun(cmd, args, options));
+    assert.equal(await w.run(), 1);
+    assert.equal(w.liveHead(), second, 'the copy moved before npm failed');
+    w.deps.run = realRun;
+    w.calls.length = 0;
+    assert.equal(await w.run(), 0, w.errors());
+    assert.equal(w.commands(w.cfg.npm).length, 1, 'npm ci again');
+    assert.match(w.text(), /because package-lock\.json changed/);
+    assert.equal(readDeployed(w.live).sha, second);
+  });
+
+  test('a live copy with packages but no deploy recorded gets a fresh npm ci', async () => {
+    const w = await deployedWorld();
+    fs.rmSync(deployedPath(w.live));
+    assert.equal(await w.run(), 0, w.errors());
+    assert.equal(w.commands(w.cfg.npm).length, 1);
+    assert.match(w.text(), /because no earlier deploy is recorded/);
+  });
+
   test('when The Desk does not answer after the restart, it says so and never claims it is live', async () => {
     const w = await deployedWorld();
     w.state.health = false;

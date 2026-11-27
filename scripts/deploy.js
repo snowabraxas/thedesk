@@ -9,7 +9,8 @@
 //
 //   1. No live copy yet: git worktree add --detach <live> <main>. Else refuse if the live copy has
 //      changes of its own (git status --porcelain), and otherwise git checkout --detach <main> there.
-//   2. npm ci --omit=dev in the live copy when node_modules is missing or package-lock.json changed.
+//   2. npm ci --omit=dev in the live copy when node_modules is missing or package-lock.json changed
+//      since the last deploy that went through (the one in .deployed.json).
 //   3. Write <live>/.deployed.json (gitignored): the commit, its subject and the deploy time.
 //   4. If the installed service doesn't run from the live copy yet, stop and say to run
 //      npm run service:install once. Otherwise restart it, wait for it to answer, and say what's live.
@@ -21,7 +22,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { HOST, REPO_ROOT, resolveLiveDir } from '../server/config.js';
-import { deployedPath, deployedRecord, describeDeployed, oneLine } from '../server/deployed.js';
+import { deployedPath, deployedRecord, describeDeployed, oneLine, readDeployed } from '../server/deployed.js';
 import { localTimestamp } from '../server/log-file.js';
 import { HEALTH_TIMEOUT_MS, LAUNCHCTL, launchctlArgs, readInstalledPlist, realDeps, resolveNodePath, restart, serviceConfig, shellQuote } from './service.js';
 
@@ -205,13 +206,16 @@ export async function deploy(cfg, deps, { dryRun = false } = {}) {
     }
   }
 
-  // 2. Packages: only when they could have changed.
+  // 2. Packages: only when they could have changed. The base is the last deploy that went all the
+  // way through (.deployed.json), not the live copy's HEAD: if npm ci failed last time, the copy is
+  // already on the new commit but its packages aren't, so this one installs them again.
+  const installed = exists ? readDeployed(live, { fsImpl: deps.fs }) : null;
   let why = null;
   if (!exists) why = 'a new live copy';
   else if (!deps.fs.existsSync(path.join(live, 'node_modules'))) why = 'node_modules is missing';
-  else if (oldSha === null) why = "the live copy's old commit is unknown";
-  else if (oldSha !== sha) {
-    const d = await git(['-C', repo, 'diff', '--quiet', oldSha, sha, '--', 'package-lock.json']);
+  else if (!installed) why = 'no earlier deploy is recorded';
+  else if (installed.sha !== sha) {
+    const d = await git(['-C', repo, 'diff', '--quiet', installed.sha, sha, '--', 'package-lock.json']);
     if (d.code !== 0) why = d.code === 1 ? 'package-lock.json changed' : "git couldn't tell whether package-lock.json changed";
   }
   const npmArgs = ['ci', '--omit=dev'];
