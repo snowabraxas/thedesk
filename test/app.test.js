@@ -299,9 +299,12 @@ describe('app/app.js', () => {
     assert.match(read('app.js'), /async function reloadState\(\) \{\s*if \(!ready\) return;\s*const r = await store\.reload\(\);\s*if \(r\.ok\) S = r\.state;\s*\}/);
   });
 
-  test('the Product Feed pays once per article: un-marking and re-marking does not pay again', () => {
-    assert.match(read('app.js'), /if \(toggleArticleRead\(S, id\)\.award\) award\(10, 'article read'\); else save\(\);/);
-    assert.doesNotMatch(read('app.js'), /S\.read\[id\] = Date\.now\(\)/);
+  test('the Product Feed pays once per article, across tabs too: it merges awarded on save and checks the server before paying', () => {
+    const js = read('app.js');
+    assert.match(js, /const store = createStateClient\(\{\s*getState: \(\) => S,\s*merge: mergeFeedState,/);
+    assert.match(js, /r = await readArticle\(\(\) => S, id, \{ canPay: store\.canSave, peek: \(\) => store\.peek\(\), also: reloadState \}\);[\s\S]*?if \(r\.award\) award\(10, 'article read'\); else save\(\);/);
+    assert.match(js, /if \(paying\) return;/, 'a second click while the check is on its way is ignored');
+    assert.doesNotMatch(js, /S\.read\[id\] = Date\.now\(\)/);
   });
 
   test('the "where it happened" hint hides when there are no stories', () => {

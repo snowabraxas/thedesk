@@ -8,7 +8,7 @@ import { REPO_ROOT } from '../server/config.js';
 import { isHttpsLink } from '../server/schema-common.js';
 import {
   articlesFor, autoPhase, awardText, blank, createStateClient, dayKey, esc, fmtDate, fmtDay, freshBadges, level, mentorLine,
-  moon, normalizeState, readsThisWeek, safeUrl, streak, sunTimes, themeScores, toggleArticleRead, wilaLine,
+  markArticleRead, mergeFeedState, moon, normalizeState, readArticle, readsThisWeek, safeUrl, streak, sunTimes, themeScores, toggleArticleRead, wilaLine,
 } from '../app/lib.js';
 
 const MIN = 60e3;
@@ -258,6 +258,64 @@ describe('state and progress', () => {
     toggleArticleRead(old, 'a1');
     assert.equal(toggleArticleRead(old, 'a1').award, false, 'an article read before the fix is not paid again');
     for (const bad of ['', '__proto__', null, 7]) assert.deepEqual(toggleArticleRead(blank(), bad), { read: false, award: false }, String(bad));
+  });
+
+  test('markArticleRead keeps a read article read and pays only if unpaid; canAward false never pays or records', () => {
+    const S = blank();
+    assert.deepEqual(markArticleRead(S, 'a1', { now: 1 }), { read: true, award: true });
+    assert.deepEqual(markArticleRead(S, 'a1', { now: 2 }), { read: true, award: false });
+    assert.deepEqual([S.read, S.awarded], [{ a1: 1 }, { a1: 1 }]);
+    const T = blank();
+    assert.deepEqual(markArticleRead(T, 'a2', { canAward: false }), { read: true, award: false });
+    assert.deepEqual(T.awarded, {});
+  });
+
+  test('mergeFeedState: awarded becomes the union; everything else stays this tab\'s', () => {
+    const local = { ...blank(), xp: 30, read: { a2: 2 }, awarded: { a2: 2 } };
+    const server = { ...blank(), xp: 10, read: { a1: 1 }, awarded: { a1: 1, a2: 9 }, notes: [{ id: 'n' }] };
+    assert.equal(mergeFeedState(local, server), local);
+    assert.deepEqual(local, { ...blank(), xp: 30, read: { a2: 2 }, awarded: { a2: 2, a1: 1 } });
+    for (const odd of [null, {}, { awarded: [] }]) assert.deepEqual(mergeFeedState(blank(), odd).awarded, {});
+    const bare = { read: {} };
+    mergeFeedState(bare, JSON.parse('{"awarded": {"__proto__": 1, "a3": 3}}'));
+    assert.deepEqual(bare.awarded, { a3: 3 });
+    assert.equal(Object.getPrototypeOf(bare.awarded), Object.prototype);
+  });
+
+  describe('readArticle (checks the server before paying)', () => {
+    const peekOf = (state, calls = []) => async () => { calls.push('peek'); return { ok: true, state }; };
+    test("pays when the server hasn't, and runs also() alongside", async () => {
+      const S = blank();
+      const calls = [];
+      assert.deepEqual(await readArticle(() => S, 'a1', { peek: peekOf(blank(), calls), also: async () => calls.push('also') }), { read: true, award: true });
+      assert.deepEqual(calls.sort(), ['also', 'peek']);
+    });
+    test('does not pay when another tab already did', async () => {
+      const S = blank();
+      assert.deepEqual(await readArticle(() => S, 'a1', { peek: peekOf({ awarded: { a1: 1 } }) }), { read: true, award: false });
+      assert.ok(S.awarded.a1);
+    });
+    test("marks read without paying or recording when the server's copy can't be read", async () => {
+      const S = blank();
+      assert.deepEqual(await readArticle(() => S, 'a1', { peek: async () => ({ ok: false }) }), { read: true, award: false });
+      assert.deepEqual(S.awarded, {});
+    });
+    test('asks nothing when it would not pay: un-marking, already paid, or saving paused', async () => {
+      const calls = [];
+      const peek = peekOf(blank(), calls);
+      const S = normalizeState({ read: { a1: 1 } });
+      assert.deepEqual(await readArticle(() => S, 'a1', { peek }), { read: false, award: false });
+      assert.deepEqual(await readArticle(() => S, 'a1', { peek }), { read: true, award: false });
+      assert.deepEqual(await readArticle(() => blank(), 'a9', { canPay: false, peek }), { read: true, award: false });
+      assert.deepEqual(calls, []);
+    });
+    test('a reload during the check that already has it read keeps it read, never un-marks', async () => {
+      let S = blank();
+      const fresh = normalizeState({ read: { a1: 5 }, awarded: { a1: 5 }, xp: 10 });
+      const r = await readArticle(() => S, 'a1', { peek: async () => ({ ok: true, state: fresh }), also: async () => { S = fresh; } });
+      assert.deepEqual(r, { read: true, award: false });
+      assert.deepEqual(fresh.read, { a1: 5 });
+    });
   });
 
   test('level goes up every 100 XP', () => {

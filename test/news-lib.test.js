@@ -461,6 +461,14 @@ describe('readStory (checks the server before paying)', () => {
     assert.deepEqual(calls, []);
   });
 
+  test('a reload during the check that already has the story read keeps it read, never un-marks', async () => {
+    let N = blankNewsState();
+    const fresh = normalizeNewsState({ read: { [KEY]: 5 }, awarded: { [KEY]: 5 } });
+    const r = await readStory(() => N, KEY, { peek: async () => { N = fresh; return { ok: true, state: fresh }; } });
+    assert.deepEqual(r, { read: true, award: false });
+    assert.deepEqual(fresh.read, { [KEY]: 5 });
+  });
+
   test('uses the state the page holds after the check (a reload may have swapped it)', async () => {
     let N = blankNewsState();
     const fresh = normalizeNewsState({ awarded: { '2026-12-07/s9': 1 } });

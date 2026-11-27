@@ -107,22 +107,64 @@ export function normalizeState(raw) {
   return S;
 }
 
+const isArticleId = (id) => typeof id === 'string' && id !== '' && id !== '__proto__';
+
 /**
  * Marks a Product Feed article read, or unread if it was read. Reading pays XP once per article,
  * ever: the id goes into `awarded` the first time, so un-marking and re-marking never pays twice.
  * @returns {{ read: boolean, award: boolean }} award: pay the XP now.
  */
 export function toggleArticleRead(S, id, now = Date.now()) {
-  if (typeof id !== 'string' || id === '' || id === '__proto__') return { read: false, award: false };
+  if (!isArticleId(id)) return { read: false, award: false };
   if (Object.hasOwn(S.read, id)) {
     delete S.read[id];
     return { read: false, award: false };
   }
-  S.read[id] = now;
+  return markArticleRead(S, id, { now });
+}
+
+/** Marks an article read (it stays read if it already was) and pays if it hasn't been paid. canAward false: never pays or records. */
+export function markArticleRead(S, id, { now = Date.now(), canAward = true } = {}) {
+  if (!isArticleId(id)) return { read: false, award: false };
+  if (!Object.hasOwn(S.read, id)) S.read[id] = now;
   if (!isPlainObject(S.awarded)) S.awarded = {};
-  const award = !Object.hasOwn(S.awarded, id);
+  const award = canAward && !Object.hasOwn(S.awarded, id);
   if (award) S.awarded[id] = now;
   return { read: true, award };
+}
+
+/**
+ * Product Feed's merge before each save (and before paying): `awarded` becomes the union of this
+ * tab's and the server's, so a tab that loaded earlier can never erase another tab's payment.
+ * Everything else stays this tab's, as before.
+ * @returns the local state, changed in place
+ */
+export function mergeFeedState(local, server) {
+  if (!isPlainObject(local.awarded)) local.awarded = {};
+  const theirs = isPlainObject(server) && isPlainObject(server.awarded) ? server.awarded : {};
+  for (const [id, time] of Object.entries(theirs)) if (id !== '__proto__' && !Object.hasOwn(local.awarded, id)) local.awarded[id] = time;
+  return local;
+}
+
+/**
+ * Marks an article read or unread like toggleArticleRead, but before paying it checks the server's
+ * copy (peek), so an article another tab already paid for doesn't pay again here; also() runs
+ * alongside it (the page reloads its state when nothing is waiting to be saved, so the XP is added
+ * to the latest total). Read or unread is decided when Snow clicks, and getState returns the state
+ * the page holds after the check. If the copy can't be read, the article is marked read without paying.
+ * @returns {Promise<{ read: boolean, award: boolean }>}
+ */
+export async function readArticle(getState, id, { canPay = true, peek, also = async () => {} }) {
+  if (!isArticleId(id)) return { read: false, award: false };
+  const S = getState();
+  if (Object.hasOwn(S.read, id)) return toggleArticleRead(S, id);
+  let pay = canPay && !(isPlainObject(S.awarded) && Object.hasOwn(S.awarded, id));
+  if (pay) {
+    const [server] = await Promise.all([peek(), also()]);
+    if (server && server.ok) mergeFeedState(getState(), server.state);
+    else pay = false;
+  }
+  return markArticleRead(getState(), id, { canAward: pay });
 }
 
 /**

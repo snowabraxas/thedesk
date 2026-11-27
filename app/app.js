@@ -4,7 +4,7 @@
 import {
   PHASE_LABEL, WEEK_GOAL, BADGES, articlesFor, autoPhase, awardText, blank, cnt, createStateClient, dayKey, esc, fmtDate, fmtDay,
   freshBadges, level as levelFor, mentorLine, moon, moonPath, readsThisWeek as readsSince, safeUrl,
-  streak as streakOf, themeScores as scoresFor, toggleArticleRead, uid, wilaLine,
+  mergeFeedState, readArticle, streak as streakOf, themeScores as scoresFor, uid, wilaLine,
 } from './lib.js';
 import { createNewsPage } from './news.js';
 
@@ -51,8 +51,11 @@ let feed = { articles: [], themes: [] };
 // Nothing that depends on Snow's state is drawn until the first GET /api/state has finished,
 // and the store won't save unless that GET worked, so a blank state never overwrites hers.
 let ready = false;
+// Each save first folds in the server's copy (the union of `awarded`), so a second tab that loaded
+// earlier can't erase a payment made here.
 const store = createStateClient({
   getState: () => S,
+  merge: mergeFeedState,
   onSaveFail: () => toast("I couldn't save that just now. I'll keep it here and keep trying."),
 });
 const save = () => store.save();
@@ -322,12 +325,20 @@ $('#folderForm').addEventListener('submit', e => {
   first ? award(5, 'folder made') : save();
   renderFeed();
 });
-$('#list').addEventListener('click', e => {
+let paying = false; // a read is waiting on the server check before it pays
+$('#list').addEventListener('click', async e => {
   const t = e.target.closest('button'); if (!t) return;
   if (t.dataset.read) {
     const id = t.dataset.read;
-    // Pays once per article, ever: un-marking and re-marking doesn't pay again.
-    if (toggleArticleRead(S, id).award) award(10, 'article read'); else save();
+    if (paying) return;
+    // Pays once per article, ever: un-marking and re-marking doesn't pay again. Before paying it
+    // checks the server's copy (another tab may have paid already) and reloads the state if nothing
+    // is waiting to be saved, so the XP goes onto the latest total.
+    let r;
+    paying = true;
+    try { r = await readArticle(() => S, id, { canPay: store.canSave, peek: () => store.peek(), also: reloadState }); }
+    finally { paying = false; }
+    if (r.award) award(10, 'article read'); else save();
     renderFeed(); refocus(attrSel('data-read', id), '#listTitle');
   } else if (t.dataset.notes) openDrawer(t.dataset.notes);
 });

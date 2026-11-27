@@ -130,7 +130,14 @@ export function toggleRead(N, key, { now = Date.now(), canAward = true } = {}) {
     delete N.read[key];
     return { read: false, award: false };
   }
-  N.read[key] = now;
+  return markStoryRead(N, key, { now, canAward });
+}
+
+/** Marks a story read (it stays read if it already was) and pays if it hasn't been paid. Same rules as toggleRead. */
+export function markStoryRead(N, key, { now = Date.now(), canAward = true } = {}) {
+  if (!isStoryKey(key)) return { read: false, award: false };
+  if (!has(N.read, key)) N.read[key] = now;
+  if (!isPlainObject(N.awarded)) N.awarded = {};
   const award = canAward && !has(N.awarded, key);
   if (award) N.awarded[key] = now;
   return { read: true, award };
@@ -138,21 +145,24 @@ export function toggleRead(N, key, { now = Date.now(), canAward = true } = {}) {
 
 /**
  * Marks a story read or unread like toggleRead, but before paying it checks the server's copy, so a
- * story another tab already paid for doesn't pay again here. getState returns the current state
- * (the page may swap it for a reloaded one while the check is on its way). peek() reads the
- * server's copy ({ ok, state }); also() runs alongside it (the page picks up the latest XP). If the
- * copy can't be read, the story is marked read without paying.
+ * story another tab already paid for doesn't pay again here. Read or unread is decided when Snow
+ * clicks: a reload that lands during the check can't turn "Mark read" into an un-mark. getState
+ * returns the current state (the page may swap it for a reloaded one while the check is on its way).
+ * peek() reads the server's copy ({ ok, state }); also() runs alongside it (the page picks up the
+ * latest XP). If the copy can't be read, the story is marked read without paying.
  * @returns {Promise<{ read: boolean, award: boolean }>}
  */
 export async function readStory(getState, key, { canPay = true, peek, also = async () => {} }) {
+  if (!isStoryKey(key)) return { read: false, award: false };
   const N = getState();
-  let pay = canPay;
-  if (pay && isStoryKey(key) && !has(N.read, key) && !has(N.awarded, key)) {
+  if (has(N.read, key)) return toggleRead(N, key);
+  let pay = canPay && !has(N.awarded, key);
+  if (pay) {
     const [server] = await Promise.all([peek(), also()]);
     if (server && server.ok) mergeNewsState(getState(), server.state);
     else pay = false;
   }
-  return toggleRead(getState(), key, { canAward: pay });
+  return markStoryRead(getState(), key, { canAward: pay });
 }
 
 /* ================= reading time ================= */
