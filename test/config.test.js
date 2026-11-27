@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import path from 'node:path';
 import { describe, test } from 'node:test';
-import { DEFAULT_PORT, breakingPath, expandHome, feedPath, newsDir, newsPath, resolveDeskHome, resolvePort } from '../server/config.js';
+import { DEFAULT_PORT, breakingPath, expandHome, feedPath, newsDir, newsPath, resolveDeskHome, resolveLiveDir, resolvePort } from '../server/config.js';
 
 describe('config', () => {
   test('PORT defaults to 4321', () => {
@@ -33,6 +33,19 @@ describe('config', () => {
 
   test('the Product Feed lives at desks/product-feed/feed.json', () => {
     assert.equal(feedPath('/h'), path.join('/h', 'desks', 'product-feed', 'feed.json'));
+  });
+
+  test('the live copy defaults to ~/the-desk-live, outside ~/Documents and ~/agent-house', () => {
+    const live = resolveLiveDir({}, '/Users/someone');
+    assert.equal(live, '/Users/someone/the-desk-live');
+    assert.ok(!live.startsWith('/Users/someone/Documents/'));
+    assert.ok(!live.startsWith('/Users/someone/agent-house/'));
+  });
+
+  test('DESK_LIVE_DIR moves the live copy, and a leading ~ is expanded', () => {
+    assert.equal(resolveLiveDir({ DESK_LIVE_DIR: '/tmp/live' }, '/Users/someone'), '/tmp/live');
+    assert.equal(resolveLiveDir({ DESK_LIVE_DIR: '~/x/live' }, '/Users/someone'), '/Users/someone/x/live');
+    assert.equal(resolveLiveDir({ DESK_LIVE_DIR: '  ' }, '/Users/someone'), '/Users/someone/the-desk-live');
   });
 
   test('News lives at desks/news: news.json and breaking.json', () => {

@@ -16,6 +16,8 @@ You need Node 22 or newer (on the Mac mini it's in `/opt/homebrew/bin`).
 npm install            # once, after cloning or pulling new dependencies
 npm run dev            # The Desk at http://localhost:4321, restarts when code changes
                        # (if the always-on service has 4321: PORT=4322 npm run dev)
+npm run preview        # The Desk at http://localhost:3000 on its own data in .desk-preview/
+                       # (the desktop app's Preview button runs this; never touches ~/agent-house)
 npm test               # all tests
 npm run validate-feed  # checks ~/agent-house/desks/product-feed/feed.json
 npm run validate-feed -- path/to/feed.json   # or any other edition
@@ -29,23 +31,34 @@ The server only listens on this Mac (127.0.0.1). `PORT` changes the port and `DE
 
 ## Always on
 
-The Desk can run by itself in the background. macOS starts it when you log in and starts it again if it ever stops, so http://localhost:4321 is simply there.
+The Desk can run by itself in the background. macOS starts it when you log in and starts it again if it ever stops, so http://localhost:4321 is simply there. It runs from the live copy, `~/the-desk-live` (see Deploying below), never from the folder you work in.
 
 ```
-npm run service:install     # set it up and start it (once)
-npm run service:status      # is it running, does the page answer, where's the log
+npm run service:install     # set it up and start it (once, after the first npm run deploy has finished)
+npm run service:status      # is it running, which commit is live, does the page answer, where's the log
 npm run service:stop        # stop it (it comes back with service:start, or at your next login)
 npm run service:start       # start it again
-npm run service:restart     # restart it, for example after changing server code
+npm run service:restart     # restart it (npm run deploy does this for you)
 npm run service:uninstall   # remove it (your reads, notes and logs stay in ~/agent-house)
 ```
 
 `npm run service:install -- --dry-run` shows what install would do, without changing anything. Stop any copy you started in a Terminal (Ctrl+C) before installing; install won't take a port that's in use.
 
-- **The log** is `~/agent-house/logs/the-desk.log`. Past 5 MB, the older part moves to `the-desk.log.1`.
+- **The log** is `~/agent-house/logs/the-desk.log`. Every line starts with the time (`2026-11-28T09:14:03-05:00`). It says which commit is live when it starts, and `The Desk is stopping (SIGTERM)` when it stops. Past 5 MB, the older part moves to `the-desk.log.1`.
 - **After restarting the Mac**, it starts when you log in (or by itself, if the Mac logs you in automatically).
-- **macOS privacy.** This folder is inside Documents, which macOS protects. If macOS asks whether "node" may access your Documents folder, click Allow. If install says node isn't allowed, follow the steps it prints (Full Disk Access for `/opt/homebrew/bin/node`; note that this lets every node program on the Mac read everything). After Homebrew upgrades Node, macOS may ask again.
+- **macOS privacy.** The live copy sits outside Documents, so macOS has nothing to ask. (If install ever says node isn't allowed, follow the steps it prints.)
 - **Background Items Added**: macOS shows this notice when it's installed. That's The Desk; leave it switched on in System Settings > General > Login Items & Extensions (it may be listed as "node").
-- **Moved this folder?** Run `npm run service:install` again (`service:status` tells you when it's needed).
+- **Settings out of date?** `service:status` says when to run `npm run service:install` again.
 
-**Working on the code while it runs.** The service runs the code in this folder on port 4321. Run your own copy next to it with `PORT=4322 npm run dev` (http://localhost:4322). Changes in `app/` show up in both on reload; after changing `server/` code, run `npm run service:restart` so the always-on copy picks it up.
+**Working on the code while it runs.** Nothing you change here, on any branch, reaches port 4321 until it's committed to `main` and deployed. Run your own copy next to it with `npm run preview` (http://localhost:3000, its own data) or `PORT=4322 npm run dev` (http://localhost:4322, your real data, so don't save from two tabs at once).
+
+## Deploying
+
+The always-on Desk runs from `~/the-desk-live`, a copy of this repo that only ever holds committed `main`. To put the latest `main` live:
+
+```
+npm run deploy -- --dry-run   # see every step first, changing nothing
+npm run deploy                # update ~/the-desk-live to main and restart The Desk
+```
+
+It ends with `The Desk is live at http://localhost:4321 on main @ 1a2b3c4 "Subject"`. It takes the committed `main`, never this folder's files, so uncommitted work and story branches stay out. It installs packages only when `package-lock.json` changed, in a folder beside the live copy first, so a failed install changes nothing. It refuses if someone edited the live copy by hand, and it won't run from inside the live copy. The very first time, it makes `~/the-desk-live` and asks you to run `npm run service:install` once to move the service there. Details: `docs/notes/sprint-2-build.md`.

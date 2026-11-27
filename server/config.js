@@ -32,6 +32,16 @@ export function resolveDeskHome(env = process.env, home = os.homedir()) {
   return path.resolve(raw ? expandHome(raw, home) : path.join(home, 'agent-house'));
 }
 
+// The live copy: the folder the always-on service runs The Desk from. A git worktree of this repo
+// that only ever holds committed main (npm run deploy moves it). It sits outside ~/Documents, which
+// macOS guards, and outside ~/agent-house, where the desk agents write, so neither can touch the code.
+// DESK_LIVE_DIR moves it (the tests use a temp folder).
+export const LIVE_DIR_NAME = 'the-desk-live';
+export function resolveLiveDir(env = process.env, home = os.homedir()) {
+  const raw = (env.DESK_LIVE_DIR || '').trim();
+  return path.resolve(raw ? expandHome(raw, home) : path.join(home, LIVE_DIR_NAME));
+}
+
 export function resolvePort(env = process.env) {
   const raw = (env.PORT ?? '').trim();
   if (raw === '') return DEFAULT_PORT;
