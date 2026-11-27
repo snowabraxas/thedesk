@@ -1003,16 +1003,41 @@ describe('runCommand (the real runner deploy and the service use)', () => {
     assert.ok(await gone(Number(fs.readFileSync(pidFile, 'utf8'))), 'no orphan left');
   });
 
-  test("after a signal the caller can't carry on: the finished command never settles and nothing new starts", async () => {
+  test("after a signal the caller can't carry on: a command that finishes during the wait never settles", async () => {
+    // Two commands: the first exits on SIGINT at once, the second ignores it for the whole 2 s wait.
+    // The caller waits on the first only; if that settled, it would carry on (and could put the
+    // handler back, swallowing the re-raise) while the second is still being waited for.
     const dir = tempDir();
     const ready = path.join(dir, 'ready');
+    const pidFile = path.join(dir, 'sleep.pid');
     const marker = path.join(dir, 'carried-on');
-    const script = `process.on('SIGINT', () => process.exit(0)); require('fs').writeFileSync(${JSON.stringify(ready)}, 'x'); setInterval(() => {}, 1000);`;
-    const after = `(await import('node:fs')).writeFileSync(${JSON.stringify(marker)}, 'yes');\nawait runCommand('/bin/sleep', ['30']);`;
-    const { how, took } = await stopWrapper({ args: [process.execPath, '-e', script], readyFile: ready, sig: 'SIGINT', after });
-    assert.equal(how, 'SIGINT', 'the re-raised SIGINT stopped it, not swallowed by a handler put back');
-    assert.ok(took < 4000, `${took} ms`);
-    assert.equal(fs.existsSync(marker), false, 'the code after runCommand never ran');
+    const wrapper = path.join(dir, 'wrapper.mjs');
+    const serviceUrl = pathToFileURL(path.join(REPO_ROOT, 'scripts', 'service.js')).href;
+    const quick = `process.on('SIGINT', () => process.exit(0)); require('fs').writeFileSync(${JSON.stringify(ready)}, 'x'); setInterval(() => {}, 1000);`;
+    fs.writeFileSync(
+      wrapper,
+      [
+        "import fs from 'node:fs';",
+        `import { runCommand } from ${JSON.stringify(serviceUrl)};`,
+        `const quick = runCommand(process.execPath, ['-e', ${JSON.stringify(quick)}], { timeoutMs: 60000 });`,
+        `runCommand('/bin/sh', ['-c', ${JSON.stringify(`trap '' INT; echo $$ > '${pidFile}'; exec sleep 30`)}], { timeoutMs: 60000 });`,
+        'await quick;',
+        `fs.writeFileSync(${JSON.stringify(marker)}, 'yes');`,
+        "await runCommand('/bin/sleep', ['30'], { timeoutMs: 60000 });",
+      ].join('\n'),
+    );
+    const child = spawn(process.execPath, [wrapper], { stdio: 'ignore' });
+    try {
+      for (let i = 0; i < 80 && !(fs.existsSync(ready) && fs.existsSync(pidFile)); i++) await new Promise((resolve) => setTimeout(resolve, 100));
+      const pid = Number(fs.readFileSync(pidFile, 'utf8'));
+      const ended = new Promise((resolve) => child.on('exit', (code, signal) => resolve(signal || code)));
+      child.kill('SIGINT');
+      assert.equal(await ended, 'SIGINT', 'the re-raised SIGINT stopped it');
+      assert.equal(fs.existsSync(marker), false, 'the code after the first runCommand never ran');
+      assert.ok(await gone(pid), 'the command that ignored SIGINT was SIGKILLed');
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL');
+    }
   });
 
   test('a second signal while it waits stops the commands and this process at once', async () => {
