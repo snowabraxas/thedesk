@@ -15,6 +15,7 @@ You need Node 22 or newer (on the Mac mini it's in `/opt/homebrew/bin`).
 ```
 npm install            # once, after cloning or pulling new dependencies
 npm run dev            # The Desk at http://localhost:4321, restarts when code changes
+                       # (if the always-on service has 4321: PORT=4322 npm run dev)
 npm test               # all tests
 npm run validate-feed  # checks ~/agent-house/desks/product-feed/feed.json
 npm run validate-feed -- path/to/feed.json   # or any other edition
@@ -37,7 +38,7 @@ npm run service:restart     # restart it, for example after changing server code
 npm run service:uninstall   # remove it (your reads, notes and logs stay in ~/agent-house)
 ```
 
-`npm run service:install -- --dry-run` shows what install would do, without changing anything.
+`npm run service:install -- --dry-run` shows what install would do, without changing anything. Stop any copy you started in a Terminal (Ctrl+C) before installing; install won't take a port that's in use.
 
 - **The log** is `~/agent-house/logs/the-desk.log`. Past 5 MB, the older part moves to `the-desk.log.1`.
 - **After restarting the Mac**, it starts when you log in (or by itself, if the Mac logs you in automatically).

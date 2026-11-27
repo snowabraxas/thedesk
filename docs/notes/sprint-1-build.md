@@ -24,7 +24,8 @@ data/schema/    feed.schema.json (the agent <-> Desk contract)
 - Listens on `127.0.0.1:4321` only (Snow's notes never leave the machine). `PORT` and `DESK_HOME` (default `~/agent-house`) can be overridden; tests point `DESK_HOME` at a temp folder.
 - Rejects requests whose `Host` header isn't `localhost:<port>` or `127.0.0.1:<port>` (blocks DNS-rebinding pages from reading Snow's notes). Sends no CORS headers, so other sites can't `PUT` state.
 - Static files from `app/` only, with path-traversal protection.
-- `GET /api/feed`: the newest valid edition. Order of preference: `desks/product-feed/feed.json`, then the newest valid file in `editions/`, then `prototype/feed.json` marked `"sample": true`. An invalid file is logged once (with the reasons) when it changes, not on every request.
+- `GET /api/feed`: the newest valid edition. Order of preference: `desks/product-feed/feed.json`, then the last good `feed.json` kept in memory, then the newest valid file in `editions/`, then `prototype/feed.json` marked `"sample": true` (only the server may set `sample`; it's stripped from agent files). An invalid file is logged once (with the reasons) when it changes, not on every request. The `X-Desk-Feed-Source` header says which one was served: `live`, `last-good`, `edition:<file>` or `sample`.
+- The validator (`server/feed-schema.js`, shared by `npm run validate-feed` and the server) adds two rules on top of the schema: article and theme ids are unique, and every article theme is listed in `themes`.
 - `GET /api/state` / `PUT /api/state`: `desks/product-feed/state.json`. PUT accepts a JSON object up to 1 MB, writes to a temp file in the same folder, fsyncs, then renames, so a crash never leaves half a file.
 
 ## Front end
@@ -33,6 +34,22 @@ data/schema/    feed.schema.json (the agent <-> Desk contract)
 - "Talk with Wila" (article button and drawer tab) and "Ask Wila what connects these" are hidden until S6.
 - The "sample picks" line under the edition title shows only when the server marks the feed as a sample.
 - Pure logic (sun times, phase, escaping, https check) lives in a small module the browser and the tests both import.
+
+## Always on (S4)
+
+- Per-user LaunchAgent `local.thedesk.server` in `~/Library/LaunchAgents`, managed by `scripts/service.js` (`npm run service:*`). RunAtLoad + KeepAlive true + ThrottleInterval 10: it restarts in under a second after a stop or crash, and a crash loop retries every 10 s.
+- Runs `/opt/homebrew/bin/node server/index.js` from this folder with `DESK_HOME=~/agent-house`, logging to `~/agent-house/logs/the-desk.log` (one 5 MB rotation). Installed 27 Nov 2026 with Snow's OK; macOS didn't block node from reading ~/Documents.
+- Verified: kill, kill -9, stop/start (same path as a login), restart. Not yet verified: a real reboot (Snow).
+
+## Follow-ups (not in Sprint 1)
+
+- **The service runs whatever is checked out here.** Switching to a story branch changes Snow's live Desk (`app/` on reload, `server/` on the next restart). Option: run the service from a separate `main` worktree outside ~/Documents. Needs Snow / lead PM.
+- The server log has no timestamps and no "stopping" line; add both (makes reboot checks provable).
+- "Last good" edition lives only in memory; after a restart with a bad `feed.json` and no `editions/`, the sample shows. Fine once S5 archives editions; could persist to disk.
+- Validator accepts `https://user@host/` links; consider rejecting userinfo.
+- Un-marking and re-marking an article read grants XP again (inherited from the prototype).
+- Design list from the S2 baseline (needs Snow's OK before any change): hotspot labels clipped and overlapping at 390 px, tap targets under 44 px (hotspots, Wila orb at 390, Preview chip, card buttons), a few texts under 4.5:1 contrast, "Save ▾" sits 8 px high, folder input cut off at 1440, shelves scroll sideways at 390 with no hint, empty space under Wila at 390.
+- Favicon: lamp is live; a leaf option is in `docs/screens/favicon-option-b-leaf.svg` if Snow prefers it.
 
 ## Branches
 
