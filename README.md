@@ -34,7 +34,7 @@ What the desk pages talk to. Everything is JSON, never cached, and only answers 
 | Route | What it does |
 | --- | --- |
 | `GET /api/feed` | Product Feed's edition. The `X-Desk-Feed-Source` header says which one: `live` (`product-feed/feed.json`), `last-good` (the last valid one, kept in `product-feed/last-good.json`), `edition:<YYYY-MM-DD.json>` (from `product-feed/editions/`) or `sample` (marked `"sample": true`). |
-| `GET` / `PUT /api/state` | Snow's Product Feed state (reads, saves, folders, notes, XP, streak, badges) in `product-feed/state.json`. |
+| `GET` / `PUT /api/state` | Snow's Product Feed state (reads, saves, folders, notes, XP, streak, badges, and `awarded`, the articles already paid XP) in `product-feed/state.json`. |
 | `GET /api/news` | The News morning edition, in the same order: `X-Desk-News-Source` is `live` (`news/news.json`), `last-good` (`news/last-good.json`), `edition:<file>` (`news/editions/`) or `sample` (`data/samples/news.sample.json`, marked `"sample": true`). |
 | `GET /api/breaking` | `{"breaking": {...}}` when `news/breaking.json` is valid and from today in Toronto, otherwise `{"breaking": null}`. |
 | `GET` / `PUT /api/news/state` | Snow's News state (`read`, `dismissed`, `shelfOpen`, and `awarded`, the stories already paid XP) in `news/state.json`. |
