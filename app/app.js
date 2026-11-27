@@ -151,7 +151,7 @@ function route() {
   $('#feed').hidden = !inFeed; $('#room').hidden = inFeed;
   $('#backdrop').dataset.view = inFeed ? 'feed' : 'room';
   // The drawer lives outside the feed (so it stays pinned to the screen): close it when leaving.
-  if (!inFeed) { $('#drawer').hidden = true; $('#scrim').hidden = true; }
+  if (!inFeed) { $('#drawer').hidden = true; $('#scrim').hidden = true; setBehindDrawer(false); }
   if (inFeed) { renderScene(); if (ready) renderFeed(); window.scrollTo(0, 0); }
   else { requestAnimationFrame(() => requestAnimationFrame(() => $('#frame').classList.remove('zoom'))); renderRoom(); }
 }
@@ -292,7 +292,13 @@ function finishRename(inp, keep) {
   if (keep && f && v) { f.name = v; save(); }
   editing = null; renderFeed(); refocus(attrSel('data-edit', id));
 }
-$('#shelfList').addEventListener('keydown', e => { const inp = e.target.closest('[data-rename]'); if (!inp) return; if (e.key === 'Enter') finishRename(inp, true); if (e.key === 'Escape') finishRename(inp, false); });
+// Enter or Escape ends a rename. finishRename moves focus to the pencil button during this key press,
+// so the key's default action is cancelled: otherwise the same Enter presses the pencil and reopens the box.
+$('#shelfList').addEventListener('keydown', e => {
+  const inp = e.target.closest('[data-rename]'); if (!inp) return;
+  if (e.key === 'Enter') { e.preventDefault(); finishRename(inp, true); }
+  else if (e.key === 'Escape') { e.preventDefault(); finishRename(inp, false); }
+});
 $('#shelfList').addEventListener('focusout', e => { const inp = e.target.closest('[data-rename]'); if (inp && editing) finishRename(inp, true); });
 $('#folderForm').addEventListener('submit', e => {
   e.preventDefault(); if (!ready) return;
@@ -353,13 +359,29 @@ function openDrawer(id) {
   $('#dSrc').textContent = a.source + (a.date ? ' · ' + fmtDate(a.date) : '');
   $('#dTitle').textContent = a.title;
   $('#drawer').hidden = false; $('#scrim').hidden = false;
+  setBehindDrawer(true);
   renderNotes();
   $('#noteText').focus({ preventScroll: true });
 }
 function closeDrawer() {
-  $('#drawer').hidden = true; $('#scrim').hidden = true; renderFeed();
+  $('#drawer').hidden = true; $('#scrim').hidden = true; setBehindDrawer(false); renderFeed();
   refocus(attrSel('data-notes', openArticle));
 }
+// While the drawer is open, the page behind the scrim can't be reached by mouse, keyboard or screen reader.
+function setBehindDrawer(off) { $('#feed').inert = off; $('#room').inert = off; }
+// Tab and Shift+Tab cycle through the drawer (and a toast's Undo, which lives outside it).
+function drawerStops() {
+  const inside = [...$('#drawer').querySelectorAll('button, textarea, input, a[href]')].filter(el => !el.disabled && el.getClientRects().length);
+  const t = $('#toast');
+  return t.classList.contains('on') ? [...inside, ...t.querySelectorAll('button')] : inside;
+}
+document.addEventListener('keydown', e => {
+  if (e.key !== 'Tab' || $('#drawer').hidden) return;
+  const stops = drawerStops(); if (!stops.length) return;
+  const i = stops.indexOf(document.activeElement);
+  const wrap = e.shiftKey ? i <= 0 : (i < 0 || i === stops.length - 1);
+  if (wrap) { e.preventDefault(); stops[e.shiftKey ? stops.length - 1 : 0].focus(); }
+});
 function renderNotes() {
   const list = S.notes.filter(n => n.a === openArticle).sort((a, b) => b.ts - a.ts);
   $('#noteList').innerHTML = list.length ? list.map(n => `<li><p>${esc(n.text)}</p><div class="nrow"><span>${esc(noteTime(n.ts))}</span><button data-dn="${esc(n.id)}">Delete</button></div></li>`).join('') : `<li class="none tiny">No notes on this one yet.</li>`;
@@ -399,4 +421,7 @@ setInterval(() => { if (!preview) renderRoom(); }, 60e3);
 /* ================= start ================= */
 buildHotspots();
 route();
+// The backdrop changes light with a soft fade, but not on the first paint: opening the page shows the
+// study straight away, so the caret stays the desk's one opening motion.
+requestAnimationFrame(() => requestAnimationFrame(() => $('#backdrop').classList.add('settled')));
 Promise.all([loadState(), loadFeed()]).then(() => { ready = true; renderAll(); });

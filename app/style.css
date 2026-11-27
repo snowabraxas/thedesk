@@ -48,11 +48,13 @@ TYPE: Fredoka for names, headings and numbers; Inter for reading; Caveat for Sno
   --moss-light:#A9BD7E;
   /* Theme chips on frost. */
   --moss-chip:#DFE5C6;
+  /* A read card's frost: thinner, so it steps back (text on it still passes 4.5:1). */
+  --frost-quiet:rgba(253,252,245,.84);
   /* Extra veil behind a desk page in the two bright lights: the laptop corner of the morning and
      golden plates is light enough to pull glass text under 4.5:1 with room-veil alone. */
   --veil-boost:rgba(16,86,102,.42);
   /* Wila's orb. */
-  --orb:radial-gradient(circle at 38% 35%,#FFFBE9,#F3D2CB 45%,var(--rosy-brown) 100%);
+  --orb:radial-gradient(circle at 38% 35%,var(--beige),var(--rosy-light) 45%,var(--rosy-brown) 100%);
   --orb-glow:0 0 18px 6px rgba(211,150,140,.6);
 
   color-scheme:dark;
@@ -80,7 +82,8 @@ svg.ic{width:22px;height:22px;flex:none;fill:none;stroke:currentColor;stroke-wid
 
 /* ---------- the study behind every page ---------- */
 .backdrop{position:fixed;inset:0;z-index:0;overflow:hidden;background:var(--dark-green);pointer-events:none}
-.bd{position:absolute;inset:-14px;background-repeat:no-repeat;background-size:cover;background-position:50% 50%;filter:blur(var(--blur-room)) saturate(1.05);opacity:0;transition:opacity 1.2s ease}
+.bd{position:absolute;inset:-14px;background-repeat:no-repeat;background-size:cover;background-position:50% 50%;filter:blur(var(--blur-room)) saturate(1.05);opacity:0}
+.backdrop.settled .bd{transition:opacity 1.2s ease}
 .bd.on{opacity:1}
 .bd[data-phase=morning]{background-image:url(assets/plate-morning.webp)}
 .bd[data-phase=golden]{background-image:url(assets/plate-golden.webp)}
@@ -153,7 +156,7 @@ svg.ic{width:22px;height:22px;flex:none;fill:none;stroke:currentColor;stroke-wid
 }
 
 /* ---------- the toast (one, for the room and the feed) ---------- */
-.toast{position:fixed;left:50%;bottom:24px;transform:translate(-50%,20px);width:max-content;max-width:min(92vw,480px);min-height:52px;padding:8px 8px 8px 22px;border-radius:var(--radius-pill);background:var(--glass-deep);-webkit-backdrop-filter:blur(var(--blur-glass)) saturate(1.4);backdrop-filter:blur(var(--blur-glass)) saturate(1.4);border:1px solid var(--glass-edge);box-shadow:var(--shadow-glass);color:var(--beige);font-size:15px;line-height:1.4;opacity:0;pointer-events:none;transition:.3s;z-index:60;display:flex;gap:10px;align-items:center}
+.toast{position:fixed;left:50%;bottom:24px;transform:translate(-50%,20px);width:max-content;max-width:min(92vw,480px);min-height:52px;padding:8px 8px 8px 22px;border-radius:var(--radius-lg);background:var(--glass-deep);-webkit-backdrop-filter:blur(var(--blur-glass)) saturate(1.4);backdrop-filter:blur(var(--blur-glass)) saturate(1.4);border:1px solid var(--glass-edge);box-shadow:var(--shadow-glass);color:var(--beige);font-size:15px;line-height:1.4;opacity:0;pointer-events:none;transition:opacity .3s ease,transform .3s ease;z-index:60;display:flex;gap:10px;align-items:center}
 .toast:not(:has(button)){padding-right:22px}
 .toast.on{opacity:1;transform:translate(-50%,0);pointer-events:auto}
 .toast button{flex:none;min-height:44px;padding:0 16px;border-radius:var(--radius-pill);border:1px solid var(--glass-edge);background:var(--pill-tint);color:var(--beige);font-weight:600}
@@ -237,6 +240,11 @@ svg.ic{width:22px;height:22px;flex:none;fill:none;stroke:currentColor;stroke-wid
 .list h2:focus,.card h2:focus{outline:none}
 .list h2:focus-visible,.card h2:focus-visible{outline:3px solid var(--beige);outline-offset:4px;border-radius:6px}
 .art{position:relative;border-radius:var(--radius-lg);padding:22px 24px;display:flex;flex-direction:column;gap:12px}
+/* A read card steps back: thinner frost and a muted title. The filled "Read" button says so in words too. */
+.art.read{background:var(--frost-quiet);box-shadow:inset 0 1px 0 rgba(255,255,255,.5),0 8px 22px rgba(6,30,24,.16)}
+.art.read h3{color:var(--ink-muted)}
+/* A lighter moss box too: quieter, and it keeps the moss label over 4.5:1 on the thinner frost. */
+.art.read .why{background:rgba(131,153,88,.16)}
 /* An open Save menu must sit above the next card (each frosted card is its own layer). */
 .art:has(details[open]){z-index:4}
 .art .meta{margin:0;font-size:13px;color:var(--ink-muted)}
@@ -319,7 +327,8 @@ svg.ic{width:22px;height:22px;flex:none;fill:none;stroke:currentColor;stroke-wid
 .tabs .tab{display:inline-flex;align-items:center;min-height:36px;padding:0 16px;border-radius:var(--radius-pill);background:var(--midnight-green);color:var(--beige);font-weight:600;font-size:14px}
 .pane{flex:1;overflow:auto;padding:16px 22px 22px;display:flex;flex-direction:column;gap:12px}
 .pane textarea{width:100%;border-radius:var(--radius-md);border:1.5px solid rgba(10,51,35,.2);background:#FFFFFF;padding:12px 14px;color:var(--dark-green);font:500 20px/1.35 var(--font-hand);resize:vertical}
-.pane textarea::placeholder{color:var(--ink-muted)}
+/* The prompt is the app talking, so it's Inter; what Snow types is Caveat. */
+.pane textarea::placeholder{color:var(--ink-muted);font:400 15px/1.5 var(--font-sans)}
 .notes{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:10px}
 .notes li{background:#FFFFFF;border-radius:var(--radius-md);padding:12px 16px 6px;border:1px solid rgba(10,51,35,.1)}
 .notes li p{margin:2px 0 4px;font:500 20px/1.35 var(--font-hand);color:var(--dark-green);white-space:pre-wrap}
@@ -341,10 +350,18 @@ svg.ic{width:22px;height:22px;flex:none;fill:none;stroke:currentColor;stroke-wid
   .side{grid-column:1;grid-row:2;align-self:start}
   .badges{grid-template-columns:minmax(0,1fr)}
 }
+/* Narrow cards: the Save menu opens full width under the buttons, so it can't run off the screen. */
+@media (max-width:900px){
+  .arow{position:relative}
+  .savebox{position:static}
+  .savebox .menu{left:0;right:0;min-width:0;max-width:none}
+}
 /* A phone: the rail becomes a bottom bar and the columns stack. */
 @media (max-width:760px){
   /* The phone crop puts the brightest part of the plate behind the glance tiles. */
   .backdrop{--veil-boost:rgba(16,86,102,.5)}
+  /* Keyboard focus scrolls into view above the bottom bar, never under it. */
+  html:has(#feed:not([hidden])){scroll-padding-bottom:calc(96px + env(safe-area-inset-bottom))}
   .fwrap{grid-template-columns:minmax(0,1fr);gap:16px;padding:14px 12px calc(104px + env(safe-area-inset-bottom))}
   .rail{position:fixed;top:auto;left:12px;right:12px;bottom:calc(10px + env(safe-area-inset-bottom));z-index:30;flex-direction:row;justify-content:space-around;padding:6px 8px;background:var(--glass-deep)}
   .capsule{gap:12px;padding:12px}

@@ -144,6 +144,30 @@ describe('app/style.css', () => {
     assert.match(stripCssComments(css), /@media \(prefers-reduced-motion:reduce\)\{\*,\*::before,\*::after\{animation:none!important;transition:none!important/);
   });
 
+  test('opening the page shows the study straight away: the backdrop only fades once it has settled', () => {
+    const css = read('style.css');
+    assert.equal(rulesFor(css, '.bd').some((b) => /transition/.test(b)), false, '.bd has no transition of its own');
+    assert.ok(selectorsWith(css, /transition\s*:\s*opacity/).has('.backdrop.settled .bd'), 'the fade waits for .settled');
+    assert.match(read('app.js'), /requestAnimationFrame\(\(\) => requestAnimationFrame\(\(\) => \$\('#backdrop'\)\.classList\.add\('settled'\)\)\)/);
+  });
+
+  test('the toast only animates its fade and slide', () => {
+    for (const body of rulesFor(read('style.css'), '.toast')) {
+      const t = body.match(/transition\s*:\s*([^;}]*)/);
+      if (t) assert.equal(t[1].split(',').map((x) => x.trim().split(/\s+/)[0]).sort().join(','), 'opacity,transform');
+    }
+  });
+
+  test("Wila's orb is drawn from Lotus tokens only", () => {
+    const orb = stripCssComments(read('style.css')).match(/--orb\s*:\s*([^;]+);/)[1];
+    assert.doesNotMatch(orb, /#[0-9a-f]{3,6}\b/i, orb);
+  });
+
+  test("the note box prompt is app text (Inter); only what Snow types is in Caveat", () => {
+    const ph = rulesFor(read('style.css'), '.pane textarea::placeholder').join(';');
+    assert.match(ph, /var\(--font-sans\)/);
+  });
+
   test('buttons are at least 44px tall', () => {
     const css = read('style.css');
     const px = (body, prop) => { const m = body.match(new RegExp(`(?:^|;)\\s*${prop}\\s*:\\s*(\\d+)px`)); return m ? Number(m[1]) : 0; };
@@ -156,7 +180,26 @@ describe('app/style.css', () => {
   });
 });
 
+describe('app/index.html', () => {
+  test('the notes drawer is a modal dialog', () => {
+    assert.match(read('index.html'), /<aside class="drawer frost" id="drawer" hidden role="dialog" aria-modal="true" aria-label="Article notes">/);
+  });
+});
+
 describe('app/app.js', () => {
+  test('pressing Enter to finish a rename does not press the rename button again', () => {
+    // finishRename moves focus to the pencil during the key press; the default action must be cancelled.
+    assert.match(read('app.js'), /if \(e\.key === 'Enter'\) \{ e\.preventDefault\(\); finishRename\(inp, true\); \}/);
+  });
+
+  test('while the drawer is open, focus stays inside it and the page behind is inert', () => {
+    const js = read('app.js');
+    assert.match(js, /function setBehindDrawer\(off\) \{ \$\('#feed'\)\.inert = off; \$\('#room'\)\.inert = off; \}/);
+    assert.match(js, /setBehindDrawer\(true\);[\s\S]*renderNotes\(\);[\s\S]*\$\('#noteText'\)\.focus/);
+    assert.match(js, /\$\('#drawer'\)\.hidden = true; \$\('#scrim'\)\.hidden = true; setBehindDrawer\(false\); renderFeed\(\);/);
+    assert.match(js, /if \(e\.key !== 'Tab' \|\| \$\('#drawer'\)\.hidden\) return;/);
+  });
+
   test('XP and badge toasts say "not saved" while saving is paused', () => {
     assert.match(read('app.js'), /toast\(awardText\(\{[^}]*saved: store\.canSave \}\)\)/);
   });

@@ -118,7 +118,7 @@
 <!-- Fixed layers live directly in <body>: an ancestor with transform, filter or backdrop-filter
      (every glass and frost panel has one) would pin them to that panel instead of the screen. -->
 <div class="scrim" id="scrim" hidden></div>
-<aside class="drawer frost" id="drawer" hidden aria-label="Article notes">
+<aside class="drawer frost" id="drawer" hidden role="dialog" aria-modal="true" aria-label="Article notes">
   <header>
     <div><span class="dsrc" id="dSrc"></span><h3 id="dTitle"></h3></div>
     <button class="x" id="dClose" aria-label="Close notes"><svg class="ic" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M6 6l12 12M18 6L6 18"/></svg></button>
