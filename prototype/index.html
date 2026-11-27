@@ -1,0 +1,119 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>The Desk</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Fredoka:wght@500;600&family=Inter:wght@400;500;600&family=Caveat:wght@500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<main id="room" class="view room" aria-label="The Desk">
+  <div class="frame" id="frame">
+  <div class="stage" id="stage">
+    <img class="plate" data-phase="morning" src="assets/plate-morning.webp" alt="">
+    <img class="plate" data-phase="golden" src="assets/plate-golden.webp" alt="">
+    <img class="plate" data-phase="night" src="assets/plate-night.webp" alt="A cozy home office full of plants, with a desk under a big window">
+    <div class="hotspots" id="hotspots"></div>
+    <button class="wila" id="wilaOrb" aria-label="Talk to Wila"><span class="core"></span></button>
+  </div>
+
+    <header class="hud">
+      <div class="brand">
+        <span class="mark">The Desk</span>
+        <span class="when" id="when"></span>
+      </div>
+      <div class="chips">
+        <span class="chip" id="moonChip"></span>
+        <span class="chip" id="streakChip"></span>
+        <span class="chip lvl"><span id="lvlText">Level 1</span><span class="bar"><span id="lvlFill"></span></span></span>
+        <button class="chip btn" id="phaseBtn" title="Preview another time of day">Preview: <span id="phaseName">auto</span></button>
+      </div>
+    </header>
+
+    <aside class="dialogue" id="dialogue" aria-live="polite">
+      <div class="who"><span class="dot"></span>Wila</div>
+      <p id="wilaLine">Settling in…</p>
+      <div class="acts">
+        <button class="act primary" id="openFeedBtn">Open the Product Feed</button>
+        <button class="act" id="hideDialogue">Not now</button>
+      </div>
+    </aside>
+  </div>
+  <div class="toast" id="toast" role="status"></div>
+</main>
+
+<section id="feed" class="view feed" hidden aria-label="Product Feed">
+  <header class="fbar">
+    <button class="back" id="backBtn">&larr; The room</button>
+    <div class="ftitle">
+      <h1>Product Feed</h1>
+      <p id="fsub">Product, AI and PM</p>
+    </div>
+    <div class="fstats">
+      <div class="ring" id="weekRing" title="Reads this week"></div>
+      <div class="stat"><b id="xpText">0 XP</b><span id="lvlText2">Level 1</span></div>
+    </div>
+  </header>
+
+  <div class="fgrid">
+    <nav class="shelves" aria-label="Shelves">
+      <h2>Shelves</h2>
+      <ul id="shelfList"></ul>
+      <form id="folderForm" class="newfolder">
+        <label for="folderName">New folder</label>
+        <div class="row"><input id="folderName" maxlength="40" placeholder="e.g. Evals reading" autocomplete="off"><button>Add</button></div>
+      </form>
+    </nav>
+
+    <div class="list" id="list" aria-live="polite"></div>
+
+    <aside class="side">
+      <section class="card map">
+        <div class="cardhead"><h2>Theme map</h2><span class="hint">grows with what you read and note</span></div>
+        <div class="fig" id="mapFig"><svg id="mapSvg" role="img" aria-label="Map of the themes you have been reading"></svg></div>
+        <button class="soft" id="mapAsk">Ask Wila what connects these</button>
+        <p class="mapread" id="mapRead"></p>
+      </section>
+      <section class="card prog">
+        <div class="cardhead"><h2>Progress</h2><span class="hint" id="badgeCount"></span></div>
+        <ul class="badges" id="badges"></ul>
+      </section>
+    </aside>
+  </div>
+
+  <div class="scrim" id="scrim" hidden></div>
+  <aside class="drawer" id="drawer" hidden aria-label="Article notes and chat">
+    <header>
+      <div><span class="dsrc" id="dSrc"></span><h3 id="dTitle"></h3></div>
+      <button class="x" id="dClose" aria-label="Close">&times;</button>
+    </header>
+    <div class="tabs" role="tablist">
+      <button role="tab" id="tabNotes" aria-selected="true">Notes</button>
+      <button role="tab" id="tabChat" aria-selected="false">Talk with Wila</button>
+    </div>
+    <div class="pane" id="paneNotes">
+      <label for="noteText" class="sr">Your note</label>
+      <textarea id="noteText" rows="4" placeholder="What stuck with you? What would you try?"></textarea>
+      <div class="row end"><button class="primary" id="noteSave">Save note</button></div>
+      <ul class="notes" id="noteList"></ul>
+    </div>
+    <div class="pane" id="paneChat" hidden>
+      <div class="chat" id="chatLog"></div>
+      <form class="row" id="chatForm">
+        <label for="chatIn" class="sr">Message Wila</label>
+        <input id="chatIn" placeholder="Ask about this article…" autocomplete="off">
+        <button class="primary">Send</button>
+      </form>
+      <p class="tiny" id="chatNote"></p>
+    </div>
+  </aside>
+  <div class="toast" id="toast2" role="status"></div>
+</section>
+
+<script src="app.js"></script>
+</body>
+</html>

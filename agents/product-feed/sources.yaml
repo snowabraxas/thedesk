@@ -1,0 +1,26 @@
+# Starter reading list for the Product Feed agent.
+# Snow reviews this before S5: add, remove or reorder freely.
+sources:
+  - name: Lenny's Newsletter and Podcast
+    url: https://www.lennysnewsletter.com
+  - name: Product School blog
+    url: https://productschool.com/blog
+  - name: Mind the Product
+    url: https://www.mindtheproduct.com
+  - name: Reforge blog
+    url: https://www.reforge.com/blog
+  - name: Amplitude blog
+    url: https://amplitude.com/blog
+  - name: Braintrust blog (evals)
+    url: https://www.braintrust.dev/blog
+  - name: LogRocket product management
+    url: https://blog.logrocket.com/product-management/
+  - name: Anthropic news
+    url: https://www.anthropic.com/news
+themes_to_favour:
+  - evals
+  - agents
+  - the AI PM role
+  - how teams operate with AI
+  - AI adoption
+  - AI growth and pricing
