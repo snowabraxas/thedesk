@@ -1,11 +1,24 @@
-// /api/feed and /api/state, plus the security headers. Every test uses a temp DESK_HOME.
+// /api/feed, /api/state, /api/news, /api/breaking and /api/news/state, plus the security headers.
+// Every test uses a temp DESK_HOME.
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
 import { after, afterEach, beforeEach, describe, test } from 'node:test';
-import { APP_DIR, SAMPLE_FEED_PATH, feedPath, productFeedDir, statePath } from '../server/config.js';
+import {
+  APP_DIR,
+  REPO_ROOT,
+  SAMPLE_FEED_PATH,
+  SAMPLE_NEWS_PATH,
+  breakingPath,
+  editionsDir,
+  feedPath,
+  lastGoodPath,
+  newsPath,
+  productFeedDir,
+  statePath,
+} from '../server/config.js';
 import { CONTENT_SECURITY_POLICY, createServer } from '../server/index.js';
 import { MAX_STATE_BYTES, checkState, createStateStore } from '../server/state-store.js';
 
@@ -179,6 +192,19 @@ describe('GET /api/feed', () => {
     ({ server, port } = await start({ deskHome }));
     const res = await request(port, { path: '/api/feed' });
     assert.equal(res.headers['x-desk-feed-source'], 'edition:2026-11-27.json');
+    assert.equal(res.json.edition, '2026-11-27');
+    assert.equal(res.json.sample, undefined);
+  });
+
+  test('after a restart with a bad feed.json and no editions/, serves the last good edition kept on disk', async () => {
+    writeFeed({ ...SAMPLE, edition: '2026-11-27' });
+    assert.equal((await request(port, { path: '/api/feed' })).headers['x-desk-feed-source'], 'live');
+    await stop(server);
+    writeFeed(withHttpUrl({ ...SAMPLE, edition: '2026-11-28' }));
+    ({ server, port } = await start({ deskHome }));
+    const res = await request(port, { path: '/api/feed' });
+    assert.equal(res.status, 200);
+    assert.equal(res.headers['x-desk-feed-source'], 'last-good');
     assert.equal(res.json.edition, '2026-11-27');
     assert.equal(res.json.sample, undefined);
   });
@@ -384,6 +410,320 @@ describe('GET and PUT /api/state', () => {
   });
 });
 
+// ---- News ----------------------------------------------------------------------------------
+
+const NEWS_FIXTURE = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'test', 'fixtures', 'news', 'news.json'), 'utf8'));
+const BREAKING_FIXTURE = JSON.parse(fs.readFileSync(path.join(REPO_ROOT, 'test', 'fixtures', 'news', 'breaking.json'), 'utf8'));
+const NEWS_SAMPLE = JSON.parse(fs.readFileSync(SAMPLE_NEWS_PATH, 'utf8'));
+// Monday 7 December 2026, 3 pm in Toronto: "today" for /api/breaking in these tests.
+const NEWS_NOW = Date.parse('2026-12-07T15:00:00-05:00');
+const newsEdition = (date) => ({ ...structuredClone(NEWS_FIXTURE), edition: date });
+const brokenNews = (date) => {
+  const news = newsEdition(date);
+  news.stories[0].sources[0].url = 'http://example.com/news/test-story-one';
+  return news;
+};
+const writeJson = (file, value) => {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(`${file}.tmp`, typeof value === 'string' ? value : JSON.stringify(value));
+  fs.renameSync(`${file}.tmp`, file);
+};
+
+describe('GET /api/news', () => {
+  let deskHome;
+  let server;
+  let port;
+  beforeEach(async () => {
+    deskHome = tempHome();
+    ({ server, port } = await start({ deskHome }));
+  });
+  afterEach(() => stop(server));
+
+  test('without a news.json, serves the sample edition marked as a sample', async () => {
+    const res = await request(port, { path: '/api/news' });
+    assert.equal(res.status, 200);
+    assert.match(res.headers['content-type'], /^application\/json/);
+    assert.equal(res.headers['cache-control'], 'no-store');
+    assert.equal(res.headers['x-desk-news-source'], 'sample');
+    assert.equal(res.json.sample, true);
+    assert.deepEqual(res.json, { ...NEWS_SAMPLE, sample: true });
+    assert.equal(fs.existsSync(path.join(deskHome, 'desks')), false, 'nothing written');
+  });
+
+  test("serves the agent's valid news.json as live, never marked as a sample, and keeps a copy", async () => {
+    writeJson(newsPath(deskHome), { ...newsEdition('2026-12-07'), sample: true });
+    const res = await request(port, { path: '/api/news' });
+    assert.equal(res.status, 200);
+    assert.equal(res.headers['x-desk-news-source'], 'live');
+    assert.deepEqual(res.json, newsEdition('2026-12-07'));
+    assert.equal('sample' in res.json, false);
+    assert.deepEqual(JSON.parse(fs.readFileSync(lastGoodPath(deskHome, 'news'), 'utf8')), newsEdition('2026-12-07'));
+  });
+
+  test('a bad news.json keeps the last good edition showing, even after a restart', async () => {
+    writeJson(newsPath(deskHome), newsEdition('2026-12-07'));
+    assert.equal((await request(port, { path: '/api/news' })).headers['x-desk-news-source'], 'live');
+    writeJson(newsPath(deskHome), brokenNews('2026-12-08'));
+    const kept = await request(port, { path: '/api/news' });
+    assert.equal(kept.headers['x-desk-news-source'], 'last-good');
+    assert.equal(kept.json.edition, '2026-12-07');
+
+    await stop(server);
+    ({ server, port } = await start({ deskHome })); // a fresh server: nothing in memory
+    const res = await request(port, { path: '/api/news' });
+    assert.equal(res.status, 200);
+    assert.equal(res.headers['x-desk-news-source'], 'last-good');
+    assert.deepEqual(res.json, newsEdition('2026-12-07'));
+  });
+
+  test('with a bad news.json and no last good edition, serves the newest valid file in editions/', async () => {
+    writeJson(newsPath(deskHome), brokenNews('2026-12-08'));
+    writeJson(lastGoodPath(deskHome, 'news'), '{"desk": "news",');
+    writeJson(path.join(editionsDir(deskHome, 'news'), '2026-12-06.json'), newsEdition('2026-12-06'));
+    writeJson(path.join(editionsDir(deskHome, 'news'), '2026-12-07.json'), brokenNews('2026-12-07'));
+    const res = await request(port, { path: '/api/news' });
+    assert.equal(res.headers['x-desk-news-source'], 'edition:2026-12-06.json');
+    assert.equal(res.json.edition, '2026-12-06');
+    assert.equal(res.json.sample, undefined);
+  });
+
+  test("an invalid news.json is logged once with its reasons, not on every request", async () => {
+    await stop(server);
+    const logged = [];
+    ({ server, port } = await start({ deskHome, log: { error: (m) => logged.push(m), info() {} } }));
+    writeJson(newsPath(deskHome), brokenNews('2026-12-08'));
+    for (let i = 0; i < 3; i++) assert.equal((await request(port, { path: '/api/news' })).headers['x-desk-news-source'], 'sample');
+    assert.equal(logged.length, 1);
+    assert.match(logged[0], /news\.json isn't a valid edition, so it keeps showing the sample edition:\n {2}- stories\[0\]\.sources\[0\]\.url/);
+  });
+
+  test('HEAD answers with headers only; other methods are refused', async () => {
+    const head = await request(port, { method: 'HEAD', path: '/api/news' });
+    assert.equal(head.status, 200);
+    assert.equal(head.body, '');
+    assert.equal(head.headers['x-desk-news-source'], 'sample');
+    for (const method of ['POST', 'PUT', 'DELETE']) {
+      const res = await request(port, { method, path: '/api/news', headers: { 'content-type': 'application/json' }, body: '{}' });
+      assert.equal(res.status, 405, method);
+      assert.equal(res.headers.allow, 'GET, HEAD');
+    }
+  });
+
+  test('an unexpected error answers 500 in JSON', async () => {
+    await stop(server);
+    ({ server, port } = await start({ deskHome, newsSamplePath: path.join(deskHome, 'missing-sample.json') }));
+    const res = await request(port, { path: '/api/news' });
+    assert.equal(res.status, 500);
+    assert.deepEqual(res.json, { error: 'Something went wrong' });
+    assert.equal((await request(port, { path: '/api/feed' })).status, 200, 'Product Feed is unaffected');
+  });
+});
+
+describe('GET /api/breaking', () => {
+  let deskHome;
+  let server;
+  let port;
+  let logged;
+  beforeEach(async () => {
+    deskHome = tempHome();
+    logged = [];
+    ({ server, port } = await start({ deskHome, now: () => NEWS_NOW, log: { error: (m) => logged.push(m), info() {} } }));
+  });
+  afterEach(() => stop(server));
+
+  const breaking = () => request(port, { path: '/api/breaking' });
+
+  test("today's valid breaking.json comes back as the breaking story, with its at", async () => {
+    writeJson(breakingPath(deskHome), BREAKING_FIXTURE);
+    const res = await breaking();
+    assert.equal(res.status, 200);
+    assert.match(res.headers['content-type'], /^application\/json/);
+    assert.equal(res.headers['cache-control'], 'no-store');
+    assert.deepEqual(res.json, { breaking: BREAKING_FIXTURE });
+  });
+
+  test('missing, yesterday, tomorrow or today in UTC only: {"breaking": null}', async () => {
+    assert.deepEqual((await breaking()).json, { breaking: null }, 'missing');
+    for (const at of ['2026-12-06T12:04:00-05:00', '2026-12-08T08:00:00-05:00', '2026-12-07T02:00:00Z']) {
+      writeJson(breakingPath(deskHome), { ...BREAKING_FIXTURE, at });
+      const res = await breaking();
+      assert.equal(res.status, 200, at);
+      assert.deepEqual(res.json, { breaking: null }, at);
+    }
+    writeJson(breakingPath(deskHome), { ...BREAKING_FIXTURE, at: '2026-12-08T01:30:00+09:00' });
+    assert.equal((await breaking()).json.breaking?.at, '2026-12-08T01:30:00+09:00', 'Tokyo time that is today in Toronto');
+    assert.deepEqual(logged, []);
+  });
+
+  test('a broken breaking.json never answers 404 or 500: {"breaking": null}, logged once', async () => {
+    for (const bad of ['{"id": "b1",', '[]', { ...BREAKING_FIXTURE, sources: [] }]) {
+      writeJson(breakingPath(deskHome), bad);
+      for (let i = 0; i < 2; i++) {
+        const res = await breaking();
+        assert.equal(res.status, 200);
+        assert.deepEqual(res.json, { breaking: null });
+      }
+    }
+    fs.rmSync(breakingPath(deskHome));
+    fs.mkdirSync(breakingPath(deskHome)); // a folder where the file should be
+    assert.deepEqual((await breaking()).json, { breaking: null });
+    assert.equal(logged.length, 4, 'once per broken version');
+    assert.match(logged[0], /breaking\.json isn't a valid breaking story, so no banner shows:\n {2}- not valid JSON/);
+  });
+
+  test('HEAD answers with headers only; other methods are refused', async () => {
+    const head = await request(port, { method: 'HEAD', path: '/api/breaking' });
+    assert.equal(head.status, 200);
+    assert.equal(head.body, '');
+    const post = await request(port, { method: 'POST', path: '/api/breaking', body: '{}' });
+    assert.equal(post.status, 405);
+    assert.equal(post.headers.allow, 'GET, HEAD');
+  });
+});
+
+describe('GET and PUT /api/news/state', () => {
+  let deskHome;
+  let server;
+  let port;
+  beforeEach(async () => {
+    deskHome = tempHome();
+    ({ server, port } = await start({ deskHome }));
+  });
+  afterEach(() => stop(server));
+
+  const NEWS_STATE = {
+    read: { '2026-12-07/s1': '2026-12-07T13:05:00.000Z', '2026-12-07/m2': 1765112700000 },
+    dismissed: { '2026-12-07T12:04:00-05:00': '2026-12-07T17:10:00.000Z' },
+    shelfOpen: true,
+  };
+  const putNews = (value, extra = {}) => putState(port, value, { path: '/api/news/state', ...extra });
+  const newsFiles = () => fs.readdirSync(path.dirname(statePath(deskHome, 'news'))).sort();
+
+  test('GET answers {} when nothing has been saved, and creates nothing', async () => {
+    const res = await request(port, { path: '/api/news/state' });
+    assert.equal(res.status, 200);
+    assert.deepEqual(res.json, {});
+    assert.equal(res.headers['cache-control'], 'no-store');
+    assert.equal(fs.existsSync(path.join(deskHome, 'desks')), false);
+  });
+
+  test('PUT then GET gives the same state back, in desks/news/state.json, apart from Product Feed', async () => {
+    const put = await putNews(NEWS_STATE);
+    assert.equal(put.status, 200);
+    assert.deepEqual(put.json, { ok: true });
+    assert.deepEqual((await request(port, { path: '/api/news/state' })).json, NEWS_STATE);
+    assert.deepEqual(JSON.parse(fs.readFileSync(statePath(deskHome, 'news'), 'utf8')), NEWS_STATE);
+    assert.deepEqual(newsFiles(), ['state.json'], 'no temp file left');
+    assert.equal(fs.existsSync(statePath(deskHome)), false, "Product Feed's state.json is untouched");
+    assert.deepEqual((await request(port, { path: '/api/state' })).json, {});
+
+    assert.equal((await putState(port, STATE)).status, 200);
+    assert.deepEqual((await request(port, { path: '/api/news/state' })).json, NEWS_STATE, 'saving one desk leaves the other alone');
+    assert.deepEqual((await request(port, { path: '/api/state' })).json, STATE);
+  });
+
+  test('the News state survives a server restart', async () => {
+    assert.equal((await putNews(NEWS_STATE)).status, 200);
+    await stop(server);
+    ({ server, port } = await start({ deskHome }));
+    const get = await request(port, { path: '/api/news/state' });
+    assert.equal(get.status, 200);
+    assert.deepEqual(get.json, NEWS_STATE);
+  });
+
+  test('unknown keys are kept', async () => {
+    const value = { ...NEWS_STATE, later: { anything: true } };
+    assert.equal((await putNews(value, { headers: { 'content-type': 'application/json; charset=utf-8' } })).status, 200);
+    assert.deepEqual((await request(port, { path: '/api/news/state' })).json, value);
+  });
+
+  test('413 for a body over 1 MB, declared or streamed, and the saved state stays', async () => {
+    assert.equal((await putNews(NEWS_STATE)).status, 200);
+    const big = JSON.stringify({ ...NEWS_STATE, pad: 'x'.repeat(MAX_STATE_BYTES) });
+    assert.equal((await putNews(big)).status, 413);
+    assert.equal((await putNews(big, { chunked: true })).status, 413);
+    assert.deepEqual((await request(port, { path: '/api/news/state' })).json, NEWS_STATE);
+  });
+
+  test('415 unless the body is sent as application/json', async () => {
+    const res = await request(port, { method: 'PUT', path: '/api/news/state', headers: { 'content-type': 'text/plain' }, body: '{}' });
+    assert.equal(res.status, 415);
+    assert.equal(fs.existsSync(statePath(deskHome, 'news')), false);
+  });
+
+  test('400 for anything that is not a News state object with the right shapes', async () => {
+    const bad = [
+      '',
+      'not json',
+      '[]',
+      'null',
+      '"state"',
+      '42',
+      { read: [] },
+      { read: { s1: '2026-12-07T13:05:00.000Z' } },
+      { read: { '2026-12-07/s1': 'today' } },
+      { dismissed: { b1: 1 } },
+      { dismissed: [] },
+      { shelfOpen: 'yes' },
+    ];
+    for (const value of bad) {
+      const res = await putNews(value);
+      assert.equal(res.status, 400, JSON.stringify(value));
+      assert.equal(typeof res.json.error, 'string');
+    }
+    assert.equal(fs.existsSync(statePath(deskHome, 'news')), false);
+  });
+
+  test("GET answers 500, logs it safely and leaves the file alone when state.json isn't valid JSON", async () => {
+    await stop(server);
+    const logged = [];
+    ({ server, port } = await start({ deskHome, log: { error: (...a) => logged.push(a.join(' ')) } }));
+    const broken = `{"read": {${String.fromCodePoint(0x1b)}[31m https://admin:SECRET@example.com/`;
+    writeJson(statePath(deskHome, 'news'), broken);
+    const res = await request(port, { path: '/api/news/state' });
+    assert.equal(res.status, 500);
+    assert.match(res.headers['content-type'], /^application\/json/);
+    assert.equal(logged.length, 1);
+    assert.match(logged[0], /news\/state\.json is not valid JSON/);
+    assert.ok(!logged[0].includes('SECRET') && !logged[0].includes(String.fromCodePoint(0x1b)), logged[0]);
+    assert.equal(fs.readFileSync(statePath(deskHome, 'news'), 'utf8'), broken);
+
+    writeJson(statePath(deskHome, 'news'), '[1, 2, 3]');
+    assert.equal((await request(port, { path: '/api/news/state' })).status, 500, 'not an object');
+  });
+
+  test('other methods are refused', async () => {
+    const res = await request(port, { method: 'POST', path: '/api/news/state', headers: { 'content-type': 'application/json' }, body: '{}' });
+    assert.equal(res.status, 405);
+    assert.equal(res.headers.allow, 'GET, HEAD, PUT');
+  });
+});
+
+describe('the Host check on the News routes', () => {
+  test('every News route refuses a Host that is not this machine, and nothing is saved', async () => {
+    const deskHome = tempHome();
+    const { server, port } = await start({ deskHome, now: () => NEWS_NOW });
+    try {
+      writeJson(breakingPath(deskHome), BREAKING_FIXTURE);
+      writeJson(newsPath(deskHome), newsEdition('2026-12-07'));
+      for (const host of ['evil.example', `evil.example:${port}`, `localhost:${port + 1}`, '']) {
+        for (const urlPath of ['/api/news', '/api/breaking', '/api/news/state']) {
+          const res = await request(port, { path: urlPath, host });
+          assert.equal(res.status, 403, `${host} ${urlPath}`);
+          assert.doesNotMatch(res.body, /Test (breaking )?story/);
+        }
+        const put = await putState(port, { shelfOpen: true }, { path: '/api/news/state', host });
+        assert.equal(put.status, 403, host);
+      }
+      assert.equal(fs.existsSync(statePath(deskHome, 'news')), false);
+      assert.equal(fs.existsSync(lastGoodPath(deskHome, 'news')), false, 'a refused request reads nothing');
+      assert.equal((await request(port, { path: '/api/breaking' })).json.breaking.id, 'b1', 'the right Host still gets it');
+    } finally {
+      await stop(server);
+    }
+  });
+});
+
 describe('a failed write', () => {
   // fs.promises with one step made to fail, the way a full disk or a crash would.
   function failing(step) {
@@ -528,7 +868,7 @@ describe('security headers', () => {
     assert.equal(CONTENT_SECURITY_POLICY, EXPECTED_CSP);
   });
 
-  for (const urlPath of ['/', '/api/feed', '/api/state', '/app.js', '/nope.html']) {
+  for (const urlPath of ['/', '/api/feed', '/api/state', '/api/news', '/api/breaking', '/api/news/state', '/app.js', '/nope.html']) {
     test(`${urlPath} sends CSP, nosniff and no-referrer`, async () => {
       const res = await request(port, { path: urlPath });
       assert.equal(res.headers['content-security-policy'], EXPECTED_CSP);
