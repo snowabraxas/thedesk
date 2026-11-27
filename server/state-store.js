@@ -105,7 +105,7 @@ export function createStateStore(deskHome, desk, { fsp = fs.promises } = {}) {
     }
     let value;
     try {
-      value = JSON.parse(text.replace(/^﻿/, ''));
+      value = JSON.parse(text.replace(/^\uFEFF/, ''));
     } catch (err) {
       // No quoted snippet of the file in the message (it goes to the-desk.log): see jsonErrorText.
       throw new CorruptStateError(`${filePath} is not valid JSON (${jsonErrorText(err)})`);

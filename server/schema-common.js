@@ -384,24 +384,26 @@ export const jsonErrorText = (err) => plain(hideUserInfo(String(err?.message ?? 
  * Reads and parses a JSON file. Never throws.
  * @param {string} filePath
  * @param {{ maxBytes?: number, fsp?: typeof fs.promises }} [options] fsp lets tests count reads
- * @returns {Promise<{ ok: true, value: unknown } | { ok: false, errors: string[] }>}
+ * @returns {Promise<{ ok: true, value: unknown, bytes: Buffer } | { ok: false, errors: string[] }>}
+ *   bytes is the file exactly as read (at most maxBytes), so a copy can be kept byte for byte;
  *   errors start with the file's path.
  */
 export async function readJsonFile(filePath, { maxBytes = MAX_FILE_BYTES, fsp = fs.promises } = {}) {
-  let text;
+  const tooBig = (size) => ({ ok: false, errors: [`${filePath}: too big (${size} bytes, limit is ${maxBytes})`] });
+  let bytes;
   try {
     const stat = await fsp.stat(filePath);
     if (!stat.isFile()) return { ok: false, errors: [`${filePath}: not a file`] };
-    if (stat.size > maxBytes) {
-      return { ok: false, errors: [`${filePath}: too big (${stat.size} bytes, limit is ${maxBytes})`] };
-    }
-    text = await fsp.readFile(filePath, 'utf8');
+    if (stat.size > maxBytes) return tooBig(stat.size);
+    bytes = await fsp.readFile(filePath);
   } catch (err) {
     const reason = err.code === 'ENOENT' ? 'file not found' : `can't read it (${err.code || err.message})`;
     return { ok: false, errors: [`${filePath}: ${reason}`] };
   }
+  if (bytes.length > maxBytes) return tooBig(bytes.length); // it grew between the stat and the read
+  const text = bytes.toString('utf8');
   try {
-    return { ok: true, value: JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text) };
+    return { ok: true, value: JSON.parse(text.charCodeAt(0) === 0xfeff ? text.slice(1) : text), bytes };
   } catch (err) {
     return { ok: false, errors: [`${filePath}: not valid JSON (${jsonErrorText(err)})`] };
   }

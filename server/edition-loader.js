@@ -6,8 +6,10 @@
 //   2. last-good       the last valid live file this server served: kept in memory, and on disk as
 //                      last-good.json next to the live file, so a restart doesn't lose it. Read from
 //                      disk only after a restart, and checked against the contract again then.
-//   3. edition:<file>  the newest valid editions/YYYY-MM-DD.json, by the date in its name
-//                      (invalid files and other names are skipped)
+//   3. edition:<file>  the newest valid editions/YYYY-MM-DD.json, by the date in its name (invalid
+//                      files and other names are skipped; only the newest 60 dated names are
+//                      looked at). It wins over last-good when its `edition` date is later, so an
+//                      old last-good.json never hides a newer edition the agent archived.
 //   4. sample          the desk's sample, marked "sample": true. Only The Desk may say that: the
 //                      check functions drop "sample" from every agent file.
 //
@@ -16,15 +18,20 @@
 // a short line, an invalid one gets the reasons and what is shown instead.
 //
 // last-good.json is written (atomically: temp file, fsync, rename) whenever a valid live file is
-// served and last-good.json doesn't already hold exactly that edition, including when someone
-// deleted or damaged it while the live file stayed the same. A failed write is logged once per
-// change and the live edition is still served.
+// served and last-good.json doesn't already hold exactly the same bytes, including when someone
+// deleted or damaged it while the live file stayed the same. It is a byte-for-byte copy of the
+// live file as read and checked, so it is exactly as big as a file that passed the size limit.
+// A failed write is logged once per change and the live edition is still served.
 import fs from 'node:fs';
 import path from 'node:path';
 import { writeFileAtomic } from './atomic-file.js';
 import { plain } from './schema-common.js';
 
 export const EDITION_FILE = /^\d{4}-\d{2}-\d{2}\.json$/;
+
+/** At most this many dated files in editions/ are looked at, newest first: two months of mornings. */
+export const MAX_EDITION_FILES = 60;
+
 const MISSING = 'missing';
 
 const isPlainObject = (v) => v !== null && typeof v === 'object' && !Array.isArray(v);
@@ -42,7 +49,7 @@ export async function statKey(file, fsp = fs.promises) {
 /**
  * Checks a file, again only when it has changed.
  * @param {string} file
- * @param {(file: string) => Promise<{ ok: true, value: object } | { ok: false, errors: string[] }>} check
+ * @param {(file: string) => Promise<{ ok: true, value: object, bytes?: Buffer } | { ok: false, errors: string[] }>} check
  *   never throws; a valid value has no "sample" key.
  * @returns {() => Promise<{ result: object, changed: boolean, missing: boolean }>}
  *   `changed` is true for exactly one caller per change, even when requests overlap, so whoever
@@ -69,8 +76,9 @@ export const reasons = (file, errors) => errors.map((e) => `  - ${e.startsWith(`
  * @param {string} options.lastGoodFile  where the last valid live edition is kept, e.g. desks/news/last-good.json
  * @param {string} options.editionsDir   the folder of dated copies, e.g. desks/news/editions
  * @param {string} options.samplePath    the desk's sample edition in this repo
- * @param {(file: string, fsp: typeof fs.promises) => Promise<{ ok: true, value: object } | { ok: false, errors: string[] }>} options.check
- *   reads and checks one file against the desk's contract, never throws, and returns a valid value without "sample".
+ * @param {(file: string, fsp: typeof fs.promises) => Promise<{ ok: true, value: object, bytes: Buffer } | { ok: false, errors: string[] }>} options.check
+ *   reads and checks one file against the desk's contract, never throws, and returns a valid value
+ *   without "sample", plus the file's bytes exactly as read.
  * @param {{ error: Function, info?: Function }} [options.log]
  * @param {typeof fs.promises} [options.fsp]
  * @returns {{ load: () => Promise<{ value: object, source: string }> }}
@@ -82,47 +90,47 @@ export function createEditionLoader({ liveFile, lastGoodFile, editionsDir, sampl
   const checkLive = watchedFile(liveFile, checkFile, fsp);
   const checkKept = watchedFile(lastGoodFile, checkFile, fsp);
   const editionChecks = new Map(); // file name -> checkIfChanged()
-  let lastGood = null; // the last valid live edition, in memory
+  let lastGood = null; // the last valid live edition, in memory: { value, bytes }
   let sample = null;
+  let ignoringOlder = false; // editions/ has more than MAX_EDITION_FILES dated files (noted once)
 
   // ---- last-good.json ----------------------------------------------------------------------
 
-  // What last-good.json was last made to match: the live value (the same object until the live file
-  // changes) and the file's fingerprint afterwards. A failed write is remembered the same way, so
-  // it's retried (and logged) once per change, not on every request.
-  let kept = { value: null, key: null };
-  let failed = { value: null, key: null };
+  // What last-good.json was last made to match: the live edition (the same object until the live
+  // file changes) and the file's fingerprint afterwards. A failed write is remembered the same way,
+  // so it's retried (and logged) once per change, not on every request.
+  let kept = { edition: null, key: null };
+  let failed = { edition: null, key: null };
   let keeping = Promise.resolve();
 
-  async function sameOnDisk(text) {
+  async function sameOnDisk(bytes) {
     try {
       const s = await fsp.stat(lastGoodFile);
-      if (!s.isFile() || s.size !== Buffer.byteLength(text)) return false;
-      return (await fsp.readFile(lastGoodFile, 'utf8')) === text;
+      if (!s.isFile() || s.size !== bytes.length) return false;
+      return (await fsp.readFile(lastGoodFile)).equals(bytes);
     } catch {
       return false;
     }
   }
 
-  async function keepNow(value) {
+  async function keepNow(edition) {
     const key = await statKey(lastGoodFile, fsp);
-    if ((kept.value === value && kept.key === key) || (failed.value === value && failed.key === key)) return;
-    const text = `${JSON.stringify(value, null, 2)}\n`;
+    if ((kept.edition === edition && kept.key === key) || (failed.edition === edition && failed.key === key)) return;
     try {
-      if (!(await sameOnDisk(text))) await writeFileAtomic(lastGoodFile, text, { fsp });
-      kept = { value, key: await statKey(lastGoodFile, fsp) };
+      if (!(await sameOnDisk(edition.bytes))) await writeFileAtomic(lastGoodFile, edition.bytes, { fsp });
+      kept = { edition, key: await statKey(lastGoodFile, fsp) };
     } catch (err) {
-      failed = { value, key };
+      failed = { edition, key };
       log.error(
-        `The Desk: couldn't keep a copy of the ${plain(value.edition)} edition in ${lastGoodFile} (${plain(err.code || err.message)}). ` +
+        `The Desk: couldn't keep a copy of the ${plain(edition.value.edition)} edition in ${lastGoodFile} (${plain(err.code || err.message)}). ` +
           'It still shows it, but after a restart a broken live file would fall back further.',
       );
     }
   }
 
-  /** Makes last-good.json hold this live edition. Never throws; runs one at a time. */
-  function keep(value) {
-    keeping = keeping.then(() => keepNow(value)).catch(() => {});
+  /** Makes last-good.json hold exactly the live file's bytes. Never throws; runs one at a time. */
+  function keep(edition) {
+    keeping = keeping.then(() => keepNow(edition)).catch(() => {});
     return keeping;
   }
 
@@ -136,7 +144,11 @@ export function createEditionLoader({ liveFile, lastGoodFile, editionsDir, sampl
     return null;
   }
 
-  /** The newest valid editions/YYYY-MM-DD.json, or null. Invalid ones are logged once per change and skipped. */
+  /**
+   * The newest valid editions/YYYY-MM-DD.json, or null. Only the newest MAX_EDITION_FILES dated
+   * names are looked at (noted once while there are more). Invalid ones are logged once per change
+   * and skipped.
+   */
   async function newestEdition() {
     let names;
     try {
@@ -145,7 +157,20 @@ export function createEditionLoader({ liveFile, lastGoodFile, editionsDir, sampl
       return null; // no editions folder yet
     }
     names = names.filter((n) => EDITION_FILE.test(n)).sort().reverse();
-    for (const name of editionChecks.keys()) if (!names.includes(name)) editionChecks.delete(name);
+    if (names.length > MAX_EDITION_FILES) {
+      if (!ignoringOlder) {
+        info(
+          `The Desk: ${editionsDir} has ${names.length} dated files; it only looks at the newest ${MAX_EDITION_FILES} ` +
+            `(${names[MAX_EDITION_FILES - 1]} onward) when it needs an older edition.`,
+        );
+      }
+      ignoringOlder = true;
+      names = names.slice(0, MAX_EDITION_FILES);
+    } else {
+      ignoringOlder = false;
+    }
+    const current = new Set(names);
+    for (const name of editionChecks.keys()) if (!current.has(name)) editionChecks.delete(name);
     for (const name of names) {
       if (!editionChecks.has(name)) editionChecks.set(name, watchedFile(path.join(editionsDir, name), checkFile, fsp));
       const { result, changed, missing } = await editionChecks.get(name)();
@@ -160,16 +185,22 @@ export function createEditionLoader({ liveFile, lastGoodFile, editionsDir, sampl
 
   async function sampleEdition() {
     if (!sample) {
-      const value = JSON.parse((await fsp.readFile(samplePath, 'utf8')).replace(/^﻿/, ''));
+      const value = JSON.parse((await fsp.readFile(samplePath, 'utf8')).replace(/^\uFEFF/, ''));
       if (!isPlainObject(value)) throw new Error(`${samplePath} is not a JSON object`);
       sample = { ...value, sample: true };
     }
     return { value: sample, source: 'sample' };
   }
 
+  // `edition` is a checked YYYY-MM-DD, so comparing the text compares the dates.
+  const isLater = (a, b) => typeof a === 'string' && typeof b === 'string' && a > b;
+
+  /** last-good, unless editions/ holds a valid edition with a later date; then that; else the sample. */
   async function fallback() {
-    if (lastGood) return { value: lastGood, source: 'last-good' };
-    return (await keptEdition()) || (await newestEdition()) || sampleEdition();
+    const kept = lastGood ? { value: lastGood.value, source: 'last-good' } : await keptEdition();
+    const newest = await newestEdition();
+    if (kept && !(newest && isLater(newest.value.edition, kept.value.edition))) return kept;
+    return newest || sampleEdition();
   }
 
   const describe = (shown) => {
@@ -182,10 +213,10 @@ export function createEditionLoader({ liveFile, lastGoodFile, editionsDir, sampl
   async function load() {
     const { result, changed, missing } = await checkLive();
     if (result.ok) {
-      lastGood = result.value;
-      if (changed) info(`The Desk: showing the ${plain(lastGood.edition)} edition from ${liveFile}.`);
+      lastGood = result; // the same object until the file changes: { value, bytes }
+      if (changed) info(`The Desk: showing the ${plain(result.value.edition)} edition from ${liveFile}.`);
       await keep(lastGood);
-      return { value: lastGood, source: 'live' };
+      return { value: result.value, source: 'live' };
     }
     let shown;
     try {

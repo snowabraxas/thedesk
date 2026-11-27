@@ -450,14 +450,14 @@ describe('GET /api/news', () => {
     assert.equal(fs.existsSync(path.join(deskHome, 'desks')), false, 'nothing written');
   });
 
-  test("serves the agent's valid news.json as live, never marked as a sample, and keeps a copy", async () => {
+  test("serves the agent's valid news.json as live, never marked as a sample, and keeps a byte-for-byte copy", async () => {
     writeJson(newsPath(deskHome), { ...newsEdition('2026-12-07'), sample: true });
     const res = await request(port, { path: '/api/news' });
     assert.equal(res.status, 200);
     assert.equal(res.headers['x-desk-news-source'], 'live');
     assert.deepEqual(res.json, newsEdition('2026-12-07'));
     assert.equal('sample' in res.json, false);
-    assert.deepEqual(JSON.parse(fs.readFileSync(lastGoodPath(deskHome, 'news'), 'utf8')), newsEdition('2026-12-07'));
+    assert.ok(fs.readFileSync(lastGoodPath(deskHome, 'news')).equals(fs.readFileSync(newsPath(deskHome))));
   });
 
   test('a bad news.json keeps the last good edition showing, even after a restart', async () => {
@@ -474,6 +474,18 @@ describe('GET /api/news', () => {
     assert.equal(res.status, 200);
     assert.equal(res.headers['x-desk-news-source'], 'last-good');
     assert.deepEqual(res.json, newsEdition('2026-12-07'));
+  });
+
+  test('after a restart, a newer edition the agent archived wins over an older last-good.json', async () => {
+    writeJson(newsPath(deskHome), newsEdition('2026-12-07'));
+    assert.equal((await request(port, { path: '/api/news' })).headers['x-desk-news-source'], 'live');
+    await stop(server);
+    writeJson(newsPath(deskHome), brokenNews('2026-12-09'));
+    writeJson(path.join(editionsDir(deskHome, 'news'), '2026-12-08.json'), newsEdition('2026-12-08'));
+    ({ server, port } = await start({ deskHome }));
+    const res = await request(port, { path: '/api/news' });
+    assert.equal(res.headers['x-desk-news-source'], 'edition:2026-12-08.json');
+    assert.equal(res.json.edition, '2026-12-08');
   });
 
   test('with a bad news.json and no last good edition, serves the newest valid file in editions/', async () => {

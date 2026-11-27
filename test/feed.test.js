@@ -304,12 +304,18 @@ describe('createFeedLoader', () => {
     assert.deepEqual(errors, []);
   });
 
-  test('a valid feed.json is kept on disk as last-good.json, without any "sample" key', async () => {
+  test('a valid feed.json is kept on disk as last-good.json byte for byte; a "sample" key is still never served', async () => {
     const h = deskHome();
     h.writeFeed(edition('2026-11-27', { sample: true }));
     assert.equal((await createFeedLoader(h.home, recorder()).load()).source, 'live');
-    assert.deepEqual(h.readLastGood(), edition('2026-11-27'));
+    assert.ok(fs.readFileSync(lastGoodPath(h.home, 'product-feed')).equals(fs.readFileSync(feedPath(h.home))));
     assert.deepEqual(fs.readdirSync(productFeedDir(h.home)).sort(), ['editions', 'feed.json', 'last-good.json'], 'no temp file left');
+
+    h.writeFeed(httpUrl('2026-11-28'));
+    const { feed, source } = await createFeedLoader(h.home, recorder()).load(); // a fresh server
+    assert.equal(source, 'last-good');
+    assert.deepEqual(feed, edition('2026-11-27'));
+    assert.equal('sample' in feed, false);
   });
 
   // The Sprint 1 follow-up: a restart with a bad feed.json and no editions/ used to show the sample.
@@ -325,6 +331,21 @@ describe('createFeedLoader', () => {
     assert.deepEqual(feed, edition('2026-11-27'));
     assert.equal(r.errors.length, 1);
     assert.match(r.errors[0], /feed\.json isn't a valid edition, so it keeps showing the last good edition \(2026-11-27\):/);
+  });
+
+  test('after a restart, a newer valid edition in editions/ wins over an older last-good.json; the same date does not', async () => {
+    const h = deskHome();
+    h.writeFeed(edition('2026-11-27'));
+    assert.equal((await createFeedLoader(h.home, recorder()).load()).source, 'live');
+    h.writeFeed(httpUrl('2026-11-29'));
+    h.writeEdition('2026-11-27.json', edition('2026-11-27'));
+    assert.equal((await createFeedLoader(h.home, recorder()).load()).source, 'last-good', 'the same date');
+    h.writeEdition('2026-11-28.json', edition('2026-11-28'));
+    const r = recorder();
+    const { feed, source } = await createFeedLoader(h.home, r).load();
+    assert.equal(source, 'edition:2026-11-28.json');
+    assert.equal(feed.edition, '2026-11-28');
+    assert.match(r.errors[0], /keeps showing 2026-11-28\.json from editions\//);
   });
 
   test('a damaged last-good.json is skipped, logged once, and editions/ comes next', async () => {

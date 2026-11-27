@@ -5,7 +5,8 @@
 //   1. live            $DESK_HOME/desks/news/news.json, when it passes the News contract
 //   2. last-good       the last valid news.json this server served, kept in memory and on disk as
 //                      desks/news/last-good.json (checked again when read back after a restart)
-//   3. edition:<file>  the newest valid desks/news/editions/YYYY-MM-DD.json
+//   3. edition:<file>  the newest valid desks/news/editions/YYYY-MM-DD.json; it wins over
+//                      last-good when its edition date is later
 //   4. sample          data/samples/news.sample.json, marked "sample": true by the server
 //
 // GET /api/breaking: desks/news/breaking.json when it is valid and its `at` falls on today in
@@ -18,10 +19,10 @@ import { checkBreakingFile, checkNewsFile } from './news-schema.js';
 
 export const NEWS_TIME_ZONE = 'America/Toronto';
 
-/** Reads and checks a News edition. Never throws; a valid one comes back without "sample". */
+/** Reads and checks a News edition. Never throws; a valid one comes back without "sample", with its bytes. */
 async function checkNews(file, fsp) {
   const r = await checkNewsFile(file, { fsp });
-  return r.ok ? { ok: true, errors: [], value: r.news } : r;
+  return r.ok ? { ok: true, errors: [], value: r.news, bytes: r.bytes } : r;
 }
 
 /**

@@ -7,10 +7,10 @@ import path from 'node:path';
 
 /**
  * @param {string} filePath the file to replace (its folder is created when needed)
- * @param {string} text the whole new content
+ * @param {string | Buffer} data the whole new content (text is written as UTF-8)
  * @param {{ fsp?: typeof fs.promises, mode?: number }} [options] fsp lets tests make a step fail
  */
-export async function writeFileAtomic(filePath, text, { fsp = fs.promises, mode = 0o600 } = {}) {
+export async function writeFileAtomic(filePath, data, { fsp = fs.promises, mode = 0o600 } = {}) {
   const dir = path.dirname(filePath);
   const base = path.basename(filePath);
   await fsp.mkdir(dir, { recursive: true });
@@ -18,7 +18,7 @@ export async function writeFileAtomic(filePath, text, { fsp = fs.promises, mode 
   let handle;
   try {
     handle = await fsp.open(tmp, 'wx', mode);
-    await handle.writeFile(text, 'utf8');
+    await handle.writeFile(data, 'utf8');
     await handle.sync();
     await handle.close();
     handle = undefined;
