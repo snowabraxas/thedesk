@@ -55,12 +55,13 @@ export async function startDesk() {
  * delay: the save debounce (a long one keeps a change waiting, for a page-close test).
  * paid counts the payments this tab made, by key.
  */
-export async function openTab(desk, { old = false, fetchFn, delay = 0 } = {}) {
+export async function openTab(desk, { old = false, fetchFn, delay = 0, retryDelay } = {}) {
   const tab = { S: null, N: blankNewsState(), paid: [] };
   // Every request is tracked, so a test can wait for a page-close flush to land (settled()).
   const inflight = new Set();
   const send = fetchFn || ((...args) => globalThis.fetch(...args));
   const opts = {
+    ...(retryDelay ? { retryDelay } : {}),
     fetchFn: (...args) => {
       const p = Promise.resolve(send(...args));
       inflight.add(p);
@@ -114,19 +115,26 @@ export async function openTab(desk, { old = false, fetchFn, delay = 0 } = {}) {
     await saveFeed();
     return r;
   };
-  tab.readStory = async (key) => {
+  // wait: true leaves the save waiting (the app's 600 ms delay), as when Snow switches tabs right away.
+  tab.readStory = async (key, { wait = false } = {}) => {
     const r = await readStory(() => tab.N, key, { canPay: tab.news.canSave && tab.feed.canSave, peek: () => tab.news.peek(), also: tab.reloadFeed });
-    await saveNews();
+    if (wait) tab.news.save();
+    else await saveNews();
     if (r.award) {
       award(10, key);
       await saveFeed();
     }
     return r;
   };
-  tab.note = async (text) => {
+  tab.note = async (text, { wait = false } = {}) => {
     tab.S.notes.push({ id: `n${Math.random().toString(36).slice(2, 8)}`, a: 'a1', text, ts: Date.now() });
-    await saveFeed();
+    if (wait) tab.feed.save();
+    else await saveFeed();
   };
+  /** The tab is hidden or loses focus: the page sends what is waiting at once (app.js sendNow). */
+  tab.hide = () => Promise.all([tab.feed.flush(), tab.news.flush()]);
+  /** The tab is shown or focused: the page reloads both states when idle (app.js syncTab). */
+  tab.show = () => tab.reload();
   /** pagehide: flushOnExit on both, then wait for what it sent to land. Returns what each sent. */
   tab.close = async () => {
     const sent = [tab.feed.flushOnExit(), tab.news.flushOnExit()];

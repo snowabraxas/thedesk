@@ -466,8 +466,12 @@ $('#hideDialogue').addEventListener('click', () => { $('#dialogue').hidden = tru
 $('#wilaOrb').addEventListener('click', () => { $('#dialogue').hidden = !$('#dialogue').hidden; renderRoom(); });
 $('#phaseBtn').addEventListener('click', () => { const order = [null, 'morning', 'golden', 'night']; preview = order[(order.indexOf(preview) + 1) % order.length]; renderRoom(); });
 window.addEventListener('hashchange', route);
-document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') syncTab(); });
+// Leaving the tab (hidden, or the window losing focus): send what is waiting now rather than after
+// the 600 ms delay, so the tab Snow switches to reads it when it catches up.
+function sendNow() { if (!ready) return; store.flush(); news.flush(); }
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') syncTab(); else sendNow(); });
 window.addEventListener('focus', syncTab);
+window.addEventListener('blur', sendNow);
 setInterval(() => { if (!preview) renderRoom(); }, 60e3);
 
 /* ================= the News desk ================= */

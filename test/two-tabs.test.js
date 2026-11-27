@@ -121,6 +121,70 @@ describe('payments across tabs', () => {
   });
 });
 
+describe('a reply cut after the save (a restart during a deploy)', () => {
+  test('the retry of a PUT that already landed adds its XP once', async () => {
+    await seedXp(40);
+    let cut = 0;
+    const fetchFn = async (url, opts = {}) => {
+      const r = await fetch(url, opts);
+      if (opts.method === 'PUT' && url.endsWith('/api/state') && cut < 1) {
+        cut++;
+        await r.text();
+        throw new TypeError('the connection was cut after the save'); // saved, but the page never hears back
+      }
+      return r;
+    };
+    const pane = await openTab(desk, { fetchFn, retryDelay: 30 });
+    await pane.readArticle('a1'); // pays 10; its PUT lands, the reply is cut
+    assert.equal(pane.feed.dirty, true, 'the page thinks it failed');
+    while (pane.feed.dirty || !pane.feed.idle) await new Promise((r) => setTimeout(r, 10)); // the retry
+    assert.equal(cut, 1);
+    assert.equal((await feedState()).xp, 50, 'not 60');
+  });
+});
+
+describe('a quick tab switch, inside the 600 ms save delay', () => {
+  test('a note written just before switching reaches the other tab, and its next save keeps it', async () => {
+    const pane = await openTab(desk, { delay: 60_000 });
+    const browser = await openTab(desk, { delay: 60_000 });
+    await pane.note('written just before switching', { wait: true });
+    await pane.hide(); // the pane is left: its waiting save goes now
+    await browser.show(); // the browser comes into view: it catches up
+    assert.equal(browser.S.notes.length, 1, 'the browser has the note');
+    browser.S.folders.push({ id: 'f1', name: 'Later' });
+    await browser.saveFeed();
+    assert.equal((await feedState()).notes.length, 1, "the browser's save kept it");
+  });
+
+  test('a story read just before switching stays read after the other tab saves', async () => {
+    const pane = await openTab(desk, { delay: 60_000 });
+    const browser = await openTab(desk, { delay: 60_000 });
+    await pane.readStory(S1, { wait: true });
+    await pane.hide();
+    await browser.show();
+    assert.ok(browser.N.read[S1], 'the browser sees it read');
+    browser.N.shelfOpen = true;
+    await browser.saveNews();
+    const news = await newsState();
+    assert.ok(news.read[S1], 'still read');
+    assert.equal(news.shelfOpen, true);
+  });
+
+  test('without sending on leaving (before), the switch loses the note', async () => {
+    const pane = await openTab(desk, { delay: 60_000 });
+    const browser = await openTab(desk, { delay: 60_000 });
+    await pane.note('written just before switching', { wait: true });
+    await browser.show(); // the pane's save is still waiting
+    browser.S.folders.push({ id: 'f1', name: 'Later' });
+    await browser.saveFeed();
+    await pane.hide(); // the pane's save lands afterwards and is last: but the browser had already saved without it
+    await browser.show();
+    // Last-save-wins: whichever saved last decides; here the pane's late save restores the note, but the folder is lost instead.
+    const feed = await feedState();
+    assert.equal(feed.notes.length + feed.folders.length, 1, 'one of the two changes was lost');
+  });
+});
+
 describe('the refresh race', () => {
   test('a change made while a reload is out is never replaced by the reloaded copy', async () => {
     let holding = false;

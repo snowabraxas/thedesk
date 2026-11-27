@@ -90,13 +90,34 @@ const STATE_TYPES = {
   awarded: isPlainObject,
 };
 
+/** A real day on the calendar written YYYY-MM-DD. */
+function isCalendarDay(v) {
+  const m = typeof v === 'string' && /^(\d{4})-(\d{2})-(\d{2})$/.exec(v);
+  if (!m) return false;
+  const d = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])));
+  return d.toISOString().slice(0, 10) === v;
+}
+
+// The server checks the keys it merges as unions closely (one refused value would stop every save):
+// awarded and badges hold times under names up to 200 characters; days are real days, not in the
+// future. A value that wouldn't pass (an old or hand-edited state) is mended here: a time that isn't
+// a number becomes now (the entry still counts), a bad name or day is dropped.
+function mendTimes(map, now) {
+  const out = {};
+  for (const [k, v] of Object.entries(map)) {
+    if (k === '__proto__' || k.length === 0 || k.length > 200) continue;
+    out[k] = typeof v === 'number' && Number.isFinite(v) ? v : now;
+  }
+  return out;
+}
+
 /**
  * Turns whatever the server sent into a usable state: known keys of the wrong type fall back
  * to blank values, unknown keys are kept so a newer version's data isn't thrown away on save.
  * A state saved before `awarded` existed counts every article already read as paid, so re-marking
  * one of them doesn't pay a second time.
  */
-export function normalizeState(raw) {
+export function normalizeState(raw, now = Date.now()) {
   const S = blank();
   if (!isPlainObject(raw)) return S;
   for (const [k, v] of Object.entries(raw)) {
@@ -104,6 +125,11 @@ export function normalizeState(raw) {
     if (!(k in STATE_TYPES) || STATE_TYPES[k](v)) S[k] = v;
   }
   if (!isPlainObject(raw.awarded)) S.awarded = { ...S.read };
+  S.awarded = mendTimes(S.awarded, now);
+  S.badges = mendTimes(S.badges, now);
+  const latest = new Date(now + 864e5).toISOString().slice(0, 10);
+  S.days = S.days.filter((d) => isCalendarDay(d) && d <= latest);
+  if (!(Number.isFinite(S.xp) && S.xp >= 0 && S.xp <= Number.MAX_SAFE_INTEGER)) S.xp = Math.min(Math.max(0, Number.isFinite(S.xp) ? S.xp : 0), Number.MAX_SAFE_INTEGER);
   return S;
 }
 
@@ -167,6 +193,13 @@ export async function readArticle(getState, id, { canPay = true, peek, also = as
   return markArticleRead(getState(), id, { canAward: pay });
 }
 
+/** An id for this page load (letters, digits and dashes), so the server can tell its saves apart. */
+function randomTabId() {
+  const c = globalThis.crypto;
+  if (c && typeof c.randomUUID === 'function') return c.randomUUID();
+  return `t${Date.now().toString(36)}${Math.random().toString(36).slice(2, 12)}`;
+}
+
 /**
  * Loads and saves one desk's state through the server: GET and PUT on `url` (Product Feed's
  * /api/state by default, News's /api/news/state). `normalize` turns what the GET answered into a
@@ -178,11 +211,14 @@ export async function readArticle(getState, id, { canPay = true, peek, also = as
  * - A failed PUT keeps the state in memory, calls onSaveFail once (until a save works again),
  *   and is retried every retryDelay ms (sooner if something else changes) until a save works,
  *   so a change isn't stuck in memory when the tab sits idle after the server comes back.
- * - The server merges every save into the file as it is now (server/state-store.js). `counters`
- *   names number keys (Product Feed: ["xp"]) that the server adds up: each PUT carries
- *   `_sync: { xp: <the value last synced> }`, so the server adds only this page's own change.
- * - flushOnExit() sends whatever is still waiting, with keepalive so it outlives the page; but not
- *   when the last read from the server failed (it stays waiting, for a retry if the page stays).
+ * - The server merges every save into the file as it is now (server/state-store.js). `counters:
+ *   ["xp"]` (Product Feed) makes XP a counter the server adds up: each PUT carries
+ *   `_sync: { xp: <the value last synced>, tab: <this page load's id>, sent: <the xp in it> }`, so
+ *   the server adds only this page's own change, and only once even if the same PUT arrives twice
+ *   (a reply cut by a restart, then the retry): it remembers the most each tab has sent.
+ * - flushOnExit() sends whatever is still waiting, with keepalive so it outlives the page, counting
+ *   from the last confirmed value (the server's high-water mark covers a PUT still on its way); but
+ *   not when the last read from the server failed (it stays waiting, for a retry if the page stays).
  * - peek() reads the server's copy without changing anything. reload(apply) reads it and hands it
  *   to apply(state) only when nothing is waiting to be saved and no PUT is on its way, checked
  *   in the same instant it applies, so a change made while the GET was out is never thrown away.
@@ -193,6 +229,7 @@ export function createStateClient({
   normalize = normalizeState,
   empty = blank,
   counters = [],
+  tabId = randomTabId(),
   fetchFn = (...args) => globalThis.fetch(...args),
   onSaveFail = () => {},
   delay = 600,
@@ -208,7 +245,6 @@ export function createStateClient({
   let failNoted = false;
   let lastReadOk = false;
   let base = {}; // counters as last synced with the server
-  let inFlight = null; // counters in the PUT on its way, if any
   let running = null; // the flush on its way, if any
 
   // Read the small reply even when only the status matters, so the browser can finish the request.
@@ -225,10 +261,11 @@ export function createStateClient({
     for (const [k, v] of Object.entries(sent)) base[k] = Math.max(base[k] ?? 0, v);
   };
   const countersOf = (state) => Object.fromEntries(counters.map((k) => [k, typeof state?.[k] === 'number' && Number.isFinite(state[k]) ? state[k] : 0]));
-  // The body of a PUT: the state, plus the counters it was last synced at.
+  // The body of a PUT: the state, plus the XP it was last synced at, this tab's id and the XP it sends.
   function bodyOf(state, syncedAt) {
     if (!counters.length) return { body: JSON.stringify(state), sent: null };
-    return { body: JSON.stringify({ ...state, _sync: syncedAt }), sent: countersOf(state) };
+    const sent = countersOf(state);
+    return { body: JSON.stringify({ ...state, _sync: { ...syncedAt, tab: tabId, sent: sent[counters[0]] } }), sent };
   }
 
   // GET the server's copy, normalized. Throws when it can't be read.
@@ -318,7 +355,6 @@ export function createStateClient({
           // Take the state and send it in the same instant: nothing is awaited in between.
           const { body, sent } = bodyOf(getState(), base);
           dirty = false;
-          inFlight = sent;
           let ok = false;
           try {
             const r = await fetchFn(url, { method: 'PUT', headers, body });
@@ -327,7 +363,6 @@ export function createStateClient({
           } catch {
             /* offline or the server is down */
           }
-          inFlight = null;
           if (ok) {
             failNoted = false;
             if (sent) advance(sent); // the server has added everything up to what was sent
@@ -363,8 +398,9 @@ export function createStateClient({
     timer = null;
     pending = false;
     dirty = false;
-    // A PUT still on its way will land (or the server is down): count from what it carries.
-    const { body, sent } = bodyOf(getState(), inFlight || base);
+    // Count from the last confirmed value: if a PUT still on its way lands too, the server's
+    // high-water mark for this tab stops its XP being added twice.
+    const { body, sent } = bodyOf(getState(), base);
     const keepalive = new TextEncoder().encode(body).length <= keepaliveMax;
     Promise.resolve()
       .then(() => fetchFn(url, { method: 'PUT', headers, body, keepalive }))

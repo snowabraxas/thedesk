@@ -41,7 +41,7 @@ What the desk pages talk to. Everything is JSON, never cached, and only answers 
 | `GET /api/breaking` | `{"breaking": {...}}` when `news/breaking.json` is valid and from today in Toronto, otherwise `{"breaking": null}`. |
 | `GET` / `PUT /api/news/state` | Snow's News state (`read`, `dismissed`, `shelfOpen`, and `awarded`, the stories already paid XP) in `news/state.json`. |
 
-`PUT` takes a JSON object up to 1 MB (`Content-Type: application/json`) and saves it whole, so a crash never leaves half a file. Each save is merged into the file as it is now, so a second tab can't take anything back: `awarded`, `dismissed`, `badges` and `days` only grow, and XP is added as a change from the `_sync.xp` the page sends (never saved). Folders, saved items, notes and reads are last-save-wins. Details: `docs/notes/sprint-2-build.md` (N3, and N4's review fixes).
+`PUT` takes a JSON object up to 1 MB (`Content-Type: application/json`) and saves it whole, so a crash never leaves half a file. Each save is merged into the file as it is now, so a second tab can't take anything back: `awarded`, `dismissed`, `badges` and `days` only grow (the first two capped at the newest 2000), and XP is added as a change from the `_sync` the page sends (never saved), at most once per tab even if the same save arrives twice. Folders, saved items, notes and reads are last-save-wins. Details: `docs/notes/sprint-2-build.md` (N3, N4's review fixes and N4b).
 
 ## Always on
 
