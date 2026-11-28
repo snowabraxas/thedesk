@@ -2,11 +2,12 @@
 // Snow's reads, saves, folders, notes, XP and badges live on the local server
 // (GET and PUT /api/state); the edition comes from GET /api/feed.
 import {
-  PHASE_LABEL, WEEK_GOAL, BADGES, articlesFor, autoPhase, awardText, blank, cnt, createStateClient, dayKey, esc, fmtDate, fmtDay,
+  GET_TIMEOUT, PHASE_LABEL, WEEK_GOAL, BADGES, articlesFor, autoPhase, awardText, blank, cnt, createStateClient, dayKey, esc, fmtDate, fmtDay,
   freshBadges, level as levelFor, mentorLine, moon, moonPath, readsThisWeek as readsSince, safeUrl,
-  feedOps, readArticle, streak as streakOf, themeScores as scoresFor, uid, wilaLine,
+  feedOps, readArticle, streak as streakOf, themeScores as scoresFor, timeoutSignal, uid, wilaLine,
 } from './lib.js';
 import { createNewsPage } from './news.js';
+import { createRefresher, readSignals, tvLook } from './tv-lib.js';
 
 /* ================= constants ================= */
 const FEED_URL = '/api/feed';
@@ -36,6 +37,8 @@ const ICON = {
   pencil: icon('<path d="M4 20h4L19 9l-4-4L4 16z"/><path d="M13.5 6.5l4 4"/>'),
   trash: icon('<path d="M4 7h16"/><path d="M9.5 7V4.5h5V7"/><path d="M6.5 7l1 13h9l1-13"/>'),
   star: icon('<path d="M12 3l2.6 5.5 6 .8-4.4 4.2 1.1 6L12 16.6 6.7 19.5l1.1-6L3.4 9.3l6-.8z"/>'),
+  // On air: the TV's breaking mark.
+  onAir: icon('<circle cx="12" cy="12" r="1.6"/><path d="M8.6 8.6a4.8 4.8 0 0 0 0 6.8M15.4 8.6a4.8 4.8 0 0 1 0 6.8M5.8 5.8a8.8 8.8 0 0 0 0 12.4M18.2 5.8a8.8 8.8 0 0 1 0 12.4"/>'),
 };
 const reducedMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
 // Re-rendering a list replaces its buttons; put the keyboard focus back where it was.
@@ -76,12 +79,14 @@ async function loadState() {
 }
 // Another tab may have changed things since this one loaded: pick up the saved state when nothing
 // here is waiting to be saved. reload hands it over only in that case, checked in the same instant,
-// so a change made while the GET was out is never thrown away. Returns whether anything changed.
+// so a change made while the GET was out is never thrown away. If the first load failed (the server
+// was down as the page opened), catchUp loads it now instead, so the page stops working from a blank
+// state. Returns whether anything changed.
 // Called when the feed or News opens, when the tab comes back into view or focus, and before paying.
 async function reloadState() {
   if (!ready) return false;
   const before = JSON.stringify(S);
-  await store.reload((fresh) => { S = fresh; });
+  await store.catchUp((fresh) => { S = fresh; });
   return JSON.stringify(S) !== before;
 }
 // Redraw the feed without losing the keyboard's place (the buttons are drawn again).
@@ -91,28 +96,54 @@ function keepFocus(draw) {
   draw();
   if (key && !document.contains(a)) refocus(attrSel('data-' + key, a.dataset[key]));
 }
-// A tab can't be clicked before it is shown or focused: catch it up first, so a tab that sat in
-// the background acts on the latest reads, folders, notes and XP. Not while a folder is being
-// renamed or the notes drawer is open (nothing there should move under Snow's hands).
-let syncing = false;
-async function syncTab() {
-  if (!ready || syncing) return;
-  syncing = true;
-  try {
-    const busy = editing !== null || !$('#drawer').hidden;
-    const [feedChanged] = await Promise.all([busy ? false : reloadState(), news.sync()]);
-    if (!feedChanged) return;
-    if (!$('#feed').hidden) keepFocus(renderFeed); else if (!$('#room').hidden) renderRoom();
-  } finally { syncing = false; }
+// A tab can't be clicked before it is shown or focused: catch it up first, so a tab that sat in the
+// background acts on the latest reads, folders, notes and XP, and the TV shows the latest edition and
+// breaking story. One round: Product Feed's state (not while a folder is being renamed or the notes
+// drawer is open: nothing there should move under Snow's hands), News's state, and, unless the Product
+// Feed is showing, the edition and breaking story (the room's TV and the News page show them); then
+// one redraw of what's showing (news.refresh redraws the News page itself). One round at a time
+// (createRefresher): a tab return fires visibilitychange and focus, and the second shares the first;
+// opening the room starts a fresh round (force) and the older round's answer is dropped. news.js and
+// the state client also use only the newest answer when fetches overlap, so a slow old answer can't
+// bring back a mark Snow just cleared. A state whose first load failed is loaded again (catchUp), and
+// an empty Product Feed edition fetched again, so a page opened while the server was down recovers.
+const busy = () => editing !== null || !$('#drawer').hidden;
+async function catchUpRound() {
+  const [feedChanged, , gotFeed] = await Promise.all([
+    busy() ? false : reloadState(),
+    $('#feed').hidden ? news.refresh({ xp: false }) : news.sync(),
+    feed.articles.length ? false : loadFeed(),
+  ]);
+  if (store.missed || news.missed()) retryWhenIdle();
+  return feedChanged || gotFeed;
 }
+// Checked again at drawing time: a rename or the notes drawer may have started while the round was
+// out. Skipping is enough, as finishing the rename and closing the drawer both redraw the feed.
+function drawCaughtUp(feedChanged) {
+  if (!$('#feed').hidden) { if (feedChanged && !busy()) keepFocus(renderFeed); }
+  else if (!$('#room').hidden) renderRoom();
+}
+// A reload skipped or dropped because Snow changed something meanwhile (the state client's `missed`):
+// one more round once both states have nothing waiting to be saved. A fresh one (force): the round
+// that queued this may still be finishing, and asking without force would only get that round back.
+let retryQueued = false;
+function retryWhenIdle() {
+  if (retryQueued) return;
+  retryQueued = true;
+  Promise.all([store.whenIdle(), news.whenIdle()]).then(() => { retryQueued = false; if (ready) catchUp({ force: true }); });
+}
+const catchUp = createRefresher(catchUpRound, drawCaughtUp);
+function syncTab() { if (ready) catchUp(); }
+// The Product Feed's edition. Returns whether it has articles (a catch-up round fetches it again while it has none).
 async function loadFeed() {
   try {
-    const r = await fetch(FEED_URL, { cache: 'no-store' });
+    const r = await fetch(FEED_URL, { cache: 'no-store', signal: timeoutSignal(GET_TIMEOUT) });
     if (!r.ok) throw new Error('feed ' + r.status);
     const d = await r.json();
     if (!d || typeof d !== 'object' || Array.isArray(d)) throw new Error('feed is not an object');
     feed = { ...d, articles: Array.isArray(d.articles) ? d.articles : [], themes: Array.isArray(d.themes) ? d.themes : [] };
   } catch (e) { feed = { articles: [], themes: [] }; }
+  return feed.articles.length > 0;
 }
 
 /* ================= progress ================= */
@@ -132,10 +163,16 @@ let preview = null;
 const phase = () => preview || autoPhase();
 
 /* ================= the room ================= */
+// The TV (News) also has a screen that can glow and a breaking mark (N5). Its tag has a full label and a
+// short one for touch screens, where every tag shows at once (style.css picks). The mark comes after the
+// tag, so the tag's soft shadow falls behind the mark instead of dimming its icon.
+const TV_SCREEN = '<span class="screen" aria-hidden="true"></span>';
+const TV_TAG = '<span class="tfull"></span><span class="tshort"></span>';
+const TV_MARK = `<span class="bmark" aria-hidden="true">${ICON.onAir}</span>`;
 function buildHotspots() {
   $('#hotspots').innerHTML = OBJECTS.map(o =>
-    `<button class="hs" data-id="${o.id}" style="left:${o.l}%;top:${o.t}%;width:${o.w}%;height:${o.h}%" aria-label="${esc(o.name)}">
-      <span class="glow"></span><span class="tag" ${o.tagIn ? 'style="bottom:auto;top:6%"' : ''}></span></button>`).join('');
+    `<button class="hs${o.id === 'news' ? ' tv' : ''}" data-id="${o.id}" style="left:${o.l}%;top:${o.t}%;width:${o.w}%;height:${o.h}%" aria-label="${esc(o.name)}">
+      <span class="glow"></span>${o.id === 'news' ? TV_SCREEN : ''}<span class="tag" ${o.tagIn ? 'style="bottom:auto;top:6%"' : ''}>${o.id === 'news' ? TV_TAG : ''}</span>${o.id === 'news' ? TV_MARK : ''}</button>`).join('');
   $('#hotspots').addEventListener('click', e => {
     const b = e.target.closest('.hs'); if (!b) return;
     const o = OBJECTS.find(x => x.id === b.dataset.id);
@@ -162,15 +199,23 @@ function renderRoom() {
   const p = renderScene();
   if (!ready) return;
   const unread = feed.articles.filter(a => !S.read[a.id]).length;
-  // The TV's own glow and breaking mark come with N5 (news.signals() has what it needs).
+  // The TV: its screen glows while today's top stories are unread; a rosy mark while a breaking story waits.
+  const tv = tvLook(readSignals(news.signals));
   OBJECTS.forEach(o => {
     const b = document.querySelector(`.hs[data-id="${o.id}"]`); if (!b) return;
     const tag = b.querySelector('.tag');
     const locked = o.lock && level() < o.lock;
     const isFeed = o.go === 'feed';
+    const isTv = o.id === 'news';
     b.classList.toggle('locked', !!locked);
     b.classList.toggle('new', isFeed && unread > 0);
-    tag.textContent = isFeed ? (unread ? `${o.name} · ${unread} new` : o.name) : locked ? `${o.name} · level ${o.lock}` : o.name;
+    b.classList.toggle('tv-on', isTv && tv.on);
+    b.classList.toggle('tv-breaking', isTv && tv.breaking);
+    // The tag is also the button's name, so what it says (3 new, breaking story) reaches screen readers.
+    const label = isFeed ? (unread ? `${o.name} · ${unread} new` : o.name) : isTv ? tv.tag : locked ? `${o.name} · level ${o.lock}` : o.name;
+    if (isTv) { tag.querySelector('.tfull').textContent = tv.tag; tag.querySelector('.tshort').textContent = tv.short; }
+    else tag.textContent = label;
+    b.setAttribute('aria-label', label);
     let badge = b.querySelector('.badge');
     if (isFeed && unread) { if (!badge) { badge = document.createElement('span'); badge.className = 'badge'; b.appendChild(badge); } badge.textContent = unread; }
     else if (badge) badge.remove();
@@ -198,7 +243,10 @@ function route() {
     if (ready) { renderFeed(); reloadState().then(changed => { if (changed && !$('#feed').hidden) keepFocus(renderFeed); }); }
   }
   else if (view === 'news') { renderScene(); news.render(); news.refresh(); window.scrollTo(0, 0); }
-  else { requestAnimationFrame(() => requestAnimationFrame(() => $('#frame').classList.remove('zoom'))); renderRoom(); }
+  // Back in the room: what was read or dismissed shows at once, then a fresh catch-up round fetches the
+  // edition and breaking story again (a new morning edition, a new breaking story) and the TV redraws.
+  // A failed fetch keeps what was there; the room redraws either way.
+  else { requestAnimationFrame(() => requestAnimationFrame(() => $('#frame').classList.remove('zoom'))); renderRoom(); if (ready) catchUp({ force: true }); }
 }
 
 /* ================= the feed ================= */
@@ -445,8 +493,24 @@ $('#noteList').addEventListener('click', e => {
   const b = e.target.closest('[data-dn]'); if (!b) return;
   const gone = feedOps.deleteNote(S, store, b.dataset.dn); if (!gone) return;
   save(); renderNotes(); $('#noteText').focus({ preventScroll: true });
-  toast('Note deleted.', 'Undo', () => { feedOps.restoreNote(S, store, gone); save(); renderNotes(); });
+  toast('Note deleted.', 'Undo', () => undoNoteDelete(gone));
 });
+// Where the keyboard was before it went to the toast: an Undo returns there, not to the fading button.
+let focusBeforeToast = null;
+document.addEventListener('focusin', e => { if (!(e.target.closest && e.target.closest('#toast'))) focusBeforeToast = e.target; });
+// Undo of a note delete. With the drawer open: its list again, and the note box. With it closed (Snow
+// closed it before pressing Undo): the feed again, so "Notes (n)" and the My notes count include the
+// note, and the keyboard goes back to where it was.
+function undoNoteDelete(gone) {
+  feedOps.restoreNote(S, store, gone); save();
+  if (!$('#drawer').hidden) { renderNotes(); $('#noteText').focus({ preventScroll: true }); return; }
+  const back = focusBeforeToast;
+  const key = back && back.dataset && ['read', 'notes', 'shelf', 'edit', 'del'].find(k => back.dataset[k] !== undefined);
+  renderFeed();
+  if (key) refocus(attrSel('data-' + key, back.dataset[key]), '#listTitle');
+  else if (back && document.contains(back) && back !== document.body) back.focus({ preventScroll: true });
+  else refocus('#listTitle');
+}
 $('#dClose').addEventListener('click', closeDrawer);
 $('#scrim').addEventListener('click', closeDrawer);
 document.addEventListener('keydown', e => { if (e.key === 'Escape' && !$('#drawer').hidden) closeDrawer(); });

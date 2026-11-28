@@ -26,6 +26,20 @@ function rulesFor(css, selector) {
   return out;
 }
 
+/** The inside of the first `@media <query>{...}` block (nested braces counted), or ''. */
+function mediaBlock(css, query) {
+  const clean = stripCssComments(css);
+  const start = clean.indexOf(`@media ${query}{`);
+  if (start < 0) return '';
+  let depth = 0;
+  for (let i = clean.indexOf('{', start); i < clean.length; i++) {
+    if (clean[i] === '{') depth++;
+    else if (clean[i] === '}' && --depth === 0) return clean.slice(clean.indexOf('{', start) + 1, i);
+  }
+  return '';
+}
+const pxOf = (body, prop) => { const m = body.match(new RegExp(`(?:^|;)\\s*${prop}\\s*:\\s*(-?[\\d.]+)px`)); return m ? Number(m[1]) : null; };
+
 const VOID = new Set(['meta', 'link', 'img', 'input', 'br', 'hr', 'source', 'area', 'base', 'col', 'embed', 'param', 'track', 'wbr']);
 /** The chain of ancestors (outermost first) of the element with this id in index.html, each as its simple selectors. */
 function ancestorsOf(html, id) {
@@ -129,7 +143,7 @@ describe('app/style.css', () => {
   });
 
   test('no amber or yellow anywhere in the app', () => {
-    for (const file of ['style.css', 'app.js', 'news.js', 'news-html.js', 'news-lib.js', 'index.html', 'favicon.svg']) {
+    for (const file of ['style.css', 'app.js', 'news.js', 'news-html.js', 'news-lib.js', 'tv-lib.js', 'index.html', 'favicon.svg']) {
       const text = read(file);
       for (const c of [...hexes(text), ...rgbs(text)]) assert.ok(!isAmberOrYellow(c.rgb), `${file}: ${c.text} is amber or yellow`);
     }
@@ -166,6 +180,95 @@ describe('app/style.css', () => {
     const frames = stripCssComments(css).match(/@keyframes tvwarm\{(.*?)\}\}/)[1];
     assert.match(frames, /100%\{opacity:0/, 'it ends invisible');
     assert.equal(rulesFor(css, '.news').some((b) => /animation/.test(b)), false, 'the News page has no second opening motion');
+  });
+
+  test("the TV in the room has one gentle ambient motion, its screen's slow hum, and it stays on without motion", () => {
+    const css = read('style.css');
+    const clean = stripCssComments(css);
+    const tvAnimated = [...selectorsWith(css, /animation\s*:/)].filter((s) => s.includes('.tv'));
+    assert.deepEqual(tvAnimated, ['.hs.tv.tv-on .screen'], 'only the glowing screen moves');
+    const hum = rulesFor(css, '.hs.tv.tv-on .screen').join(';');
+    const [, name, seconds] = hum.match(/animation\s*:\s*(\w+)\s+([\d.]+)s/) || [];
+    assert.equal(name, 'tvhum');
+    assert.ok(Number(seconds) >= 4, `a slow hum, not a blink (${seconds}s)`);
+    assert.match(hum, /(^|;)\s*opacity\s*:\s*1\s*(;|$)/, 'with reduced motion (no animation) the screen simply stays on');
+    const frames = clean.match(/@keyframes tvhum\{(.*?)\}\}/)[1];
+    assert.doesNotMatch(frames, /transform|scale|translate/, 'the hum only dims and brightens');
+    for (const [, opacity] of frames.matchAll(/opacity:([\d.]+)/g)) assert.ok(Number(opacity) >= 0.6, `never dims below 0.6 (${opacity})`);
+    // The breaking mark is still: one pulse at most on the TV.
+    assert.equal(rulesFor(css, '.hs.tv .bmark').some((b) => /animation/.test(b)), false);
+    assert.equal(rulesFor(css, '.hs.tv.tv-breaking .bmark').some((b) => /animation/.test(b)), false);
+    // Quiet at rest: no glow and no mark until the room says so.
+    assert.match(rulesFor(css, '.hs.tv .screen').join(';'), /(^|;)opacity:0(;|$)/);
+    assert.match(rulesFor(css, '.hs.tv .bmark').join(';'), /(^|;)opacity:0(;|$)/);
+    assert.match(rulesFor(css, '.hs.tv.tv-breaking .bmark').join(';'), /(^|;)opacity:1(;|$)/);
+  });
+
+  test('the TV never takes taps from the room: its screen and mark let them through to the button', () => {
+    const css = read('style.css');
+    for (const s of ['.hs.tv .screen', '.hs.tv .bmark']) assert.match(rulesFor(css, s).join(';'), /pointer-events:none/, s);
+  });
+
+  test('no blend modes: even an invisible one changes how the frosted glass renders on a phone', () => {
+    assert.deepEqual([...selectorsWith(read('style.css'), /mix-blend-mode/)], []);
+  });
+
+  test("on a touch screen, where every tag shows, the TV's tag and Language's grow away from each other", () => {
+    // The TV and Language share an edge (71.5% + 9.5% = 81%). The TV's tag is pinned to its right edge
+    // and grows left, Language's to its left edge and grows right, so they never meet whatever the words.
+    // (scripts/screens.js checks every tag's text with elementFromPoint at 390 in each TV state.)
+    const js = read('app.js');
+    const at = (id) => js.match(new RegExp(`\\{ id: '${id}', name: '[^']+', l: ([\\d.]+), t: [\\d.]+, w: ([\\d.]+)`)).slice(1).map(Number);
+    const [tvL, tvW] = at('news');
+    const [langL] = at('lang');
+    assert.equal(tvL + tvW, langL, 'the TV and Language share an edge');
+    const touch = mediaBlock(read('style.css'), '(hover:none)');
+    assert.ok(touch, 'there is a (hover:none) block');
+    const tvTag = rulesFor(touch, '.hs.tv .tag').join(';');
+    assert.match(tvTag, /left:auto/);
+    assert.ok(pxOf(tvTag, 'right') >= 0, 'pinned to the right edge');
+    assert.match(tvTag, /transform:none/);
+    const langTag = rulesFor(touch, '.hs[data-id=lang] .tag').join(';');
+    assert.ok(pxOf(langTag, 'left') >= 0, 'pinned to the left edge');
+    assert.doesNotMatch(langTag, /translate\(-50%/, 'not centred');
+  });
+
+  test('the TV shows its short label only on a touch screen, and its full label everywhere else', () => {
+    const css = read('style.css');
+    const touch = mediaBlock(css, '(hover:none)');
+    const outside = stripCssComments(css).replace(touch, '');
+    assert.match(rulesFor(outside, '.hs.tv .tag .tshort').join(';'), /display:none/);
+    assert.equal(rulesFor(outside, '.hs.tv .tag .tfull').length, 0, 'the full label shows by default');
+    assert.match(rulesFor(touch, '.hs.tv .tag .tfull').join(';'), /display:none/);
+    assert.match(rulesFor(touch, '.hs.tv .tag .tshort').join(';'), /display:inline/);
+  });
+
+  test("the mark and the TV's tag keep 6px apart, on a laptop and on a phone", () => {
+    const css = read('style.css');
+    const touch = mediaBlock(css, '(hover:none)');
+    const outside = stripCssComments(css).replace(touch, '');
+    // Laptop: the tag shows 4px above the TV (hover or focus); the mark starts 2px below the TV's top.
+    assert.match(rulesFor(outside, '.hs:hover .tag').join(';'), /transform:translate\(-50%,-4px\)/);
+    const mark = rulesFor(outside, '.hs.tv .bmark').join(';');
+    assert.match(mark, /translate:-50% 0/, 'centred sideways only, so `top` is its top edge');
+    assert.ok(pxOf(mark, 'top') + 4 >= 6, `laptop gap ${pxOf(mark, 'top') + 4}px`);
+    // Phone: the tag sits on the TV's top (transform none); the mark starts 6px below it, on the TV's
+    // left corner: on the right, Workout Coach's tag overlaps the TV's edge at 390 (screens.js checks
+    // the mark's ring touches no tag, badge or Wila's orb).
+    const touchMark = rulesFor(touch, '.hs.tv .bmark').join(';');
+    assert.ok(pxOf(touchMark, 'top') >= 6);
+    const [, left] = touchMark.match(/left:(-?[\d.]+)%/) || [];
+    assert.ok(Number(left) <= 0, `on the left corner (left ${left}%)`);
+    // The mark is drawn after the tag, so the tag's soft shadow can't dim its icon.
+    assert.match(read('app.js'), /<span class="tag" [^`]*<\/span>\$\{o\.id === 'news' \? TV_MARK : ''\}<\/button>/);
+  });
+
+  test("the TV's light spill is measured in the room's size, so a phone's 37px TV doesn't light the next plant", () => {
+    const screen = rulesFor(read('style.css'), '.hs.tv .screen').join(';');
+    assert.match(screen, /--fu:min\(1vw,1\.777vh\)/, '1% of the painting, which is min(100vw, 177.7vh) wide');
+    const shadow = screen.match(/box-shadow:([^;]+)/)[1];
+    assert.doesNotMatch(shadow, /\d+px/, `no fixed pixels: ${shadow}`);
+    assert.equal((shadow.match(/var\(--fu\)/g) || []).length, 6, 'blur and spread of all three layers');
   });
 
   test('News focus rings are outline only (a box-shadow ring paints a bar across wrapped lines)', () => {
@@ -289,6 +392,56 @@ describe('app/app.js', () => {
     assert.ok(selectorsWith(read('style.css'), /transform-origin/).has('.frame[data-zoom=news] .stage'), 'the zoom goes into the TV');
   });
 
+  test('the TV shows the News state: glow, mark and a tag that is also its name', () => {
+    const js = read('app.js');
+    assert.match(js, /import \{ createRefresher, readSignals, tvLook \} from '\.\/tv-lib\.js';/);
+    assert.match(js, /const tv = tvLook\(readSignals\(news\.signals\)\);/);
+    assert.match(js, /b\.classList\.toggle\('tv-on', isTv && tv\.on\);/);
+    assert.match(js, /b\.classList\.toggle\('tv-breaking', isTv && tv\.breaking\);/);
+    // The laptop's "new" glow breathes; the TV has its own, so it never gets a second pulse.
+    assert.match(js, /b\.classList\.toggle\('new', isFeed && unread > 0\);/);
+    // Colour never carries the meaning alone: the tag says it, and screen readers hear the same words.
+    assert.match(js, /isTv \? tv\.tag :/);
+    assert.match(js, /if \(isTv\) \{ tag\.querySelector\('\.tfull'\)\.textContent = tv\.tag; tag\.querySelector\('\.tshort'\)\.textContent = tv\.short; \}\s*else tag\.textContent = label;\s*b\.setAttribute\('aria-label', label\);/);
+    // The screen and the mark are pictures; the button's name says what they mean.
+    assert.match(js, /const TV_SCREEN = '<span class="screen" aria-hidden="true"><\/span>';/);
+    assert.match(js, /const TV_MARK = `<span class="bmark" aria-hidden="true">\$\{ICON\.onAir\}<\/span>`;/);
+    assert.match(js, /const TV_TAG = '<span class="tfull"><\/span><span class="tshort"><\/span>';/);
+    assert.match(js, /<button class="hs\$\{o\.id === 'news' \? ' tv' : ''\}"/);
+  });
+
+  test('the room learns the News state on load, on coming back from a desk, and when the tab comes back', () => {
+    const js = read('app.js');
+    assert.match(js, /Promise\.all\(\[loadState\(\), loadFeed\(\), news\.load\(\)\]\)\.then\(\(\) => \{ ready = true; renderAll\(\); \}\);/);
+    // Back in the room: drawn at once from what is in memory, then a fresh catch-up round.
+    assert.match(js, /else \{ requestAnimationFrame\(\(\) => requestAnimationFrame\(\(\) => \$\('#frame'\)\.classList\.remove\('zoom'\)\)\); renderRoom\(\); if \(ready\) catchUp\(\{ force: true \}\); \}/);
+    // The tab coming back goes through the same round (syncTab), and the room redraws once after it,
+    // whether the round worked or failed (never an error in the room).
+    assert.match(js, /const catchUp = createRefresher\(catchUpRound, drawCaughtUp\);/);
+    assert.match(js, /function syncTab\(\) \{ if \(ready\) catchUp\(\); \}/);
+    assert.match(js, /function drawCaughtUp\(feedChanged\) \{\s*if \(!\$\('#feed'\)\.hidden\) \{ if \(feedChanged && !busy\(\)\) keepFocus\(renderFeed\); \}\s*else if \(!\$\('#room'\)\.hidden\) renderRoom\(\);\s*\}/);
+  });
+
+  test('one tab-return path: one listener each for visibilitychange and focus, both through syncTab', () => {
+    const js = read('app.js');
+    assert.equal((js.match(/addEventListener\('visibilitychange'/g) || []).length, 1, 'one visibilitychange listener');
+    assert.equal((js.match(/addEventListener\('focus'/g) || []).length, 1, 'one focus listener');
+    assert.doesNotMatch(js, /refreshTv/, 'no separate room refresh');
+    assert.doesNotMatch(js, /let syncing/, 'the in-flight guard is createRefresher, not a flag that drops the second event');
+    // One round: Product Feed's state (unless busy), and News's state with (outside the feed) the
+    // edition and breaking story, without reloading Product Feed's state a second time.
+    assert.match(js, /const \[feedChanged, , gotFeed\] = await Promise\.all\(\[\s*busy\(\) \? false : reloadState\(\),\s*\$\('#feed'\)\.hidden \? news\.refresh\(\{ xp: false \}\) : news\.sync\(\),\s*feed\.articles\.length \? false : loadFeed\(\),\s*\]\);/);
+    assert.match(read('news.js'), /async function refresh\(\{ xp = true \} = \{\}\) \{/);
+  });
+
+  test('overlapping fetches use only the newest answer: the edition, the breaking story and both states', () => {
+    const nj = read('news.js');
+    assert.match(nj, /import \{ GET_TIMEOUT, createStateClient, newestAnswer, timeoutSignal \} from '\.\/lib\.js';/);
+    assert.match(nj, /const take = editionAnswers\.start\(\);\s*try \{\s*const d = await getJson\(NEWS_URL\);\s*if \(take\(\)\) news = /);
+    assert.match(nj, /const take = breakingAnswers\.start\(\);\s*try \{\s*const d = await getJson\(BREAKING_URL\);\s*if \(take\(\)\) breaking = /);
+    assert.doesNotMatch(nj.replace(/if \(take\(\)\) (news|breaking) = /g, ''), /^\s*(news|breaking) = /m, 'no other place sets them after a fetch');
+  });
+
   test('reading a News story pays through the same award() as the feed, once everything has loaded', () => {
     const js = read('app.js');
     assert.match(js, /const news = createNewsPage\(\{ award, toast, isReady: \(\) => ready, canAward: \(\) => store\.canSave, reloadXpState: reloadState \}\);/);
@@ -301,12 +454,59 @@ describe('app/app.js', () => {
     assert.match(nj, /const STATE_URL = '\/api\/news\/state';/);
   });
 
+  test('a page opened while the server was down recovers on the next catch-up, and its TV stays quiet until then', () => {
+    const js = read('app.js');
+    const nj = read('news.js');
+    // Both states go through catchUp (reload, or load again after a failed first load) ...
+    assert.match(js, /await store\.catchUp\(\(fresh\) => \{ S = fresh; \}\);/);
+    assert.match(nj, /const freshState = \(\) => store\.catchUp\(applyState\);/);
+    assert.match(nj, /async function sync\(\) \{[\s\S]*?await freshState\(\);/);
+    assert.doesNotMatch(nj, /store\.reload\(/, 'the News page never reloads without the load fallback');
+    // ... an empty Product Feed edition is fetched again, and finding articles counts as a change ...
+    assert.match(js, /feed\.articles\.length \? false : loadFeed\(\)/);
+    assert.match(js, /return feedChanged \|\| gotFeed;/);
+    assert.match(js, /return feed\.articles\.length > 0;\s*\}/);
+    // ... and until Snow's News state has loaded, the TV gets no signals: a quiet TV, never her
+    // read stories or dismissed banner shown as new.
+    assert.match(nj, /signals: \(\) => \(store\.canSave \? tvSignals\(news, breaking, N\) : null\),/);
+  });
+
+  test('every GET gives up after 10 s, so a stuck one cannot keep a catch-up round running', () => {
+    assert.match(read('lib.js'), /export const GET_TIMEOUT = 10000;/);
+    assert.match(read('lib.js'), /const r = await fetchFn\(url, \{ cache: 'no-store', signal: timeoutSignal\(timeout\) \}\);/);
+    assert.match(read('news.js'), /const r = await fetch\(url, \{ cache: 'no-store', signal: timeoutSignal\(GET_TIMEOUT\) \}\);/);
+    assert.match(read('app.js'), /const r = await fetch\(FEED_URL, \{ cache: 'no-store', signal: timeoutSignal\(GET_TIMEOUT\) \}\);/);
+    for (const file of ['app.js', 'news.js']) {
+      assert.doesNotMatch(read(file), /fetch\([^)]*\{ cache: 'no-store' \}\)/, `${file}: no GET without a timeout`);
+    }
+  });
+
+  test('a catch-up redraw never resets a folder rename or the feed behind the notes drawer', () => {
+    const js = read('app.js');
+    assert.match(js, /const busy = \(\) => editing !== null \|\| !\$\('#drawer'\)\.hidden;/);
+    assert.match(js, /if \(feedChanged && !busy\(\)\) keepFocus\(renderFeed\);/, 'busy is checked again when drawing');
+    // Skipping is enough: finishing a rename and closing the drawer both redraw the feed.
+    assert.match(js, /function finishRename\(inp, keep\) \{[\s\S]*?editing = null; renderFeed\(\);/);
+    assert.match(js, /function closeDrawer\(\) \{\s*\$\('#drawer'\)\.hidden = true; \$\('#scrim'\)\.hidden = true; setBehindDrawer\(false\); renderFeed\(\);/);
+  });
+
+  test('a reload skipped or dropped because of a change here gets one more round once both states are idle', () => {
+    const js = read('app.js');
+    assert.match(js, /if \(store\.missed \|\| news\.missed\(\)\) retryWhenIdle\(\);/);
+    // A fresh round (force): asked from inside the round that is finishing, a plain catchUp() would
+    // only hand back that same round (see createRefresher's test: a call during a run shares it).
+    assert.match(js, /function retryWhenIdle\(\) \{\s*if \(retryQueued\) return;\s*retryQueued = true;\s*Promise\.all\(\[store\.whenIdle\(\), news\.whenIdle\(\)\]\)\.then\(\(\) => \{ retryQueued = false; if \(ready\) catchUp\(\{ force: true \}\); \}\);\s*\}/);
+    assert.match(read('news.js'), /missed: \(\) => store\.missed,\s*\/\*\*[^*]*\*\/\s*whenIdle: \(\) => store\.whenIdle\(\),/);
+  });
+
   test('two tabs: opening #news reloads both states, applied only if nothing changed while the reload was out', () => {
     const nj = read('news.js');
-    assert.match(nj, /await Promise\.all\(\[store\.reload\(applyState\), reloadXpState\(\), loadEdition\(\), loadBreaking\(\)\]\);/);
+    assert.match(nj, /await Promise\.all\(\[freshState\(\), xp \? reloadXpState\(\) : null, loadEdition\(\), loadBreaking\(\)\]\);/);
+    // freshState: reload, or load if the first load failed (store.catchUp hands the state to applyState either way).
+    assert.match(nj, /const freshState = \(\) => store\.catchUp\(applyState\);/);
     assert.match(nj, /function applyState\(fresh\) \{\s*N = fresh;\s*\}/);
     assert.doesNotMatch(nj, /N = state\.state/, 'never replaced after the await, only inside reload');
-    assert.match(read('app.js'), /async function reloadState\(\) \{\s*if \(!ready\) return false;\s*const before = JSON\.stringify\(S\);\s*await store\.reload\(\(fresh\) => \{ S = fresh; \}\);/);
+    assert.match(read('app.js'), /async function reloadState\(\) \{\s*if \(!ready\) return false;\s*const before = JSON\.stringify\(S\);\s*await store\.catchUp\(\(fresh\) => \{ S = fresh; \}\);/);
   });
 
   test('leaving a tab sends what is waiting at once (hidden or blur), so the tab switched to reads it', () => {
@@ -320,7 +520,7 @@ describe('app/app.js', () => {
   test('a tab catches up before it can act: on becoming visible, on focus, and when the feed opens', () => {
     const js = read('app.js');
     assert.match(js, /window\.addEventListener\('focus', syncTab\);/);
-    assert.match(js, /const \[feedChanged\] = await Promise\.all\(\[busy \? false : reloadState\(\), news\.sync\(\)\]\);/);
+    assert.match(js, /const \[feedChanged, , gotFeed\] = await Promise\.all\(\[\s*busy\(\) \? false : reloadState\(\),\s*\$\('#feed'\)\.hidden \? news\.refresh\(\{ xp: false \}\) : news\.sync\(\),\s*feed\.articles\.length \? false : loadFeed\(\),\s*\]\);/);
     assert.match(js, /if \(ready\) \{ renderFeed\(\); reloadState\(\)\.then\(changed => \{ if \(changed && !\$\('#feed'\)\.hidden\) keepFocus\(renderFeed\); \}\); \}/);
   });
 
@@ -343,6 +543,17 @@ describe('app/app.js', () => {
     assert.match(js, /feedOps\.restoreNote\(S, store, gone\)/);
     // No direct change to these lists is left in app.js.
     assert.doesNotMatch(js, /S\.notes\.push|S\.folders\.push|S\.notes = S\.notes\.filter|S\.folders = S\.folders\.filter|S\.saved = |delete S\.saved/);
+  });
+
+  test('Undo of a note delete: focus to the note box with the drawer open, else back where it was, and the feed redrawn', () => {
+    const js = read('app.js');
+    assert.match(js, /toast\('Note deleted\.', 'Undo', \(\) => undoNoteDelete\(gone\)\);/);
+    assert.match(js, /document\.addEventListener\('focusin', e => \{ if \(!\(e\.target\.closest && e\.target\.closest\('#toast'\)\)\) focusBeforeToast = e\.target; \}\);/);
+    const fn = js.match(/function undoNoteDelete\(gone\) \{[\s\S]*?\n\}/)[0];
+    assert.match(fn, /feedOps\.restoreNote\(S, store, gone\); save\(\);/);
+    assert.match(fn, /if \(!\$\('#drawer'\)\.hidden\) \{ renderNotes\(\); \$\('#noteText'\)\.focus\(\{ preventScroll: true \}\); return; \}/);
+    assert.match(fn, /renderFeed\(\);/, 'with the drawer closed, Notes (n) and My notes are drawn again');
+    assert.doesNotMatch(fn, /#toast/, 'never back to the fading toast button');
   });
 
   test('Mark read clicks made while a pay check is out are queued, not dropped (both desks)', () => {
