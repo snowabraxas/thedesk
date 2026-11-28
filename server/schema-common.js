@@ -265,6 +265,9 @@ export function linkKey(url) {
  *   holds (keyed by the list's field name), so "sources" says "needs at least 2 sources (has 1)"
  *   instead of "must have at least 2 items (it has 1)". overflow is a hint added when a list is too long.
  */
+/** Ids an agent may not use: as object keys they would reach Object.prototype (the id patterns refuse them). */
+export const RESERVED_IDS = new Set(['__proto__', 'constructor', 'prototype']);
+
 export function describeError(error, data, { root, patterns = {}, nouns = {} }) {
   const where = readablePath(error.instancePath, root);
   const p = error.params || {};
@@ -279,6 +282,9 @@ export function describeError(error, data, { root, patterns = {}, nouns = {} }) 
     case 'enum':
       return `${where}: must be one of ${p.allowedValues.map((v) => show(v)).join(', ')} (got ${got()})`;
     case 'pattern': {
+      const value = valueAt(data, error.instancePath);
+      // An id that is a name JavaScript reserves gets its own line (the pattern refuses it by lookahead).
+      if (/^\^\(\?!/.test(p.pattern) && RESERVED_IDS.has(value)) return `${where}: can't be ${show(value)}: __proto__, constructor and prototype are names JavaScript reserves; use another id`;
       const words = patterns[p.pattern] || `must match the pattern ${p.pattern}`;
       return `${where}: ${words} (got ${got()})`;
     }

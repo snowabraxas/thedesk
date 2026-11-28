@@ -41,6 +41,11 @@ export const MAX_FOLDERS = 200;
 /** Tombstones (`_deleted`) are kept this long, so a tab left open for weeks still can't bring an item back. */
 export const TOMBSTONE_MS = 30 * 864e5;
 export const MAX_TOMBSTONES = 2000;
+/** The server's own bookkeeping sits outside the 1 MB cap, each with a small budget of its own, trimmed oldest first. */
+export const TOMBSTONE_BYTES = 128 * 1024;
+export const SEEN_BYTES = 16 * 1024;
+/** Between two saves, tombstones age by at most this much, so a clock step can't expire them early. */
+export const MAX_CLOCK_STEP = 864e5;
 /** Entries one save may list as added or removed. */
 export const MAX_CHANGES = 5000;
 
@@ -108,11 +113,13 @@ function timesByName(value, key) {
   return null;
 }
 
-/** A list of items with ids (notes, folders): objects, each with an id of 1 to 200 characters, each id once, at most `max`. */
+/**
+ * A list of items with ids (notes, folders): objects, each with an id of 1 to 200 characters, each id
+ * once. A list over the cap isn't refused (the page would then fail every save): the merge trims it.
+ */
 function itemsById(max, noun) {
   return (value, key) => {
     if (!Array.isArray(value)) return `${key} must be a list`;
-    if (value.length > max) return `${key} can hold at most ${max} ${noun} (has ${value.length})`;
     const ids = new Set();
     for (const item of value) {
       if (!isPlainObject(item) || !isName(item.id)) return `${key} must hold ${noun} with an id (got ${show(item)})`;
@@ -153,6 +160,7 @@ function changeRule(kinds, isId) {
 const FEED_KINDS = ['read', 'notes', 'folders', 'saved'];
 const NEWS_KINDS = ['read'];
 const feedChange = changeRule(FEED_KINDS, (kind, id) => isName(id));
+const restoreChange = changeRule(['notes', 'folders'], (kind, id) => isName(id));
 const newsChange = changeRule(NEWS_KINDS, (kind, id) => typeof id === 'string' && isStoryKey(id));
 
 /** `_sync`: what this page last synced, its tab id and the XP it is sending. Never saved. */
@@ -186,9 +194,11 @@ export function stateRules(now = Date.now) {
       awarded: timesByName,
       // Not saved: what the page last synced, so a save adds only its own XP (and only once).
       _sync: syncRule,
-      // Not saved: what this save removed, and what it added or edited, item by item.
+      // Not saved: what this save removed, and what it added or edited, item by item; and which of
+      // those additions are an Undo (a deleted note or folder comes back only that way).
       _removed: feedChange,
       _added: feedChange,
+      _restored: restoreChange,
     },
     news: {
       read: timesKeyedBy('"<edition>/<story id>", like "2026-12-07/s1"', isStoryKey),
@@ -273,23 +283,81 @@ function updateSeen(seen, tab, sent, now) {
   const out = Object.fromEntries(Object.entries(isPlainObject(seen) ? seen : {}).filter(([k, v]) => isTabId(k) && isPlainObject(v) && isNumber(v.xp)));
   const n = (v) => (isNumber(v.n) ? v.n : 0);
   const top = Math.max(0, ...Object.values(out).map(n));
-  const prior = out[tab] ? out[tab].xp : -Infinity;
+  const prior = Object.hasOwn(out, tab) ? out[tab].xp : -Infinity;
   out[tab] = { xp: Math.max(prior, sent), n: top + 1, at: now };
   const at = (v) => (isNumber(v.at) ? v.at : 0);
-  return Object.fromEntries(Object.entries(out).sort((a, b) => n(b[1]) - n(a[1]) || at(b[1]) - at(a[1])).slice(0, MAX_SEEN_TABS));
+  const sorted = Object.entries(out).sort((a, b) => n(b[1]) - n(a[1]) || at(b[1]) - at(a[1])).slice(0, MAX_SEEN_TABS);
+  return Object.fromEntries(withinBytes(sorted, SEEN_BYTES));
+}
+
+/** The first entries (newest first) whose JSON fits in `budget` bytes. */
+function withinBytes(entries, budget) {
+  const out = [];
+  let size = 2;
+  for (const entry of entries) {
+    size += Buffer.byteLength(JSON.stringify(entry[0])) + Buffer.byteLength(JSON.stringify(entry[1])) + 2;
+    if (size > budget) break;
+    out.push(entry);
+  }
+  return out;
+}
+
+/**
+ * A deterministic id for an item found without one (a hand edit): a hash of what it holds (a note's
+ * article, time and text; a folder's name), so every tab and the server agree. The same function is
+ * in app/lib.js (a test keeps them equal). Repeats get -2, -3, in order.
+ */
+export function stableId(prefix, text) {
+  let h = 0x811c9dc5;
+  for (const ch of String(text)) {
+    h ^= ch.codePointAt(0);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return `${prefix}${h.toString(16).padStart(8, '0')}`;
+}
+/** Gives each item without a usable id a stable one (repeats numbered); drops what isn't an object. */
+export function withIds(list, kind) {
+  if (!Array.isArray(list)) return list;
+  const used = new Set();
+  const out = [];
+  for (const item of list) {
+    if (!isPlainObject(item)) continue;
+    let next = item;
+    if (!isName(item.id) || used.has(item.id)) {
+      const base = kind === 'notes' ? stableId('n', `${item.a}|${item.ts}|${item.text}`) : stableId('f', `${item.name}`);
+      let id = base;
+      for (let i = 2; used.has(id); i++) id = `${base}-${i}`;
+      next = { ...item, id };
+    }
+    used.add(next.id);
+    out.push(next);
+  }
+  return out;
 }
 
 // ---- Merging by item: reads, saved items, notes and folders ----
 
 /** The tombstones as a small helper: has, set (a removal now), clear (an addition), and the pruned map to save. */
-function tombstones(saved, now) {
+function tombstones(saved, lastAt, now) {
+  // The clock may step (set by hand, or a big NTP correction): between two saves the tombstones age by
+  // at most MAX_CLOCK_STEP and never get younger than now, so a step forward can't expire them early
+  // and a step back can't keep them forever. (A long real absence also counts as one step: they live a
+  // little longer, which is the safe side.)
+  const step = isNumber(lastAt) ? now - lastAt : 0;
+  const shift = step - Math.min(Math.max(step, 0), MAX_CLOCK_STEP);
   const map = new Map();
-  if (isPlainObject(saved)) for (const [k, t] of Object.entries(saved)) if (k !== '__proto__' && isNumber(t) && now - t <= TOMBSTONE_MS) map.set(k, t);
+  if (isPlainObject(saved)) {
+    for (const [k, raw] of Object.entries(saved)) {
+      if (k === '__proto__' || !isNumber(raw)) continue;
+      const t = Math.min(raw + shift, now);
+      if (now - t <= TOMBSTONE_MS) map.set(k, t);
+    }
+  }
   return {
     has: (kind, key) => map.has(`${kind}:${key}`),
     set: (kind, key) => map.set(`${kind}:${key}`, now),
     clear: (kind, key) => map.delete(`${kind}:${key}`),
-    toJSON: () => Object.fromEntries([...map].sort((a, b) => b[1] - a[1]).slice(0, MAX_TOMBSTONES)),
+    toJSON: () => Object.fromEntries(withinBytes([...map].sort((a, b) => b[1] - a[1]).slice(0, MAX_TOMBSTONES), TOMBSTONE_BYTES)),
     get size() {
       return map.size;
     },
@@ -309,28 +377,50 @@ function changesOf(list, kinds) {
 }
 
 /**
- * Merges one kind of item. `entries` lists [key, value] from the file (current) and the save
- * (incoming). The file's items stay unless removed; the save's items are added when the file
- * doesn't have them; an item the save listed as added or edited replaces the file's copy and clears
- * its tombstone; an unlisted item can't come back from a tombstone; a removal deletes and tombstones.
+ * Merges one kind of item. `current` and `incoming` list [key, value] from the file and the save.
+ * - The file's items stay unless removed; the save's items are added when the file doesn't have them.
+ * - An item the save listed as added or edited replaces the file's copy.
+ * - A tombstoned item comes back only when listed; for notes and folders (needsRestore) only when
+ *   listed as an Undo (`_restored`): an edit from a tab that never saw the delete doesn't undo it.
+ * - A removal deletes the item, and leaves a tombstone only if the item was in the file or already
+ *   had one, so a forged or no-op removal can't push real tombstones out.
  * Returns a Map in the file's order, then new items in the save's order.
  */
-function mergeItems(kind, current, incoming, added, removed, tomb) {
+function mergeItems(kind, current, incoming, ch, tomb, { needsRestore = false } = {}) {
   const out = new Map(current);
+  const inFile = new Set(out.keys());
   for (const [key, value] of incoming) {
-    const listed = added.has(key);
-    if (!listed && tomb.has(kind, key)) continue;
+    const listed = ch.added.has(key);
+    const tombstoned = tomb.has(kind, key);
+    if (tombstoned && !(listed && (!needsRestore || ch.restored.has(key)))) continue;
     if (listed || !out.has(key)) out.set(key, value);
-    if (listed) tomb.clear(kind, key);
+    if (tombstoned) tomb.clear(kind, key);
   }
-  for (const key of removed) {
+  for (const key of ch.removed) {
     out.delete(key);
-    tomb.set(kind, key);
+    if (inFile.has(key) || tomb.has(kind, key)) tomb.set(kind, key);
   }
   return out;
 }
 
+/** Notes over the cap: every listed addition stays, then the newest of the rest by `ts`; in their order. */
+function capNotes(list, max, listed) {
+  if (list.length <= max) return list;
+  const ts = (x) => (isNumber(x.ts) ? x.ts : 0);
+  const rest = list.filter((x) => !listed.has(x.id)).sort((a, b) => ts(b) - ts(a)).slice(0, Math.max(0, max - listed.size));
+  const keep = new Set([...rest, ...list.filter((x) => listed.has(x.id))]);
+  return list.filter((x) => keep.has(x));
+}
+/** Folders over the cap: every listed addition stays, then the first of the rest in order. */
+function capFolders(list, max, listed) {
+  if (list.length <= max) return list;
+  let room = Math.max(0, max - list.filter((x) => listed.has(x.id)).length);
+  return list.filter((x) => listed.has(x.id) || (room-- > 0));
+}
+
 const timeEntries = (map) => (isPlainObject(map) ? Object.entries(map).filter(([k, t]) => k !== '__proto__' && asTime(t) !== null) : []);
+// News reads: only story keys, from the file too (a hand edit can't put anything else back).
+const storyEntries = (map) => timeEntries(map).filter(([k]) => isStoryKey(k));
 // Product Feed's reads were never checked as times: keep every value as it is.
 const anyEntries = (map) => (isPlainObject(map) ? Object.entries(map).filter(([k]) => k !== '__proto__') : []);
 const itemEntries = (list) => (Array.isArray(list) ? list.filter((x) => isPlainObject(x) && isName(x.id)).map((x) => [x.id, x]) : []);
@@ -341,12 +431,6 @@ const pairEntries = (saved) => {
   }
   return out;
 };
-/** The newest `max` notes by `ts` (all when there are no more), in their order. */
-function newestItems(list, max) {
-  if (list.length <= max) return list;
-  const keep = new Set([...list].sort((a, b) => (isNumber(b.ts) ? b.ts : 0) - (isNumber(a.ts) ? a.ts : 0)).slice(0, max));
-  return list.filter((x) => keep.has(x));
-}
 
 /**
  * The state to save: the incoming one, merged with the file as it is now. What only grows (awarded,
@@ -358,7 +442,7 @@ function newestItems(list, max) {
  */
 export function mergeIncoming(desk, current, incoming, { now = Date.now() } = {}) {
   const cur = isPlainObject(current) ? current : {};
-  const { _sync: sync, _seen: ignoredSeen, _deleted: ignoredDeleted, _added: addedList, _removed: removedList, ...next } = incoming;
+  const { _sync: sync, _seen: ignoredSeen, _deleted: ignoredDeleted, _deletedAt: ignoredAt, _added: addedList, _removed: removedList, _restored: restoredList, ...next } = incoming;
   const fold = (key, how) => {
     if (Object.hasOwn(cur, key) || Object.hasOwn(next, key)) {
       const value = how(cur[key], next[key]);
@@ -369,30 +453,36 @@ export function mergeIncoming(desk, current, incoming, { now = Date.now() } = {}
   const kinds = desk === 'news' ? NEWS_KINDS : FEED_KINDS;
   const added = changesOf(addedList, kinds);
   const removed = changesOf(removedList, kinds);
-  const tomb = tombstones(cur._deleted, now);
-  const byItem = (kind, entries, build) => fold(kind, (a, b) => {
+  const restored = changesOf(restoredList, kinds);
+  const tomb = tombstones(cur._deleted, cur._deletedAt, now);
+  const byItem = (kind, entries, build, options) => fold(kind, (a, b) => {
     if (a === undefined && b === undefined) return undefined;
-    return build(mergeItems(kind, entries(a), entries(b), added[kind], removed[kind], tomb));
+    const ch = { added: added[kind], removed: removed[kind], restored: restored[kind] };
+    return build(mergeItems(kind, entries(a, 'file'), entries(b, 'save'), ch, tomb, options));
   });
+  // Notes and folders found in the file without an id get a stable one (a save without ids is refused).
+  const fileItems = (kind) => (list, from) => itemEntries(from === 'file' ? withIds(list, kind) : list);
 
-  if (desk === 'news') byItem('read', timeEntries, (items) => newest(Object.fromEntries([...items].map(([k, t]) => [k, asTime(t)]))));
+  if (desk === 'news') byItem('read', storyEntries, (items) => newest(Object.fromEntries([...items].map(([k, t]) => [k, asTime(t)]))));
   else byItem('read', anyEntries, (items) => newest(Object.fromEntries(items)));
   fold('awarded', (a, b) => newest(unionTimes(a, b)));
   if (desk === 'news') {
     fold('dismissed', (a, b) => newest(unionTimes(a, b)));
   }
   if (desk === 'product-feed') {
-    byItem('notes', itemEntries, (items) => newestItems([...items.values()], MAX_NOTES));
-    byItem('folders', itemEntries, (items) => [...items.values()].slice(0, MAX_FOLDERS));
+    byItem('notes', fileItems('notes'), (items) => capNotes([...items.values()], MAX_NOTES, added.notes), { needsRestore: true });
+    byItem('folders', fileItems('folders'), (items) => capFolders([...items.values()], MAX_FOLDERS, added.folders), { needsRestore: true });
     byItem('saved', pairEntries, (items) => {
-      // A pair whose folder is gone (deleted in any tab) goes with it.
+      // A pair whose folder is gone (deleted in any tab) goes with it. Built in a Map: an article id
+      // can be any name, "constructor" or "toString" included.
       const folders = Array.isArray(next.folders) ? new Set(next.folders.map((f) => f.id)) : null;
-      const saved = {};
+      const saved = new Map();
       for (const [a, f] of items.values()) {
         if (folders && !folders.has(f)) continue;
-        (saved[a] ||= []).push(f);
+        if (!saved.has(a)) saved.set(a, []);
+        saved.get(a).push(f);
       }
-      return saved;
+      return Object.fromEntries(saved);
     });
     fold('badges', unionTimes);
     fold('days', unionDays);
@@ -400,19 +490,22 @@ export function mergeIncoming(desk, current, incoming, { now = Date.now() } = {}
     const tab = isTabId(s.tab) ? s.tab : null;
     const sent = isNumber(s.sent) ? s.sent : next.xp;
     const seen = isPlainObject(cur._seen) ? cur._seen : {};
-    const highWater = tab && isPlainObject(seen[tab]) ? seen[tab].xp : undefined;
+    const highWater = tab && Object.hasOwn(seen, tab) && isPlainObject(seen[tab]) ? seen[tab].xp : undefined;
     fold('xp', (a) => mergeXp(a, sent, s.xp, highWater));
     if (tab && isNumber(sent) && isNumber(s.xp)) next._seen = updateSeen(seen, tab, sent, now);
     else if (Object.hasOwn(cur, '_seen')) next._seen = cur._seen;
   }
-  if (tomb.size) next._deleted = tomb.toJSON();
+  if (tomb.size) {
+    next._deleted = tomb.toJSON();
+    next._deletedAt = now;
+  }
   return next;
 }
 
-/** What a page gets back from GET: the state without the server's own bookkeeping (`_seen`, `_deleted`). */
+/** What a page gets back from GET: the state without the server's own bookkeeping (`_seen`, `_deleted`, `_deletedAt`). */
 export function forPage(state) {
   if (!isPlainObject(state)) return state;
-  const { _seen: ignoredSeen, _deleted: ignoredDeleted, ...rest } = state;
+  const { _seen: ignoredSeen, _deleted: ignoredDeleted, _deletedAt: ignoredAt, ...rest } = state;
   return rest;
 }
 
@@ -523,7 +616,8 @@ export function createStateStore(deskHome, desk, { fsp = fs.promises, now = Date
     const run = queue.then(async () => {
       const merged = mergeIncoming(desk, await read(), value, { now: now() });
       // The cap is on the state itself (as the page sends it), not on the file's indentation.
-      if (Buffer.byteLength(JSON.stringify(merged)) > MAX_STATE_BYTES) throw new StateTooLargeError(`${filePath} would pass ${MAX_STATE_BYTES} bytes`);
+      // The server's own bookkeeping (tombstones, tab marks) has its own small budget, outside the cap.
+      if (Buffer.byteLength(JSON.stringify(forPage(merged))) > MAX_STATE_BYTES) throw new StateTooLargeError(`${filePath} would pass ${MAX_STATE_BYTES} bytes`);
       await writeFileAtomic(filePath, `${JSON.stringify(merged, null, 2)}\n`, { fsp });
     });
     queue = run.catch(() => {});

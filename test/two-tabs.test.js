@@ -314,6 +314,24 @@ describe('merged by item: nothing of Snow\'s is lost to the other tab (N4c)', ()
   });
 });
 
+describe('ids from an agent (closing check)', () => {
+  test('a page that reads an article whose id is __proto__ (or any Object.prototype name) keeps saving', async () => {
+    const pane = await openTab(desk);
+    await pane.readArticle('__proto__'); // refused quietly: nothing changes, nothing is listed
+    for (const name of ['constructor', 'toString', 'valueOf', 'hasOwnProperty', '__defineGetter__', 'isPrototypeOf', 'prototype']) {
+      await pane.readArticle(name);
+      const f = await pane.folder(`for ${name}`);
+      await pane.setSaved(name, f.id, true);
+    }
+    const n = await pane.note('still saving');
+    const feed = await feedState();
+    assert.ok(feed.notes.some((x) => x.id === n.id), 'the saves after it all landed');
+    assert.ok(Object.hasOwn(feed.read, 'constructor') && Object.hasOwn(feed.saved, 'toString'));
+    assert.equal(Object.hasOwn(feed.read, '__proto__'), false);
+    assert.equal(pane.feed.dirty, false, 'nothing stuck waiting');
+  });
+});
+
 describe('invariants over long mixed sessions: everything exact', () => {
   // mulberry32: a small seeded random generator, so a failure can be replayed.
   const random = (seed) => () => {
@@ -357,7 +375,7 @@ describe('invariants over long mixed sessions: everything exact', () => {
         } else if (action === 'rename' && tab.S.folders.length) {
           const f = pick(tab.S.folders);
           await tab.renameFolder(f.id, `renamed ${step}`);
-          model.folders.set(f.id, `renamed ${step}`); // a listed edit wins, even over a delete it never saw
+          if (model.folders.has(f.id)) model.folders.set(f.id, `renamed ${step}`); // a rename never undoes a delete it never saw
         } else if (action === 'deleteFolder' && tab.S.folders.length) {
           const f = pick(tab.S.folders);
           await tab.deleteFolder(f.id);

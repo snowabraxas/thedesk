@@ -447,7 +447,7 @@ describe('app/app.js', () => {
     assert.match(js, /const news = createNewsPage\(\{ award, toast, isReady: \(\) => ready, canAward: \(\) => store\.canSave, reloadXpState: reloadState \}\);/);
     assert.match(js, /Promise\.all\(\[loadState\(\), loadFeed\(\), news\.load\(\)\]\)\.then\(\(\) => \{ ready = true; renderAll\(\); \}\);/);
     const nj = read('news.js');
-    assert.match(nj, /const r = await readStory\(\(\) => N, key, \{ canPay, peek: \(\) => store\.peek\(\), also: reloadXpState \}\);[^\n]*\n[^\n]*\n\s*store\[r\.read \? 'added' : 'removed'\]\('read', key\);\s*store\.save\(\);\s*if \(r\.award\) award\(READ_XP, 'story read'\);\s*else if \(r\.read && sample\) toast\('Sample story: marked read, no XP\.'\);/);
+    assert.match(nj, /const wasRead = Object\.hasOwn\(N\.read, key\);\s*const r = await readStory\(\(\) => N, key, \{ canPay, peek: \(\) => store\.peek\(\), also: reloadXpState \}\);(?:\s*\/\/[^\n]*)*\s*if \(r\.read !== wasRead\) store\[r\.read \? 'added' : 'removed'\]\('read', key\);\s*store\.save\(\);\s*if \(r\.award\) award\(READ_XP, 'story read'\);\s*else if \(r\.read && sample\) toast\('Sample story: marked read, no XP\.'\);/);
     assert.match(nj, /const canPay = !sample && store\.canSave && canAward\(\);/, 'no XP for the sample, or when a state cannot be saved');
     assert.match(nj, /url: STATE_URL,\s*normalize: normalizeNewsState,\s*empty: blankNewsState,\s*getState: \(\) => N,/);
     assert.doesNotMatch(nj, /merge:/, 'saves are merged on the server, not with a GET before each PUT');
@@ -527,7 +527,7 @@ describe('app/app.js', () => {
   test('the Product Feed pays once per article, across tabs too: XP is a counter the server adds up, and it checks the server before paying', () => {
     const js = read('app.js');
     assert.match(js, /const store = createStateClient\(\{\s*getState: \(\) => S,\s*counters: \['xp'\],/);
-    assert.match(js, /const r = await readArticle\(\(\) => S, id, \{ canPay: store\.canSave, peek: \(\) => store\.peek\(\), also: reloadState \}\);\s*feedOps\.read\(store, id, r\.read\);\s*if \(r\.award\) award\(10, 'article read'\); else save\(\);/);
+    assert.match(js, /const wasRead = !!own\(S\.read, id\);\s*const r = await readArticle\(\(\) => S, id, \{ canPay: store\.canSave, peek: \(\) => store\.peek\(\), also: reloadState \}\);\s*feedOps\.read\(store, id, r\.read, wasRead\);\s*if \(r\.award\) award\(10, 'article read'\); else save\(\);/);
     assert.doesNotMatch(js, /S\.read\[id\] = Date\.now\(\)/);
   });
 
@@ -537,12 +537,22 @@ describe('app/app.js', () => {
     assert.match(js, /feedOps\.restoreFolder\(S, store, undo\)/);
     assert.match(js, /feedOps\.renameFolder\(S, store, id, v\)/);
     assert.match(js, /feedOps\.addFolder\(S, store, \{ id: uid\(\), name: v \}\)/);
-    assert.match(js, /feedOps\.setSaved\(S, store, a, c\.value, c\.checked\)/);
+    assert.match(js, /feedOps\.setSaved\(S, store, a, f, on\)/);
     assert.match(js, /feedOps\.addNote\(S, store, \{ id: uid\(\), a: openArticle/);
     assert.match(js, /feedOps\.deleteNote\(S, store, b\.dataset\.dn\)/);
     assert.match(js, /feedOps\.restoreNote\(S, store, gone\)/);
     // No direct change to these lists is left in app.js.
     assert.doesNotMatch(js, /S\.notes\.push|S\.folders\.push|S\.notes = S\.notes\.filter|S\.folders = S\.folders\.filter|S\.saved = |delete S\.saved/);
+  });
+
+  test('closing check: caps with a friendly toast, a 413 message, own-key lookups, and a catch-up before paying for a folder save', () => {
+    const js = read('app.js');
+    assert.match(js, /if \(!feedOps\.addFolder\(S, store, \{ id: uid\(\), name: v \}\)\) return toast\(`You've reached \$\{MAX_FOLDERS\} folders\. Delete one to make room\.`\);/);
+    assert.match(js, /if \(!feedOps\.addNote\(S, store, \{ id: uid\(\), a: openArticle, [^\n]*\}\)\) return toast\(`You've reached \$\{MAX_NOTES\} notes\. Delete one to make room\.`\);/);
+    assert.match(js, /onTooLarge: \(\) => toast\(/);
+    assert.match(read('news.js'), /onTooLarge: \(\) => toast\(/);
+    assert.doesNotMatch(js, /S\.read\[a\.id\]|S\.saved\[a\.id\]|S\.saved\[a\] \|\|/, 'agent ids are looked up with own()');
+    assert.match(js, /if \(on && !\(own\(S\.saved, a\) \|\| \[\]\)\.length\) await reloadState\(\);\s*if \(on && !S\.folders\.some\(x => x\.id === f\)\) \{ renderFeed\(\); return toast\('That folder was deleted in another tab\.'\); \}/);
   });
 
   test('Undo of a note delete: focus to the note box with the drawer open, else back where it was, and the feed redrawn', () => {

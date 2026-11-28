@@ -36,8 +36,8 @@ const WORDS = {
     '^https://': 'must start with https://',
     '^\\d{4}-\\d{2}-\\d{2}$': 'must be a date like YYYY-MM-DD',
     '^(\\d{4}-\\d{2}-\\d{2})?$': 'must be a date like YYYY-MM-DD, or empty',
-    '^[a-z0-9-]{1,40}$': 'must be 1 to 40 lowercase letters, digits or dashes',
-    '^[A-Za-z0-9_-]{1,64}$': 'must be 1 to 64 letters, digits, dashes or underscores',
+    '^(?!(?:constructor|prototype)$)[a-z0-9-]{1,40}$': 'must be 1 to 40 lowercase letters, digits or dashes',
+    '^(?!(?:__proto__|constructor|prototype)$)[A-Za-z0-9_-]{1,64}$': 'must be 1 to 64 letters, digits, dashes or underscores',
   },
 };
 

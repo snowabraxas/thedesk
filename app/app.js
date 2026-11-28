@@ -4,7 +4,7 @@
 import {
   GET_TIMEOUT, PHASE_LABEL, WEEK_GOAL, BADGES, articlesFor, autoPhase, awardText, blank, cnt, createStateClient, dayKey, esc, fmtDate, fmtDay,
   freshBadges, level as levelFor, mentorLine, moon, moonPath, readsThisWeek as readsSince, safeUrl,
-  feedOps, readArticle, streak as streakOf, themeScores as scoresFor, timeoutSignal, uid, wilaLine,
+  MAX_FOLDERS, MAX_NOTES, feedOps, own, readArticle, streak as streakOf, themeScores as scoresFor, timeoutSignal, uid, wilaLine,
 } from './lib.js';
 import { createNewsPage } from './news.js';
 import { createRefresher, readSignals, tvLook } from './tv-lib.js';
@@ -61,6 +61,8 @@ const store = createStateClient({
   getState: () => S,
   counters: ['xp'],
   onSaveFail: () => toast("I couldn't save that just now. I'll keep it here and keep trying."),
+  // A 413 isn't retried: the same state would be refused again. The next change tries once more.
+  onTooLarge: () => toast("Your saved reads and notes have reached The Desk's 1 MB limit, so this change isn't saved. Deleting a few long notes makes room."),
 });
 const save = () => store.save();
 // Leaving the page: send what the debounce was still holding.
@@ -198,7 +200,7 @@ function renderScene() {
 function renderRoom() {
   const p = renderScene();
   if (!ready) return;
-  const unread = feed.articles.filter(a => !S.read[a.id]).length;
+  const unread = feed.articles.filter(a => !own(S.read, a.id)).length;
   // The TV: its screen glows while today's top stories are unread; a rosy mark while a breaking story waits.
   const tv = tvLook(readSignals(news.signals));
   OBJECTS.forEach(o => {
@@ -286,7 +288,7 @@ function renderList() {
   const list = listFor(shelf);
   if (!list.length) { $('#list').innerHTML = head + emptyCard(shelf === 'unread' ? 'All read. Your feed agent brings new picks every morning.' : 'Nothing here yet. Use Save on any article to file it.'); return; }
   $('#list').innerHTML = head + list.map(a => {
-    const read = !!S.read[a.id]; const inF = S.saved[a.id] || []; const nn = S.notes.filter(n => n.a === a.id).length;
+    const read = !!own(S.read, a.id); const inF = own(S.saved, a.id) || []; const nn = S.notes.filter(n => n.a === a.id).length;
     const url = safeUrl(a.url);
     const meta = [a.source, a.author, a.date ? fmtDate(a.date) : ''].filter(Boolean).map(esc).join(' · ');
     const tags = (a.themes || []).map(t => { const th = feed.themes.find(x => x.id === t); return `<span class="tagchip">${esc(th ? th.name : t)}</span>`; }).join('');
@@ -338,7 +340,7 @@ function drawMap() {
   const T = themeScores(); const cx = W / 2, cy = H / 2, rx = Math.max(40, W / 2 - 54), ry = Math.max(40, H / 2 - 46);
   const pos = {}; T.forEach((t, i) => { const ang = -Math.PI / 2 + i * 2 * Math.PI / T.length; pos[t.id] = [cx + rx * Math.cos(ang), cy + ry * Math.sin(ang)]; });
   const links = {};
-  feed.articles.filter(a => S.read[a.id] && Array.isArray(a.themes) && a.themes.length > 1).forEach(a => {
+  feed.articles.filter(a => own(S.read, a.id) && Array.isArray(a.themes) && a.themes.length > 1).forEach(a => {
     for (let i = 0; i < a.themes.length; i++) for (let j = i + 1; j < a.themes.length; j++) { const k = [a.themes[i], a.themes[j]].sort().join('|'); links[k] = (links[k] || 0) + 1; }
   });
   const f1 = v => v.toFixed(1);
@@ -397,7 +399,8 @@ $('#folderForm').addEventListener('submit', e => {
   e.preventDefault(); if (!ready) return;
   const v = $('#folderName').value.trim(); if (!v) return;
   const first = !S.folders.length;
-  feedOps.addFolder(S, store, { id: uid(), name: v }); $('#folderName').value = '';
+  if (!feedOps.addFolder(S, store, { id: uid(), name: v })) return toast(`You've reached ${MAX_FOLDERS} folders. Delete one to make room.`);
+  $('#folderName').value = '';
   first ? award(5, 'folder made') : save();
   renderFeed();
 });
@@ -406,8 +409,9 @@ $('#folderForm').addEventListener('submit', e => {
 // to be saved, so the XP goes onto the latest total. Clicks made while a check is out are queued.
 let reads = Promise.resolve();
 async function readOne(id) {
+  const wasRead = !!own(S.read, id);
   const r = await readArticle(() => S, id, { canPay: store.canSave, peek: () => store.peek(), also: reloadState });
-  feedOps.read(store, id, r.read);
+  feedOps.read(store, id, r.read, wasRead);
   if (r.award) award(10, 'article read'); else save();
   renderFeed(); refocus(attrSel('data-read', id), '#listTitle');
 }
@@ -416,10 +420,15 @@ $('#list').addEventListener('click', e => {
   if (t.dataset.read) { const id = t.dataset.read; reads = reads.then(() => readOne(id)).catch(() => {}); }
   else if (t.dataset.notes) openDrawer(t.dataset.notes);
 });
-$('#list').addEventListener('change', e => {
+$('#list').addEventListener('change', async e => {
   const c = e.target.closest('[data-save]'); if (!c) return;
-  const a = c.dataset.save; const wasSaved = (S.saved[a] || []).length > 0;
-  const size = feedOps.setSaved(S, store, a, c.value, c.checked);
+  const a = c.dataset.save; const f = c.value; const on = c.checked;
+  // An article's first folder pays 5 XP: catch up first, so a tab that hasn't seen a folder deleted
+  // elsewhere doesn't pay for saving into it.
+  if (on && !(own(S.saved, a) || []).length) await reloadState();
+  if (on && !S.folders.some(x => x.id === f)) { renderFeed(); return toast('That folder was deleted in another tab.'); }
+  const wasSaved = (own(S.saved, a) || []).length > 0;
+  const size = feedOps.setSaved(S, store, a, f, on);
   (!wasSaved && size) ? award(5, 'saved to a folder') : save();
   const open = c.closest('details'); renderShelves(); renderStats(); renderBadges(); drawMap();
   const sum = open && open.querySelector('summary');
@@ -486,7 +495,7 @@ function renderNotes() {
 }
 $('#noteSave').addEventListener('click', () => {
   const v = $('#noteText').value.trim(); if (!v || !ready) return;
-  feedOps.addNote(S, store, { id: uid(), a: openArticle, text: v.slice(0, 4000), ts: Date.now() });
+  if (!feedOps.addNote(S, store, { id: uid(), a: openArticle, text: v.slice(0, 4000), ts: Date.now() })) return toast(`You've reached ${MAX_NOTES} notes. Delete one to make room.`);
   $('#noteText').value = ''; award(15, 'note saved'); renderNotes();
 });
 $('#noteList').addEventListener('click', e => {

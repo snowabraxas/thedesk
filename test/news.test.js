@@ -636,7 +636,7 @@ describe("Snow's News state rules", () => {
   });
 
   test("each desk's rules are its own; both gained awarded, Product Feed the _sync it never saves", () => {
-    assert.deepEqual(Object.keys(STATE_RULES['product-feed']), ['read', 'saved', 'folders', 'notes', 'xp', 'days', 'badges', 'awarded', '_sync', '_removed', '_added']);
+    assert.deepEqual(Object.keys(STATE_RULES['product-feed']), ['read', 'saved', 'folders', 'notes', 'xp', 'days', 'badges', 'awarded', '_sync', '_removed', '_added', '_restored']);
     assert.deepEqual(Object.keys(STATE_RULES.news), ['read', 'dismissed', 'shelfOpen', 'awarded', '_removed', '_added']);
     assert.deepEqual(checkState({ shelfOpen: 'yes', read: { a1: 1764250000000 } }), { ok: true }, 'Product Feed is the default and ignores News keys');
     assert.deepEqual(checkState({ xp: 'lots' }, 'news'), { ok: true }, 'XP is not a News key (it stays in Product Feed)');

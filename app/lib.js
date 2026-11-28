@@ -77,6 +77,30 @@ export function isDateTime(v) {
 }
 
 export const cnt = (o) => Object.keys(o || {}).length;
+
+/**
+ * The value under an own key of one of Snow's maps (reads, saved items), never something inherited:
+ * article ids come from an agent, and "constructor" or "toString" would otherwise find Object's own.
+ */
+export const own = (map, key) => (map !== null && typeof map === 'object' && typeof key === 'string' && Object.hasOwn(map, key) ? map[key] : undefined);
+/** An id the server accepts for an item (a read, a note, a folder, an article in a folder): 1 to 200 characters, never __proto__. */
+export const isItemId = (id) => typeof id === 'string' && id.length > 0 && id.length <= 200 && id !== '__proto__';
+/** Snow's caps (the server's too): the page refuses to add past them, with a friendly toast. */
+export const MAX_NOTES = 2000;
+export const MAX_FOLDERS = 200;
+
+/**
+ * A deterministic id for a note or folder found without one, the same as the server's (stableId in
+ * server/state-store.js; a test keeps them equal), so every tab and the server agree.
+ */
+export function stableId(prefix, text) {
+  let h = 0x811c9dc5;
+  for (const ch of String(text)) {
+    h ^= ch.codePointAt(0);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return `${prefix}${h.toString(16).padStart(8, '0')}`;
+}
 export const uid = () => Math.random().toString(36).slice(2, 9);
 /** The local calendar day as YYYY-MM-DD. */
 export const dayKey = (d = new Date()) => d.toLocaleDateString('en-CA');
@@ -132,16 +156,24 @@ function mendTimes(map, now) {
 }
 
 // Notes and folders are merged by id on the server: each needs an id (1 to 200 characters), once.
-// An old one without an id gets one here rather than being refused or lost.
-function mendItems(list) {
-  const seen = new Set();
+// An old one without an id gets a stable one here (a hash of what it holds, the server's way), so two
+// tabs give it the same id rather than two copies.
+function mendItems(list, kind) {
+  const used = new Set();
   return list.filter((x) => x !== null && typeof x === 'object' && !Array.isArray(x)).map((x) => {
     let item = x;
-    if (typeof item.id !== 'string' || item.id.length === 0 || item.id.length > 200 || item.id === '__proto__' || seen.has(item.id)) item = { ...item, id: uid() + uid() };
-    seen.add(item.id);
+    if (!isItemId(item.id) || used.has(item.id)) {
+      const base = kind === 'notes' ? stableId('n', `${item.a}|${item.ts}|${item.text}`) : stableId('f', `${item.name}`);
+      let id = base;
+      for (let i = 2; used.has(id); i++) id = `${base}-${i}`;
+      item = { ...item, id };
+    }
+    used.add(item.id);
     return item;
   });
 }
+// A map keyed by agent ids, without a "__proto__" key (setting one would change the object's prototype).
+const withoutProto = (map) => Object.fromEntries(Object.entries(map).filter(([k]) => k !== '__proto__'));
 
 /**
  * Turns whatever the server sent into a usable state: known keys of the wrong type fall back
@@ -156,18 +188,20 @@ export function normalizeState(raw, now = Date.now()) {
     if (k === '__proto__') continue;
     if (!(k in STATE_TYPES) || STATE_TYPES[k](v)) S[k] = v;
   }
+  S.read = withoutProto(S.read);
+  S.saved = Object.fromEntries(Object.entries(S.saved).filter(([k, v]) => k !== '__proto__' && Array.isArray(v)).map(([k, v]) => [k, v.filter(isItemId)]));
   if (!isPlainObject(raw.awarded)) S.awarded = { ...S.read };
   S.awarded = mendTimes(S.awarded, now);
   S.badges = mendTimes(S.badges, now);
   const latest = new Date(now + 864e5).toISOString().slice(0, 10);
   S.days = S.days.filter((d) => isCalendarDate(d) && d <= latest);
-  S.notes = mendItems(S.notes);
-  S.folders = mendItems(S.folders);
+  S.notes = mendItems(S.notes, 'notes');
+  S.folders = mendItems(S.folders, 'folders');
   if (!(Number.isFinite(S.xp) && S.xp >= 0 && S.xp <= Number.MAX_SAFE_INTEGER)) S.xp = Math.min(Math.max(0, Number.isFinite(S.xp) ? S.xp : 0), Number.MAX_SAFE_INTEGER);
   return S;
 }
 
-const isArticleId = (id) => typeof id === 'string' && id !== '' && id !== '__proto__';
+const isArticleId = isItemId;
 
 /**
  * Marks a Product Feed article read, or unread if it was read. Reading pays XP once per article,
@@ -235,11 +269,18 @@ export async function readArticle(getState, id, { canPay = true, peek, also = as
  * merges it by item and a delete reaches every tab. app.js's handlers use these; so do the tests.
  */
 export const feedOps = {
-  /** After readArticle: a read is an addition, an un-mark a removal. */
-  read(store, id, read) {
+  /**
+   * After readArticle: a read is an addition, an un-mark a removal. Listed only when something
+   * changed (wasRead is what the page showed before the click), and never for an id the server
+   * would refuse: one refused change would stop every later save from this page.
+   */
+  read(store, id, read, wasRead = !read) {
+    if (!isItemId(id) || read === wasRead) return;
     store[read ? 'added' : 'removed']('read', id);
   },
+  /** Returns the note, or null at the cap (MAX_NOTES) or with an id the server would refuse. */
   addNote(S, store, note) {
+    if (S.notes.length >= MAX_NOTES || !isItemId(note.id)) return null;
     S.notes.push(note);
     store.added('notes', note.id);
     return note;
@@ -252,18 +293,22 @@ export const feedOps = {
     store.removed('notes', id);
     return gone;
   },
+  /** Undo: brings the note back, everywhere (an Undo is the only way a deleted note returns). */
   restoreNote(S, store, note) {
-    if (!S.notes.some((n) => n.id === note.id)) S.notes.push(note);
-    store.added('notes', note.id);
+    if (S.notes.some((n) => n.id === note.id)) return;
+    S.notes.push(note);
+    store.restored('notes', note.id);
   },
+  /** Returns the folder, or null at the cap (MAX_FOLDERS) or with an id the server would refuse. */
   addFolder(S, store, folder) {
+    if (S.folders.length >= MAX_FOLDERS || !isItemId(folder.id)) return null;
     S.folders.push(folder);
     store.added('folders', folder.id);
     return folder;
   },
   renameFolder(S, store, id, name) {
     const f = S.folders.find((x) => x.id === id);
-    if (!f || !name) return false;
+    if (!f || !name || f.name === name) return false;
     f.name = name;
     store.added('folders', id);
     return true;
@@ -275,7 +320,7 @@ export const feedOps = {
     const pairs = [];
     S.folders = S.folders.filter((x) => x.id !== id);
     for (const [a, folders] of Object.entries(S.saved)) {
-      if (!folders.includes(id)) continue;
+      if (a === '__proto__' || !Array.isArray(folders) || !folders.includes(id)) continue;
       pairs.push([a, id]);
       S.saved[a] = folders.filter((x) => x !== id);
       if (!S.saved[a].length) delete S.saved[a];
@@ -284,18 +329,29 @@ export const feedOps = {
     for (const pair of pairs) store.removed('saved', pair);
     return { folder, pairs };
   },
+  /** Undo of a folder delete: the folder (as an Undo) and the articles that were in it. */
   restoreFolder(S, store, { folder, pairs }) {
-    if (!S.folders.some((f) => f.id === folder.id)) S.folders.push(folder);
-    store.added('folders', folder.id);
+    if (!S.folders.some((f) => f.id === folder.id)) {
+      S.folders.push(folder);
+      store.restored('folders', folder.id);
+    }
     for (const [a, f] of pairs) {
-      const now = S.saved[a] || [];
-      if (!now.includes(f)) S.saved[a] = [...now, f];
+      if (!isItemId(a)) continue;
+      const now = own(S.saved, a) || [];
+      if (now.includes(f)) continue;
+      S.saved[a] = [...now, f];
       store.added('saved', [a, f]);
     }
   },
-  /** Puts an article in a folder or takes it out. Returns how many folders it is in now. */
+  /**
+   * Puts an article in a folder or takes it out. Returns how many folders it is in now. Lists the
+   * change only when there was one, and does nothing for an id the server would refuse.
+   */
   setSaved(S, store, articleId, folderId, on) {
-    const now = new Set(S.saved[articleId] || []);
+    if (!isItemId(articleId) || !isItemId(folderId)) return (own(S.saved, articleId) || []).length;
+    const before = own(S.saved, articleId) || [];
+    if (before.includes(folderId) === on) return before.length;
+    const now = new Set(before);
     if (on) now.add(folderId);
     else now.delete(folderId);
     if (now.size) S.saved[articleId] = [...now];
@@ -375,6 +431,7 @@ export function createStateClient({
   tabId = randomTabId(),
   fetchFn = (...args) => globalThis.fetch(...args),
   onSaveFail = () => {},
+  onTooLarge = () => {}, // the server answered 413: the state is past its 1 MB cap
   delay = 600,
   retryDelay = 15000,
   keepaliveMax = 64000, // browsers refuse keepalive bodies over 64 KB
@@ -400,21 +457,23 @@ export function createStateClient({
     changes.get(kind).set(changeKey(id), { id, op, v: ++changeCount });
   }
   // The lists for a PUT, and what they hold (to clear once that PUT lands, unless changed again meanwhile).
+  // An Undo ("restore") is an addition the server also lets bring a deleted note or folder back.
   function changeLists() {
-    const lists = { _added: {}, _removed: {} };
+    const lists = { _added: {}, _removed: {}, _restored: {} };
     const sent = [];
     for (const [kind, items] of changes) {
       for (const [key, { id, op, v }] of items) {
-        const list = op === 'add' ? lists._added : lists._removed;
-        (list[kind] ||= []).push(id);
+        if (op === 'remove') (lists._removed[kind] ||= []).push(id);
+        else (lists._added[kind] ||= []).push(id);
+        if (op === 'restore') (lists._restored[kind] ||= []).push(id);
         sent.push([kind, key, v]);
       }
     }
     const out = {};
-    if (Object.keys(lists._added).length) out._added = lists._added;
-    if (Object.keys(lists._removed).length) out._removed = lists._removed;
+    for (const name of ['_added', '_removed', '_restored']) if (Object.keys(lists[name]).length) out[name] = lists[name];
     return { lists: out, sent };
   }
+  let tooLarge = false; // the last PUT got 413: no retries until Snow changes something
   function changesLanded(sent) {
     for (const [kind, key, v] of sent) {
       const items = changes.get(kind);
@@ -557,9 +616,10 @@ export function createStateClient({
     timer = setTimeout(flush, delay);
   }
 
-  // After a failure: try again later, unless a save is already on its way.
+  // After a failure: try again later, unless a save is already on its way. Not after a 413: the same
+  // state would be refused again every 15 s; the next change (a delete may make room) tries again.
   function retryLater() {
-    if (canSave && dirty && !timer) timer = setTimeout(flush, retryDelay);
+    if (canSave && dirty && !timer && !tooLarge) timer = setTimeout(flush, retryDelay);
   }
 
   /**
@@ -587,17 +647,24 @@ export function createStateClient({
           const { body, sent, changed } = bodyOf(getState(), base);
           dirty = false;
           let ok = false;
+          let status = 0;
           try {
             const r = await fetchFn(url, { method: 'PUT', headers, body });
             ok = r.ok;
+            status = r.status;
             await finish(r);
           } catch {
             /* offline or the server is down */
           }
           if (ok) {
             failNoted = false;
+            tooLarge = false;
             if (sent) advance(sent); // the server has added everything up to what was sent
             changesLanded(changed);
+          } else if (status === 413) {
+            dirty = true; // kept here; the next change sends everything again
+            if (!tooLarge) onTooLarge();
+            tooLarge = true;
           } else {
             dirty = true; // the retry (or the next change) sends everything again
             if (!failNoted) {
@@ -666,6 +733,12 @@ export function createStateClient({
     added: (kind, id) => track(kind, id, 'add'),
     /** Says an item was removed in this save, so the server deletes it in every tab. */
     removed: (kind, id) => track(kind, id, 'remove'),
+    /** Says a deleted note or folder came back by Undo (the only way a deleted one returns). */
+    restored: (kind, id) => track(kind, id, 'restore'),
+    /** The last save was refused as too large (413); it isn't retried until something changes. */
+    get tooLarge() {
+      return tooLarge;
+    },
     /** How many item changes are waiting to land. */
     get changesWaiting() {
       let n = 0;
@@ -729,9 +802,9 @@ export function themeScores(feed, S) {
   const articles = feed.articles || [];
   return (feed.themes || []).map((t) => {
     const arts = articles.filter((a) => (a.themes || []).includes(t.id));
-    const reads = arts.filter((a) => S.read[a.id]).length;
+    const reads = arts.filter((a) => own(S.read, a.id)).length;
     const notes = S.notes.filter((n) => arts.some((a) => a.id === n.a)).length;
-    const saves = arts.filter((a) => (S.saved[a.id] || []).length).length;
+    const saves = arts.filter((a) => (own(S.saved, a.id) || []).length).length;
     return { ...t, total: arts.length, reads, notes, saves, score: reads + notes * 2 + saves * 0.5 };
   });
 }
@@ -751,11 +824,11 @@ export const freshBadges = (S, feed) => BADGES.filter((b) => !S.badges[b.id] && 
 /** Articles on a shelf: all, unread, saved, or one folder ("f:<id>"). */
 export function articlesFor(feed, S, shelf) {
   const A = feed.articles || [];
-  if (shelf === 'unread') return A.filter((a) => !S.read[a.id]);
-  if (shelf === 'saved') return A.filter((a) => (S.saved[a.id] || []).length);
+  if (shelf === 'unread') return A.filter((a) => !own(S.read, a.id));
+  if (shelf === 'saved') return A.filter((a) => (own(S.saved, a.id) || []).length);
   if (shelf.startsWith('f:')) {
     const f = shelf.slice(2);
-    return A.filter((a) => (S.saved[a.id] || []).includes(f));
+    return A.filter((a) => (own(S.saved, a.id) || []).includes(f));
   }
   return A;
 }
@@ -861,7 +934,7 @@ export function mentorLine(feed, S) {
   const articles = (Array.isArray(feed?.articles) ? feed.articles : []).filter((a) => a && typeof a === 'object');
   if (!articles.length) return 'Your Product Feed is still being set up.';
   const read = S && typeof S.read === 'object' && S.read ? S.read : {};
-  const unread = articles.filter((a) => !read[a.id]);
+  const unread = articles.filter((a) => !own(read, a.id));
   if (!unread.length) return 'All caught up. Nicely done, Snow. What stuck with you?';
 
   const n = unread.length;

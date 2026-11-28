@@ -60,7 +60,7 @@ const PATTERNS = {
   '^https://': 'must start with https://',
   '^\\d{4}-\\d{2}-\\d{2}$': 'must be a date like YYYY-MM-DD',
   '^(\\d{4}-\\d{2}-\\d{2})?$': 'must be a date like YYYY-MM-DD, or empty',
-  '^[A-Za-z0-9_-]{1,40}$': 'must be 1 to 40 letters, digits, dashes or underscores',
+  '^(?!(?:__proto__|constructor|prototype)$)[A-Za-z0-9_-]{1,40}$': 'must be 1 to 40 letters, digits, dashes or underscores',
   [VISIBLE_CHAR_PATTERN]: 'must not be empty or only spaces',
   [DATE_TIME_PARTS.source]: 'must be a date and time with a timezone, like 2026-12-07T12:04:00-05:00 or 2026-12-07T17:04:00Z',
 };
