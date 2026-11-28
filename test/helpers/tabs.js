@@ -4,12 +4,15 @@
 //                            (when idle), and a payment adds 10 XP to the state the tab holds (award)
 //   reload                   reload(apply), as on opening a desk or the tab coming back into view
 //   close                    flushOnExit, as on pagehide
-// Also an "old" client: a page still running main's code, which sends its whole state as it is
-// (no _sync, maybe no awarded) and pays without checking.
+//   note, deleteNote, folder, renameFolder, deleteFolder, setSaved
+//                            through lib.js's feedOps, as app.js's handlers do (each tells the state
+//                            client what changed, so the server merges by item)
+// Also an "old" client: a page from before N4b/N4c, which sends its whole state as it is (no _sync,
+// no _added or _removed, maybe no awarded) and pays without checking.
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { createStateClient, readArticle } from '../../app/lib.js';
+import { createStateClient, feedOps, readArticle } from '../../app/lib.js';
 import { blankNewsState, normalizeNewsState, readStory } from '../../app/news-lib.js';
 import { createServer } from '../../server/index.js';
 
@@ -111,6 +114,7 @@ export async function openTab(desk, { old = false, fetchFn, delay = 0, retryDela
       return;
     }
     const r = await readArticle(() => tab.S, id, { canPay: tab.feed.canSave, peek: () => tab.feed.peek(), also: tab.reloadFeed });
+    feedOps.read(tab.feed, id, r.read);
     if (r.award) award(10, id);
     await saveFeed();
     return r;
@@ -118,6 +122,7 @@ export async function openTab(desk, { old = false, fetchFn, delay = 0, retryDela
   // wait: true leaves the save waiting (the app's 600 ms delay), as when Snow switches tabs right away.
   tab.readStory = async (key, { wait = false } = {}) => {
     const r = await readStory(() => tab.N, key, { canPay: tab.news.canSave && tab.feed.canSave, peek: () => tab.news.peek(), also: tab.reloadFeed });
+    if (!old) tab.news[r.read ? 'added' : 'removed']('read', key);
     if (wait) tab.news.save();
     else await saveNews();
     if (r.award) {
@@ -126,10 +131,46 @@ export async function openTab(desk, { old = false, fetchFn, delay = 0, retryDela
     }
     return r;
   };
-  tab.note = async (text, { wait = false } = {}) => {
-    tab.S.notes.push({ id: `n${Math.random().toString(36).slice(2, 8)}`, a: 'a1', text, ts: Date.now() });
+  // Each feed change goes through feedOps (old: a raw change, with nothing listed). Returns what it made.
+  const done = async (wait) => {
     if (wait) tab.feed.save();
     else await saveFeed();
+  };
+  tab.note = async (text, { wait = false, id = `n${Math.random().toString(36).slice(2, 8)}` } = {}) => {
+    const note = { id, a: 'a1', text, ts: Date.now() };
+    if (old) tab.S.notes.push(note);
+    else feedOps.addNote(tab.S, tab.feed, note);
+    await done(wait);
+    return note;
+  };
+  tab.deleteNote = async (id, { wait = false } = {}) => {
+    const gone = feedOps.deleteNote(tab.S, tab.feed, id);
+    await done(wait);
+    return gone;
+  };
+  tab.restoreNote = async (note) => {
+    feedOps.restoreNote(tab.S, tab.feed, note);
+    await done(false);
+  };
+  tab.folder = async (name, { wait = false, id = `f${Math.random().toString(36).slice(2, 8)}` } = {}) => {
+    const folder = { id, name };
+    if (old) tab.S.folders.push(folder);
+    else feedOps.addFolder(tab.S, tab.feed, folder);
+    await done(wait);
+    return folder;
+  };
+  tab.renameFolder = async (id, name) => {
+    feedOps.renameFolder(tab.S, tab.feed, id, name);
+    await done(false);
+  };
+  tab.deleteFolder = async (id) => {
+    const undo = feedOps.deleteFolder(tab.S, tab.feed, id);
+    await done(false);
+    return undo;
+  };
+  tab.setSaved = async (articleId, folderId, on) => {
+    feedOps.setSaved(tab.S, tab.feed, articleId, folderId, on);
+    await done(false);
   };
   /** The tab is hidden or loses focus: the page sends what is waiting at once (app.js sendNow). */
   tab.hide = () => Promise.all([tab.feed.flush(), tab.news.flush()]);

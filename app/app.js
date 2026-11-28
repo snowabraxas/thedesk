@@ -4,7 +4,7 @@
 import {
   GET_TIMEOUT, PHASE_LABEL, WEEK_GOAL, BADGES, articlesFor, autoPhase, awardText, blank, cnt, createStateClient, dayKey, esc, fmtDate, fmtDay,
   freshBadges, level as levelFor, mentorLine, moon, moonPath, readsThisWeek as readsSince, safeUrl,
-  readArticle, streak as streakOf, themeScores as scoresFor, timeoutSignal, uid, wilaLine,
+  MAX_FOLDERS, MAX_NOTES, feedOps, own, readArticle, streak as streakOf, themeScores as scoresFor, timeoutSignal, uid, wilaLine,
 } from './lib.js';
 import { createNewsPage } from './news.js';
 import { createRefresher, readSignals, tvLook } from './tv-lib.js';
@@ -61,6 +61,8 @@ const store = createStateClient({
   getState: () => S,
   counters: ['xp'],
   onSaveFail: () => toast("I couldn't save that just now. I'll keep it here and keep trying."),
+  // A 413 isn't retried: the same state would be refused again. The next change tries once more.
+  onTooLarge: () => toast("Your saved reads and notes have reached The Desk's 1 MB limit, so this change isn't saved. Deleting a few long notes makes room."),
 });
 const save = () => store.save();
 // Leaving the page: send what the debounce was still holding.
@@ -198,7 +200,7 @@ function renderScene() {
 function renderRoom() {
   const p = renderScene();
   if (!ready) return;
-  const unread = feed.articles.filter(a => !S.read[a.id]).length;
+  const unread = feed.articles.filter(a => !own(S.read, a.id)).length;
   // The TV: its screen glows while today's top stories are unread; a rosy mark while a breaking story waits.
   const tv = tvLook(readSignals(news.signals));
   OBJECTS.forEach(o => {
@@ -286,7 +288,7 @@ function renderList() {
   const list = listFor(shelf);
   if (!list.length) { $('#list').innerHTML = head + emptyCard(shelf === 'unread' ? 'All read. Your feed agent brings new picks every morning.' : 'Nothing here yet. Use Save on any article to file it.'); return; }
   $('#list').innerHTML = head + list.map(a => {
-    const read = !!S.read[a.id]; const inF = S.saved[a.id] || []; const nn = S.notes.filter(n => n.a === a.id).length;
+    const read = !!own(S.read, a.id); const inF = own(S.saved, a.id) || []; const nn = S.notes.filter(n => n.a === a.id).length;
     const url = safeUrl(a.url);
     const meta = [a.source, a.author, a.date ? fmtDate(a.date) : ''].filter(Boolean).map(esc).join(' · ');
     const tags = (a.themes || []).map(t => { const th = feed.themes.find(x => x.id === t); return `<span class="tagchip">${esc(th ? th.name : t)}</span>`; }).join('');
@@ -338,7 +340,7 @@ function drawMap() {
   const T = themeScores(); const cx = W / 2, cy = H / 2, rx = Math.max(40, W / 2 - 54), ry = Math.max(40, H / 2 - 46);
   const pos = {}; T.forEach((t, i) => { const ang = -Math.PI / 2 + i * 2 * Math.PI / T.length; pos[t.id] = [cx + rx * Math.cos(ang), cy + ry * Math.sin(ang)]; });
   const links = {};
-  feed.articles.filter(a => S.read[a.id] && Array.isArray(a.themes) && a.themes.length > 1).forEach(a => {
+  feed.articles.filter(a => own(S.read, a.id) && Array.isArray(a.themes) && a.themes.length > 1).forEach(a => {
     for (let i = 0; i < a.themes.length; i++) for (let j = i + 1; j < a.themes.length; j++) { const k = [a.themes[i], a.themes[j]].sort().join('|'); links[k] = (links[k] || 0) + 1; }
   });
   const f1 = v => v.toFixed(1);
@@ -370,19 +372,19 @@ $('#shelfList').addEventListener('click', e => {
   else if (t.dataset.edit) { editing = t.dataset.edit; confirming = null; renderShelves(); }
   else if (t.dataset.del) { confirming = t.dataset.del; editing = null; renderShelves(); refocus('[data-del-no]'); }
   else if (t.dataset.delYes) {
-    const f = S.folders.find(x => x.id === t.dataset.delYes); if (!f) return;
-    const snapshot = JSON.parse(JSON.stringify(S.saved));
-    S.folders = S.folders.filter(x => x.id !== f.id);
-    Object.keys(S.saved).forEach(k => { S.saved[k] = S.saved[k].filter(id => id !== f.id); if (!S.saved[k].length) delete S.saved[k]; });
+    // Every change to notes, folders, saved items and reads goes through feedOps, which tells the
+    // state client what changed: the server merges by item, so a delete must be said out loud.
+    const undo = feedOps.deleteFolder(S, store, t.dataset.delYes); if (!undo) return;
+    const f = undo.folder;
     if (shelf === 'f:' + f.id) shelf = 'all';
     confirming = null; save(); renderFeed(); refocus('#folderName');
-    toast(`Deleted “${f.name}”.`, 'Undo', () => { S.folders.push(f); S.saved = snapshot; save(); renderFeed(); });
+    toast(`Deleted “${f.name}”.`, 'Undo', () => { feedOps.restoreFolder(S, store, undo); save(); renderFeed(); });
   } else if ('delNo' in t.dataset) { const id = confirming; confirming = null; renderShelves(); refocus(attrSel('data-del', id)); }
 });
 function finishRename(inp, keep) {
   const id = inp.dataset.rename;
   const f = S.folders.find(x => x.id === id); const v = inp.value.trim();
-  if (keep && f && v) { f.name = v; save(); }
+  if (keep && f && v && feedOps.renameFolder(S, store, id, v)) save();
   editing = null; renderFeed(); refocus(attrSel('data-edit', id));
 }
 // Enter or Escape ends a rename. finishRename moves focus to the pencil button during this key press,
@@ -397,7 +399,8 @@ $('#folderForm').addEventListener('submit', e => {
   e.preventDefault(); if (!ready) return;
   const v = $('#folderName').value.trim(); if (!v) return;
   const first = !S.folders.length;
-  S.folders.push({ id: uid(), name: v }); $('#folderName').value = '';
+  if (!feedOps.addFolder(S, store, { id: uid(), name: v })) return toast(`You've reached ${MAX_FOLDERS} folders. Delete one to make room.`);
+  $('#folderName').value = '';
   first ? award(5, 'folder made') : save();
   renderFeed();
 });
@@ -406,7 +409,9 @@ $('#folderForm').addEventListener('submit', e => {
 // to be saved, so the XP goes onto the latest total. Clicks made while a check is out are queued.
 let reads = Promise.resolve();
 async function readOne(id) {
+  const wasRead = !!own(S.read, id);
   const r = await readArticle(() => S, id, { canPay: store.canSave, peek: () => store.peek(), also: reloadState });
+  feedOps.read(store, id, r.read, wasRead);
   if (r.award) award(10, 'article read'); else save();
   renderFeed(); refocus(attrSel('data-read', id), '#listTitle');
 }
@@ -415,15 +420,19 @@ $('#list').addEventListener('click', e => {
   if (t.dataset.read) { const id = t.dataset.read; reads = reads.then(() => readOne(id)).catch(() => {}); }
   else if (t.dataset.notes) openDrawer(t.dataset.notes);
 });
-$('#list').addEventListener('change', e => {
+$('#list').addEventListener('change', async e => {
   const c = e.target.closest('[data-save]'); if (!c) return;
-  const a = c.dataset.save; const cur = new Set(S.saved[a] || []); const wasSaved = cur.size > 0;
-  c.checked ? cur.add(c.value) : cur.delete(c.value);
-  if (cur.size) S.saved[a] = [...cur]; else delete S.saved[a];
-  (!wasSaved && cur.size) ? award(5, 'saved to a folder') : save();
+  const a = c.dataset.save; const f = c.value; const on = c.checked;
+  // An article's first folder pays 5 XP: catch up first, so a tab that hasn't seen a folder deleted
+  // elsewhere doesn't pay for saving into it.
+  if (on && !(own(S.saved, a) || []).length) await reloadState();
+  if (on && !S.folders.some(x => x.id === f)) { renderFeed(); return toast('That folder was deleted in another tab.'); }
+  const wasSaved = (own(S.saved, a) || []).length > 0;
+  const size = feedOps.setSaved(S, store, a, f, on);
+  (!wasSaved && size) ? award(5, 'saved to a folder') : save();
   const open = c.closest('details'); renderShelves(); renderStats(); renderBadges(); drawMap();
   const sum = open && open.querySelector('summary');
-  if (sum) { sum.querySelector('.slbl').textContent = cur.size ? 'Saved' : 'Save'; sum.classList.toggle('on', cur.size > 0); }
+  if (sum) { sum.querySelector('.slbl').textContent = size ? 'Saved' : 'Save'; sum.classList.toggle('on', size > 0); }
 });
 document.addEventListener('click', e => { document.querySelectorAll('details.savebox[open]').forEach(d => { if (!d.contains(e.target)) d.open = false; }); });
 // Escape closes an open Save menu and returns to its button.
@@ -486,15 +495,31 @@ function renderNotes() {
 }
 $('#noteSave').addEventListener('click', () => {
   const v = $('#noteText').value.trim(); if (!v || !ready) return;
-  S.notes.push({ id: uid(), a: openArticle, text: v.slice(0, 4000), ts: Date.now() });
+  if (!feedOps.addNote(S, store, { id: uid(), a: openArticle, text: v.slice(0, 4000), ts: Date.now() })) return toast(`You've reached ${MAX_NOTES} notes. Delete one to make room.`);
   $('#noteText').value = ''; award(15, 'note saved'); renderNotes();
 });
 $('#noteList').addEventListener('click', e => {
   const b = e.target.closest('[data-dn]'); if (!b) return;
-  const gone = S.notes.find(n => n.id === b.dataset.dn); if (!gone) return;
-  S.notes = S.notes.filter(n => n.id !== b.dataset.dn); save(); renderNotes(); $('#noteText').focus({ preventScroll: true });
-  toast('Note deleted.', 'Undo', () => { S.notes.push(gone); save(); renderNotes(); });
+  const gone = feedOps.deleteNote(S, store, b.dataset.dn); if (!gone) return;
+  save(); renderNotes(); $('#noteText').focus({ preventScroll: true });
+  toast('Note deleted.', 'Undo', () => undoNoteDelete(gone));
 });
+// Where the keyboard was before it went to the toast: an Undo returns there, not to the fading button.
+let focusBeforeToast = null;
+document.addEventListener('focusin', e => { if (!(e.target.closest && e.target.closest('#toast'))) focusBeforeToast = e.target; });
+// Undo of a note delete. With the drawer open: its list again, and the note box. With it closed (Snow
+// closed it before pressing Undo): the feed again, so "Notes (n)" and the My notes count include the
+// note, and the keyboard goes back to where it was.
+function undoNoteDelete(gone) {
+  feedOps.restoreNote(S, store, gone); save();
+  if (!$('#drawer').hidden) { renderNotes(); $('#noteText').focus({ preventScroll: true }); return; }
+  const back = focusBeforeToast;
+  const key = back && back.dataset && ['read', 'notes', 'shelf', 'edit', 'del'].find(k => back.dataset[k] !== undefined);
+  renderFeed();
+  if (key) refocus(attrSel('data-' + key, back.dataset[key]), '#listTitle');
+  else if (back && document.contains(back) && back !== document.body) back.focus({ preventScroll: true });
+  else refocus('#listTitle');
+}
 $('#dClose').addEventListener('click', closeDrawer);
 $('#scrim').addEventListener('click', closeDrawer);
 document.addEventListener('keydown', e => { if (e.key === 'Escape' && !$('#drawer').hidden) closeDrawer(); });

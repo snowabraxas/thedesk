@@ -52,7 +52,55 @@ export function safeUrl(u) {
   return u;
 }
 
+/* ================= dates (the same rules as server/schema-common.js) ================= */
+
+const DATE_PARTS = /^(\d{4})-(\d{2})-(\d{2})$/;
+/** Same as DATE_TIME_PARTS in server/schema-common.js (a test keeps them identical). */
+export const DATE_TIME_PARTS = /^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,9})?)?(?:Z|[+-](\d{2}):(\d{2}))$/;
+
+/** A YYYY-MM-DD that is a real day on the calendar. */
+export function isCalendarDate(v) {
+  const m = typeof v === 'string' && DATE_PARTS.exec(v);
+  if (!m) return false;
+  const [year, month, day] = [Number(m[1]), Number(m[2]), Number(m[3])];
+  if (month < 1 || month > 12 || day < 1) return false;
+  const leap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
+  return day <= [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1];
+}
+
+/** An ISO date-time with a timezone that is a real moment, as the server checks times. */
+export function isDateTime(v) {
+  const m = typeof v === 'string' && DATE_TIME_PARTS.exec(v);
+  if (!m || !isCalendarDate(m[1])) return false;
+  const [hour, minute, second = '0', offsetHour = '0', offsetMinute = '0'] = m.slice(2);
+  return Number(hour) <= 23 && Number(minute) <= 59 && Number(second) <= 59 && Number(offsetHour) <= 14 && Number(offsetMinute) <= 59;
+}
+
 export const cnt = (o) => Object.keys(o || {}).length;
+
+/**
+ * The value under an own key of one of Snow's maps (reads, saved items), never something inherited:
+ * article ids come from an agent, and "constructor" or "toString" would otherwise find Object's own.
+ */
+export const own = (map, key) => (map !== null && typeof map === 'object' && typeof key === 'string' && Object.hasOwn(map, key) ? map[key] : undefined);
+/** An id the server accepts for an item (a read, a note, a folder, an article in a folder): 1 to 200 characters, never __proto__. */
+export const isItemId = (id) => typeof id === 'string' && id.length > 0 && id.length <= 200 && id !== '__proto__';
+/** Snow's caps (the server's too): the page refuses to add past them, with a friendly toast. */
+export const MAX_NOTES = 2000;
+export const MAX_FOLDERS = 200;
+
+/**
+ * A deterministic id for a note or folder found without one, the same as the server's (stableId in
+ * server/state-store.js; a test keeps them equal), so every tab and the server agree.
+ */
+export function stableId(prefix, text) {
+  let h = 0x811c9dc5;
+  for (const ch of String(text)) {
+    h ^= ch.codePointAt(0);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return `${prefix}${h.toString(16).padStart(8, '0')}`;
+}
 export const uid = () => Math.random().toString(36).slice(2, 9);
 /** The local calendar day as YYYY-MM-DD. */
 export const dayKey = (d = new Date()) => d.toLocaleDateString('en-CA');
@@ -90,26 +138,42 @@ const STATE_TYPES = {
   awarded: isPlainObject,
 };
 
-/** A real day on the calendar written YYYY-MM-DD. */
-function isCalendarDay(v) {
-  const m = typeof v === 'string' && /^(\d{4})-(\d{2})-(\d{2})$/.exec(v);
-  if (!m) return false;
-  const d = new Date(Date.UTC(Number(m[1]), Number(m[2]) - 1, Number(m[3])));
-  return d.toISOString().slice(0, 10) === v;
-}
+const ZONELESS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?$/;
 
 // The server checks the keys it merges as unions closely (one refused value would stop every save):
 // awarded and badges hold times under names up to 200 characters; days are real days, not in the
-// future. A value that wouldn't pass (an old or hand-edited state) is mended here: a time that isn't
-// a number becomes now (the entry still counts), a bad name or day is dropped.
+// future. A value that wouldn't pass (an old or hand-edited state) is mended here: numbers and ISO
+// times with a zone stay, a zoneless ISO time is read as UTC, anything else becomes now (the entry
+// still counts); a bad name or day is dropped.
 function mendTimes(map, now) {
   const out = {};
   for (const [k, v] of Object.entries(map)) {
     if (k === '__proto__' || k.length === 0 || k.length > 200) continue;
-    out[k] = typeof v === 'number' && Number.isFinite(v) ? v : now;
+    if ((typeof v === 'number' && Number.isFinite(v)) || isDateTime(v)) out[k] = v;
+    else out[k] = typeof v === 'string' && ZONELESS.test(v) && isDateTime(`${v}Z`) ? `${v}Z` : now;
   }
   return out;
 }
+
+// Notes and folders are merged by id on the server: each needs an id (1 to 200 characters), once.
+// An old one without an id gets a stable one here (a hash of what it holds, the server's way), so two
+// tabs give it the same id rather than two copies.
+function mendItems(list, kind) {
+  const used = new Set();
+  return list.filter((x) => x !== null && typeof x === 'object' && !Array.isArray(x)).map((x) => {
+    let item = x;
+    if (!isItemId(item.id) || used.has(item.id)) {
+      const base = kind === 'notes' ? stableId('n', `${item.a}|${item.ts}|${item.text}`) : stableId('f', `${item.name}`);
+      let id = base;
+      for (let i = 2; used.has(id); i++) id = `${base}-${i}`;
+      item = { ...item, id };
+    }
+    used.add(item.id);
+    return item;
+  });
+}
+// A map keyed by agent ids, without a "__proto__" key (setting one would change the object's prototype).
+const withoutProto = (map) => Object.fromEntries(Object.entries(map).filter(([k]) => k !== '__proto__'));
 
 /**
  * Turns whatever the server sent into a usable state: known keys of the wrong type fall back
@@ -124,16 +188,20 @@ export function normalizeState(raw, now = Date.now()) {
     if (k === '__proto__') continue;
     if (!(k in STATE_TYPES) || STATE_TYPES[k](v)) S[k] = v;
   }
+  S.read = withoutProto(S.read);
+  S.saved = Object.fromEntries(Object.entries(S.saved).filter(([k, v]) => k !== '__proto__' && Array.isArray(v)).map(([k, v]) => [k, v.filter(isItemId)]));
   if (!isPlainObject(raw.awarded)) S.awarded = { ...S.read };
   S.awarded = mendTimes(S.awarded, now);
   S.badges = mendTimes(S.badges, now);
   const latest = new Date(now + 864e5).toISOString().slice(0, 10);
-  S.days = S.days.filter((d) => isCalendarDay(d) && d <= latest);
+  S.days = S.days.filter((d) => isCalendarDate(d) && d <= latest);
+  S.notes = mendItems(S.notes, 'notes');
+  S.folders = mendItems(S.folders, 'folders');
   if (!(Number.isFinite(S.xp) && S.xp >= 0 && S.xp <= Number.MAX_SAFE_INTEGER)) S.xp = Math.min(Math.max(0, Number.isFinite(S.xp) ? S.xp : 0), Number.MAX_SAFE_INTEGER);
   return S;
 }
 
-const isArticleId = (id) => typeof id === 'string' && id !== '' && id !== '__proto__';
+const isArticleId = isItemId;
 
 /**
  * Marks a Product Feed article read, or unread if it was read. Reading pays XP once per article,
@@ -193,6 +261,106 @@ export async function readArticle(getState, id, { canPay = true, peek, also = as
   return markArticleRead(getState(), id, { canAward: pay });
 }
 
+/* ================= Product Feed changes, item by item ================= */
+
+/**
+ * Each change to Snow's notes, folders, saved items and reads, done the one way: it changes the
+ * state and tells the state client which item changed (store.added / store.removed), so the server
+ * merges it by item and a delete reaches every tab. app.js's handlers use these; so do the tests.
+ */
+export const feedOps = {
+  /**
+   * After readArticle: a read is an addition, an un-mark a removal. Listed only when something
+   * changed (wasRead is what the page showed before the click), and never for an id the server
+   * would refuse: one refused change would stop every later save from this page.
+   */
+  read(store, id, read, wasRead = !read) {
+    if (!isItemId(id) || read === wasRead) return;
+    store[read ? 'added' : 'removed']('read', id);
+  },
+  /** Returns the note, or null at the cap (MAX_NOTES) or with an id the server would refuse. */
+  addNote(S, store, note) {
+    if (S.notes.length >= MAX_NOTES || !isItemId(note.id)) return null;
+    S.notes.push(note);
+    store.added('notes', note.id);
+    return note;
+  },
+  /** Returns the note, for Undo. */
+  deleteNote(S, store, id) {
+    const gone = S.notes.find((n) => n.id === id);
+    if (!gone) return null;
+    S.notes = S.notes.filter((n) => n.id !== id);
+    store.removed('notes', id);
+    return gone;
+  },
+  /** Undo: brings the note back, everywhere (an Undo is the only way a deleted note returns). */
+  restoreNote(S, store, note) {
+    if (S.notes.some((n) => n.id === note.id)) return;
+    S.notes.push(note);
+    store.restored('notes', note.id);
+  },
+  /** Returns the folder, or null at the cap (MAX_FOLDERS) or with an id the server would refuse. */
+  addFolder(S, store, folder) {
+    if (S.folders.length >= MAX_FOLDERS || !isItemId(folder.id)) return null;
+    S.folders.push(folder);
+    store.added('folders', folder.id);
+    return folder;
+  },
+  renameFolder(S, store, id, name) {
+    const f = S.folders.find((x) => x.id === id);
+    if (!f || !name || f.name === name) return false;
+    f.name = name;
+    store.added('folders', id);
+    return true;
+  },
+  /** Deletes a folder and takes its articles out of it. Returns what Undo needs. */
+  deleteFolder(S, store, id) {
+    const folder = S.folders.find((x) => x.id === id);
+    if (!folder) return null;
+    const pairs = [];
+    S.folders = S.folders.filter((x) => x.id !== id);
+    for (const [a, folders] of Object.entries(S.saved)) {
+      if (a === '__proto__' || !Array.isArray(folders) || !folders.includes(id)) continue;
+      pairs.push([a, id]);
+      S.saved[a] = folders.filter((x) => x !== id);
+      if (!S.saved[a].length) delete S.saved[a];
+    }
+    store.removed('folders', id);
+    for (const pair of pairs) store.removed('saved', pair);
+    return { folder, pairs };
+  },
+  /** Undo of a folder delete: the folder (as an Undo) and the articles that were in it. */
+  restoreFolder(S, store, { folder, pairs }) {
+    if (!S.folders.some((f) => f.id === folder.id)) {
+      S.folders.push(folder);
+      store.restored('folders', folder.id);
+    }
+    for (const [a, f] of pairs) {
+      if (!isItemId(a)) continue;
+      const now = own(S.saved, a) || [];
+      if (now.includes(f)) continue;
+      S.saved[a] = [...now, f];
+      store.added('saved', [a, f]);
+    }
+  },
+  /**
+   * Puts an article in a folder or takes it out. Returns how many folders it is in now. Lists the
+   * change only when there was one, and does nothing for an id the server would refuse.
+   */
+  setSaved(S, store, articleId, folderId, on) {
+    if (!isItemId(articleId) || !isItemId(folderId)) return (own(S.saved, articleId) || []).length;
+    const before = own(S.saved, articleId) || [];
+    if (before.includes(folderId) === on) return before.length;
+    const now = new Set(before);
+    if (on) now.add(folderId);
+    else now.delete(folderId);
+    if (now.size) S.saved[articleId] = [...now];
+    else delete S.saved[articleId];
+    store[on ? 'added' : 'removed']('saved', [articleId, folderId]);
+    return now.size;
+  },
+};
+
 /** How long a GET may take before it counts as failed (a stuck one would keep a catch-up round running). */
 export const GET_TIMEOUT = 10000;
 /** An AbortSignal that fires after ms (undefined where the browser has no AbortSignal.timeout). */
@@ -247,6 +415,9 @@ function randomTabId() {
  * - flushOnExit() sends whatever is still waiting, with keepalive so it outlives the page, counting
  *   from the last confirmed value (the server's high-water mark covers a PUT still on its way); but
  *   not when the last read from the server failed (it stays waiting, for a retry if the page stays).
+ * - added(kind, id) / removed(kind, id): the server merges reads, notes, folders and saved items by
+ *   item, so each save lists the items this page added or edited (`_added`) and removed (`_removed`)
+ *   since the last save that landed; an item another tab added survives, a removal reaches every tab.
  * - peek() reads the server's copy without changing anything. reload(apply) reads it and hands it
  *   to apply(state) only when nothing is waiting to be saved and no PUT is on its way, checked
  *   in the same instant it applies, so a change made while the GET was out is never thrown away.
@@ -260,6 +431,7 @@ export function createStateClient({
   tabId = randomTabId(),
   fetchFn = (...args) => globalThis.fetch(...args),
   onSaveFail = () => {},
+  onTooLarge = () => {}, // the server answered 413: the state is past its 1 MB cap
   delay = 600,
   retryDelay = 15000,
   keepaliveMax = 64000, // browsers refuse keepalive bodies over 64 KB
@@ -275,6 +447,40 @@ export function createStateClient({
   let lastReadOk = false;
   let base = {}; // counters as last synced with the server
   let running = null; // the flush on its way, if any
+  // Items added (or edited) and removed since the last save that landed, by kind: key -> { id, op, v }.
+  // The server merges by item, so a delete must be said out loud; the latest change to an item wins.
+  const changes = new Map();
+  let changeCount = 0;
+  const changeKey = (id) => (typeof id === 'string' ? id : JSON.stringify(id));
+  function track(kind, id, op) {
+    if (!changes.has(kind)) changes.set(kind, new Map());
+    changes.get(kind).set(changeKey(id), { id, op, v: ++changeCount });
+  }
+  // The lists for a PUT, and what they hold (to clear once that PUT lands, unless changed again meanwhile).
+  // An Undo ("restore") is an addition the server also lets bring a deleted note or folder back.
+  function changeLists() {
+    const lists = { _added: {}, _removed: {}, _restored: {} };
+    const sent = [];
+    for (const [kind, items] of changes) {
+      for (const [key, { id, op, v }] of items) {
+        if (op === 'remove') (lists._removed[kind] ||= []).push(id);
+        else (lists._added[kind] ||= []).push(id);
+        if (op === 'restore') (lists._restored[kind] ||= []).push(id);
+        sent.push([kind, key, v]);
+      }
+    }
+    const out = {};
+    for (const name of ['_added', '_removed', '_restored']) if (Object.keys(lists[name]).length) out[name] = lists[name];
+    return { lists: out, sent };
+  }
+  let tooLarge = false; // the last PUT got 413: no retries until Snow changes something
+  function changesLanded(sent) {
+    for (const [kind, key, v] of sent) {
+      const items = changes.get(kind);
+      if (items && items.get(key)?.v === v) items.delete(key);
+    }
+  }
+
   let edits = 0; // save() calls so far: a reload that went out before one never applies its answer
   const reloads = newestAnswer(); // overlapping reloads: an older answer never replaces a newer one
   let missed = false; // the last reload was skipped or dropped because of a change here (retry when idle)
@@ -295,11 +501,13 @@ export function createStateClient({
     for (const [k, v] of Object.entries(sent)) base[k] = Math.max(base[k] ?? 0, v);
   };
   const countersOf = (state) => Object.fromEntries(counters.map((k) => [k, typeof state?.[k] === 'number' && Number.isFinite(state[k]) ? state[k] : 0]));
-  // The body of a PUT: the state, plus the XP it was last synced at, this tab's id and the XP it sends.
+  // The body of a PUT: the state, the items added and removed since the last save that landed, and
+  // (with counters) the XP it was last synced at, this tab's id and the XP it sends.
   function bodyOf(state, syncedAt) {
-    if (!counters.length) return { body: JSON.stringify(state), sent: null };
+    const { lists, sent: changed } = changeLists();
+    if (!counters.length) return { body: JSON.stringify({ ...state, ...lists }), sent: null, changed };
     const sent = countersOf(state);
-    return { body: JSON.stringify({ ...state, _sync: { ...syncedAt, tab: tabId, sent: sent[counters[0]] } }), sent };
+    return { body: JSON.stringify({ ...state, ...lists, _sync: { ...syncedAt, tab: tabId, sent: sent[counters[0]] } }), sent, changed };
   }
 
   // GET the server's copy, normalized. Throws when it can't be read.
@@ -393,6 +601,9 @@ export function createStateClient({
     const r = await load();
     if (!r.ok) return { ok: false };
     missed = false;
+    // Edits made on the blank state (nothing could be saved) go with it: their lists must not go to
+    // the server, where a removal would delete an item another tab has.
+    changes.clear();
     apply(r.state);
     return { ok: true, loaded: true, state: r.state };
   }
@@ -405,9 +616,10 @@ export function createStateClient({
     timer = setTimeout(flush, delay);
   }
 
-  // After a failure: try again later, unless a save is already on its way.
+  // After a failure: try again later, unless a save is already on its way. Not after a 413: the same
+  // state would be refused again every 15 s; the next change (a delete may make room) tries again.
   function retryLater() {
-    if (canSave && dirty && !timer) timer = setTimeout(flush, retryDelay);
+    if (canSave && dirty && !timer && !tooLarge) timer = setTimeout(flush, retryDelay);
   }
 
   /**
@@ -418,7 +630,9 @@ export function createStateClient({
     clearTimeout(timer);
     timer = null;
     if (writing) {
-      pending = true;
+      // Only a change made since that PUT went out needs another one (a window switch with nothing
+      // new waiting must not send a failed PUT twice).
+      if (dirty) pending = true;
       return running;
     }
     if (!canSave || !dirty) return Promise.resolve();
@@ -430,19 +644,27 @@ export function createStateClient({
           pending = false;
           if (!canSave || !dirty) break;
           // Take the state and send it in the same instant: nothing is awaited in between.
-          const { body, sent } = bodyOf(getState(), base);
+          const { body, sent, changed } = bodyOf(getState(), base);
           dirty = false;
           let ok = false;
+          let status = 0;
           try {
             const r = await fetchFn(url, { method: 'PUT', headers, body });
             ok = r.ok;
+            status = r.status;
             await finish(r);
           } catch {
             /* offline or the server is down */
           }
           if (ok) {
             failNoted = false;
+            tooLarge = false;
             if (sent) advance(sent); // the server has added everything up to what was sent
+            changesLanded(changed);
+          } else if (status === 413) {
+            dirty = true; // kept here; the next change sends everything again
+            if (!tooLarge) onTooLarge();
+            tooLarge = true;
           } else {
             dirty = true; // the retry (or the next change) sends everything again
             if (!failNoted) {
@@ -480,13 +702,14 @@ export function createStateClient({
     wakeIdle();
     // Count from the last confirmed value: if a PUT still on its way lands too, the server's
     // high-water mark for this tab stops its XP being added twice.
-    const { body, sent } = bodyOf(getState(), base);
+    const { body, sent, changed } = bodyOf(getState(), base);
     const keepalive = new TextEncoder().encode(body).length <= keepaliveMax;
     Promise.resolve()
       .then(() => fetchFn(url, { method: 'PUT', headers, body, keepalive }))
       .then((r) => {
         if (!r.ok) throw new Error(`PUT ${url} answered ${r.status}`);
         if (sent) advance(sent);
+        changesLanded(changed);
       })
       .catch(() => {
         // Still here (the page was kept, or came back from the back/forward cache): try again later.
@@ -506,6 +729,22 @@ export function createStateClient({
     catchUp,
     whenIdle,
     dispose,
+    /** Says an item was added or edited in this save (kind: "read", "notes", "folders", "saved"; saved ids are [article, folder]). */
+    added: (kind, id) => track(kind, id, 'add'),
+    /** Says an item was removed in this save, so the server deletes it in every tab. */
+    removed: (kind, id) => track(kind, id, 'remove'),
+    /** Says a deleted note or folder came back by Undo (the only way a deleted one returns). */
+    restored: (kind, id) => track(kind, id, 'restore'),
+    /** The last save was refused as too large (413); it isn't retried until something changes. */
+    get tooLarge() {
+      return tooLarge;
+    },
+    /** How many item changes are waiting to land. */
+    get changesWaiting() {
+      let n = 0;
+      for (const items of changes.values()) n += items.size;
+      return n;
+    },
     get canSave() {
       return canSave;
     },
@@ -563,9 +802,9 @@ export function themeScores(feed, S) {
   const articles = feed.articles || [];
   return (feed.themes || []).map((t) => {
     const arts = articles.filter((a) => (a.themes || []).includes(t.id));
-    const reads = arts.filter((a) => S.read[a.id]).length;
+    const reads = arts.filter((a) => own(S.read, a.id)).length;
     const notes = S.notes.filter((n) => arts.some((a) => a.id === n.a)).length;
-    const saves = arts.filter((a) => (S.saved[a.id] || []).length).length;
+    const saves = arts.filter((a) => (own(S.saved, a.id) || []).length).length;
     return { ...t, total: arts.length, reads, notes, saves, score: reads + notes * 2 + saves * 0.5 };
   });
 }
@@ -585,11 +824,11 @@ export const freshBadges = (S, feed) => BADGES.filter((b) => !S.badges[b.id] && 
 /** Articles on a shelf: all, unread, saved, or one folder ("f:<id>"). */
 export function articlesFor(feed, S, shelf) {
   const A = feed.articles || [];
-  if (shelf === 'unread') return A.filter((a) => !S.read[a.id]);
-  if (shelf === 'saved') return A.filter((a) => (S.saved[a.id] || []).length);
+  if (shelf === 'unread') return A.filter((a) => !own(S.read, a.id));
+  if (shelf === 'saved') return A.filter((a) => (own(S.saved, a.id) || []).length);
   if (shelf.startsWith('f:')) {
     const f = shelf.slice(2);
-    return A.filter((a) => (S.saved[a.id] || []).includes(f));
+    return A.filter((a) => (own(S.saved, a.id) || []).includes(f));
   }
   return A;
 }
@@ -695,7 +934,7 @@ export function mentorLine(feed, S) {
   const articles = (Array.isArray(feed?.articles) ? feed.articles : []).filter((a) => a && typeof a === 'object');
   if (!articles.length) return 'Your Product Feed is still being set up.';
   const read = S && typeof S.read === 'object' && S.read ? S.read : {};
-  const unread = articles.filter((a) => !read[a.id]);
+  const unread = articles.filter((a) => !own(read, a.id));
   if (!unread.length) return 'All caught up. Nicely done, Snow. What stuck with you?';
 
   const n = unread.length;

@@ -29,7 +29,7 @@
       "required": ["id", "rank", "headline", "date", "region", "kind", "summary", "why", "skeptic", "sources"],
       "additionalProperties": true,
       "properties": {
-        "id": { "type": "string", "pattern": "^[A-Za-z0-9_-]{1,40}$", "description": "Short id, unique in the edition, e.g. s1" },
+        "id": { "type": "string", "pattern": "^(?!(?:__proto__|constructor|prototype)$)[A-Za-z0-9_-]{1,40}$", "description": "Short id, unique in the edition, e.g. s1" },
         "rank": { "type": "integer", "minimum": 1, "maximum": 10, "description": "1 is the most important, up to 10; unique across stories and more" },
         "headline": { "type": "string", "pattern": "[^\\s\\p{Cc}\\p{Cf}\\p{Cs}\\p{Zl}\\p{Zp}\\p{Default_Ignorable_Code_Point}\\p{M}\\p{Co}\\u{2800}\\u{3164}\\u{ffa0}\\u{115f}\\u{1160}\\u{1d159}]", "maxLength": 160, "description": "Plain and factual, no clickbait" },
         "date": { "type": "string", "pattern": "^(\\d{4}-\\d{2}-\\d{2})?$", "description": "When it happened as YYYY-MM-DD, or empty when unclear" },

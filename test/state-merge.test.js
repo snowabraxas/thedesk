@@ -6,7 +6,11 @@ import path from 'node:path';
 import { after, describe, test } from 'node:test';
 import { statePath } from '../server/config.js';
 import { createServer } from '../server/index.js';
-import { MAX_MAP_ENTRIES, MAX_SEEN_TABS, MAX_STATE_BYTES, STALE_TEMP_MS, checkState, createStateStore, mergeIncoming, mergeXp, newest } from '../server/state-store.js';
+import {
+  MAX_CLOCK_STEP, MAX_FOLDERS, MAX_MAP_ENTRIES, MAX_NOTES, MAX_SEEN_TABS, MAX_STATE_BYTES, STALE_TEMP_MS, TOMBSTONE_BYTES, TOMBSTONE_MS, asTime, checkState,
+  createStateStore, forPage, mergeIncoming, mergeXp, newest, stableId, withIds,
+} from '../server/state-store.js';
+import { stableId as pageStableId } from '../app/lib.js';
 
 const homes = [];
 const tempHome = () => {
@@ -42,7 +46,7 @@ describe('mergeIncoming', () => {
       awarded: { a1: 1, a2: 3, a3: 7 },
       badges: { 'first-read': 10, curator: 30 },
       days: ['2026-11-25', '2026-11-26', '2026-11-27'],
-      notes: [{ id: 'n1' }],
+      notes: [{ id: 'n0' }, { id: 'n1' }],
     });
   });
 
@@ -56,15 +60,17 @@ describe('mergeIncoming', () => {
     assert.ok(merged.days.every((d) => /^\d{4}-\d{2}-\d{2}$/.test(d) && d !== '2026-02-30'));
   });
 
-  test('News: awarded and dismissed are unions; read and shelfOpen are the incoming ones', () => {
+  test('News: awarded and dismissed are unions; read is merged by item (a removal must be listed); the shelf is the incoming one', () => {
     const current = { read: { '2026-12-07/s1': 1 }, awarded: { '2026-12-07/s1': 1 }, dismissed: { '2026-12-07T12:04:00-05:00': 2 }, shelfOpen: false };
-    const incoming = { read: {}, shelfOpen: true };
-    assert.deepEqual(mergeIncoming('news', current, incoming), {
-      read: {},
+    assert.deepEqual(mergeIncoming('news', current, { read: {}, shelfOpen: true }), {
+      read: { '2026-12-07/s1': 1 },
       shelfOpen: true,
       awarded: { '2026-12-07/s1': 1 },
       dismissed: { '2026-12-07T12:04:00-05:00': 2 },
-    });
+    }, 'a save that does not mention s1 keeps it');
+    const removed = mergeIncoming('news', current, { read: {}, _removed: { read: ['2026-12-07/s1'] } }, { now: 9 });
+    assert.deepEqual(removed.read, {});
+    assert.deepEqual(removed._deleted, { 'read:2026-12-07/s1': 9 });
   });
 
   test('keys neither side has stay absent; an empty file takes the incoming state as it is', () => {
@@ -309,5 +315,265 @@ describe('stopping the server', () => {
     assert.match(src, /server\.close\(\(\) => server\.settled\(\)\.then\(exit, exit\)\);/);
     assert.match(src, /setTimeout\(exit, 2000\)\.unref\(\);/);
     assert.match(src, /server\.settled = \(\) => Promise\.all\(\[\.\.\.stateRoutes\.values\(\)\]\.map\(\(store\) => store\.settled\(\)\)\)/);
+  });
+});
+
+describe('merging by item: reads, notes, folders and saved items (N4c)', () => {
+  const feed = (current, incoming, now = 1000) => mergeIncoming('product-feed', current, incoming, { now });
+  const note = (id, text = id, ts = 1) => ({ id, a: 'a1', text, ts });
+
+  test("an item another tab added survives a save that doesn't mention it", () => {
+    const current = { read: { a1: 1 }, notes: [note('n1')], folders: [{ id: 'f1', name: 'Evals' }], saved: { a1: ['f1'] } };
+    const merged = feed(current, { read: { a2: 2 }, notes: [note('n2')], folders: [{ id: 'f2', name: 'Later' }], saved: { a2: ['f2'] } });
+    assert.deepEqual(merged.read, { a1: 1, a2: 2 });
+    assert.deepEqual(merged.notes.map((n) => n.id), ['n1', 'n2']);
+    assert.deepEqual(merged.folders.map((f) => f.id), ['f1', 'f2']);
+    assert.deepEqual(merged.saved, { a1: ['f1'], a2: ['f2'] });
+  });
+
+  test('a listed removal deletes the item and leaves a tombstone; the GET never shows tombstones', () => {
+    const current = { read: { a1: 1 }, notes: [note('n1')], folders: [{ id: 'f1', name: 'Evals' }], saved: { a1: ['f1'] } };
+    const merged = feed(current, { read: {}, notes: [], folders: [], saved: {}, _removed: { read: ['a1'], notes: ['n1'], folders: ['f1'], saved: [['a1', 'f1']] } }, 500);
+    assert.deepEqual([merged.read, merged.notes, merged.folders, merged.saved], [{}, [], [], {}]);
+    assert.deepEqual(Object.keys(merged._deleted).sort(), ['folders:f1', 'notes:n1', 'read:a1', 'saved:["a1","f1"]']);
+    assert.equal('_deleted' in forPage(merged), false);
+    assert.equal('_removed' in merged, false);
+  });
+
+  test("a stale tab can't bring a deleted item back; a listed re-add (Undo, re-marking) can, and clears the tombstone", () => {
+    const deleted = feed({ notes: [note('n1')], read: { a1: 1 } }, { notes: [], read: {}, _removed: { notes: ['n1'], read: ['a1'] } }, 500);
+    const stale = feed(deleted, { notes: [note('n1')], read: { a1: 1 } }, 600);
+    assert.deepEqual([stale.notes, stale.read], [[], {}], 'the stale copies stay deleted');
+    const edited = feed(deleted, { notes: [note('n1', 'edited elsewhere')], _added: { notes: ['n1'] } }, 650);
+    assert.deepEqual(edited.notes, [], 'an edit from a tab that never saw the delete does not undo it');
+    const undone = feed(deleted, { notes: [note('n1')], read: { a1: 7 }, _added: { notes: ['n1'], read: ['a1'] }, _restored: { notes: ['n1'] } }, 700);
+    assert.deepEqual(undone.notes.map((n) => n.id), ['n1']);
+    assert.deepEqual(undone.read, { a1: 7 });
+    assert.equal(undone._deleted, undefined, 'no tombstones left');
+  });
+
+  test("an edit or rename wins for that item only; a stale copy can't undo another tab's rename", () => {
+    const current = { folders: [{ id: 'f1', name: 'Renamed' }, { id: 'f2', name: 'Two' }], notes: [note('n1', 'edited')] };
+    const stale = feed(current, { folders: [{ id: 'f1', name: 'Old name' }, { id: 'f2', name: 'Two' }], notes: [note('n1', 'old text')] });
+    assert.deepEqual(stale.folders.map((f) => f.name), ['Renamed', 'Two']);
+    assert.equal(stale.notes[0].text, 'edited');
+    const renamed = feed(current, { folders: [{ id: 'f2', name: 'Second' }], _added: { folders: ['f2'] } });
+    assert.deepEqual(renamed.folders.map((f) => f.name), ['Renamed', 'Second'], 'the later save wins for f2 only');
+  });
+
+  test("a deleted folder takes its saved items with it, even from a tab that doesn't know", () => {
+    const deleted = feed({ folders: [{ id: 'f1', name: 'X' }], saved: { a1: ['f1'], a2: ['f1', 'f2'] } }, { folders: [], saved: {}, _removed: { folders: ['f1'] } }, 500);
+    const stale = feed(deleted, { folders: [{ id: 'f1', name: 'X' }], saved: { a1: ['f1'], a2: ['f1'] } }, 600);
+    assert.deepEqual(stale.folders, []);
+    assert.deepEqual(stale.saved, {});
+  });
+
+  test('a save with no lists (old code): unions with no deletes, and still no bringing back a tombstoned item', () => {
+    const current = { read: { a1: 1 }, notes: [note('n1')], folders: [{ id: 'f1', name: 'Evals' }], _deleted: { 'notes:n9': 900 } };
+    const merged = feed(current, { read: { a2: 2 }, notes: [note('n2'), note('n9')], folders: [] }, 1000);
+    assert.deepEqual(merged.read, { a1: 1, a2: 2 });
+    assert.deepEqual(merged.notes.map((n) => n.id), ['n1', 'n2']);
+    assert.deepEqual(merged.folders.map((f) => f.id), ['f1']);
+  });
+
+  test('tombstones go after 30 days', () => {
+    const merged = feed({ notes: [], _deleted: { 'notes:old': 0, 'notes:new': TOMBSTONE_MS } }, { notes: [] }, TOMBSTONE_MS + 1);
+    assert.deepEqual(Object.keys(merged._deleted), ['notes:new']);
+    const later = feed({ notes: [], _deleted: { 'notes:old': 0 } }, { notes: [note('old')] }, TOMBSTONE_MS + 1);
+    assert.deepEqual(later.notes.map((n) => n.id), ['old'], 'after 30 days a very stale tab can bring it back: the price of a bounded file');
+  });
+
+  test('News reads merge by item too, with removals', () => {
+    const k = '2026-12-07/s1';
+    const deleted = mergeIncoming('news', { read: { [k]: 1 } }, { read: {}, _removed: { read: [k] } }, { now: 5 });
+    assert.deepEqual(mergeIncoming('news', deleted, { read: { [k]: 1 } }, { now: 6 }).read, {}, 'a stale tab cannot bring it back');
+    assert.deepEqual(mergeIncoming('news', deleted, { read: { [k]: 9 }, _added: { read: [k] } }, { now: 7 }).read, { [k]: 9 });
+  });
+
+  test('caps: notes keep the newest 2000 by time, folders the first 200, reads the newest 2000', () => {
+    const many = Array.from({ length: MAX_NOTES + 10 }, (_, i) => note(`n${i}`, 'x', i));
+    const merged = feed({ notes: many.slice(0, 1500) }, { notes: many.slice(1500) });
+    assert.equal(merged.notes.length, MAX_NOTES);
+    assert.ok(!merged.notes.some((n) => n.id === 'n0') && merged.notes.some((n) => n.id === `n${MAX_NOTES + 9}`));
+    const folders = (from, n) => Array.from({ length: n }, (_, i) => ({ id: `f${from + i}`, name: 'x' }));
+    assert.equal(feed({ folders: folders(0, 150) }, { folders: folders(150, 100) }).folders.length, MAX_FOLDERS);
+    const reads = Object.fromEntries(Array.from({ length: 2500 }, (_, i) => [`a${i}`, i]));
+    assert.equal(Object.keys(feed({ read: reads }, {}).read).length, MAX_MAP_ENTRIES);
+  });
+
+  test('the lists and the items are checked', () => {
+    assert.deepEqual(checkState({ _removed: { read: ['a1'], notes: ['n1'], folders: ['f1'], saved: [['a1', 'f1']] }, _added: { notes: ['n2'] } }), { ok: true });
+    assert.match(checkState({ _removed: { badges: ['x'] } }).error, /can only list/);
+    assert.match(checkState({ _removed: { saved: ['a1'] } }).error, /isn't an id/);
+    assert.match(checkState({ _removed: 'a1' }).error, /must be an object/);
+    assert.deepEqual(checkState({ _removed: { read: ['2026-12-07/s1'] } }, 'news'), { ok: true });
+    assert.equal(checkState({ _removed: { read: ['s1'] } }, 'news').ok, false);
+    assert.match(checkState({ notes: [{ text: 'no id' }] }).error, /with an id/);
+    assert.match(checkState({ notes: [{ id: 'n1' }, { id: 'n1' }] }).error, /twice/);
+    assert.deepEqual(checkState({ folders: Array.from({ length: MAX_FOLDERS + 1 }, (_, i) => ({ id: `f${i}` })) }), { ok: true }, 'over the cap is trimmed on merge, not refused');
+    assert.match(checkState({ saved: { a1: 'f1' } }).error, /list of folder ids/);
+  });
+});
+
+describe('N4b nits closed in N4c', () => {
+  test('a zoneless ISO badge time is read as UTC, in the file and in a save, rather than refused', () => {
+    assert.equal(asTime('2026-11-27T10:00:00'), '2026-11-27T10:00:00Z');
+    assert.equal(asTime('2026-11-27T10:00'), '2026-11-27T10:00Z');
+    assert.equal(asTime('2026-11-27'), null);
+    assert.deepEqual(checkState({ badges: { curator: '2026-11-27T10:00:00' } }), { ok: true });
+    const merged = mergeIncoming('product-feed', { badges: { curator: '2026-11-27T10:00:00' } }, { badges: { 'first-read': 5 } });
+    assert.deepEqual(merged.badges, { 'first-read': 5, curator: '2026-11-27T10:00:00Z' });
+  });
+
+  test('_seen is ordered by a counter that only goes up, not by the clock', () => {
+    let state = {};
+    // The clock goes backwards; the counter still orders them.
+    for (let i = 0; i < MAX_SEEN_TABS + 5; i++) state = mergeIncoming('product-feed', state, { xp: 0, _sync: { xp: 0, tab: `t${i}`, sent: 0 } }, { now: 10_000 - i });
+    const seen = state._seen;
+    assert.equal(Object.keys(seen).length, MAX_SEEN_TABS);
+    assert.ok(seen[`t${MAX_SEEN_TABS + 4}`] && !seen.t0, 'the newest by counter kept, despite the older times');
+    assert.equal(seen[`t${MAX_SEEN_TABS + 4}`].n, MAX_SEEN_TABS + 5);
+    // Marks from before the counter count as 0; among them the newer time wins.
+    const old = mergeIncoming('product-feed', { _seen: Object.fromEntries(Array.from({ length: MAX_SEEN_TABS }, (_, i) => [`o${i}`, { xp: 0, at: i }])) }, { xp: 0, _sync: { xp: 0, tab: 'fresh', sent: 0 } }, { now: 1 });
+    assert.ok(old._seen.fresh && !old._seen.o0 && old._seen[`o${MAX_SEEN_TABS - 1}`]);
+  });
+
+  test('the temp-file sweep runs once more a minute after start', async () => {
+    const home = tempHome();
+    const dir = path.dirname(statePath(home));
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(path.join(dir, '.state.json.dddddddddddd.tmp'), '{}'); // too new at start
+    let clock = Date.now();
+    const store = createStateStore(home, 'product-feed', { now: () => clock, sweepAgainAfter: 30 });
+    assert.equal(await store.swept, 0);
+    clock += STALE_TEMP_MS + 1000;
+    assert.equal(await store.sweptAgain, 1);
+    assert.deepEqual(fs.readdirSync(dir), []);
+  });
+});
+
+// Every name Object.prototype has, plus "prototype": as article or story ids they must be plain keys.
+const PROTO_NAMES = [...Object.getOwnPropertyNames(Object.prototype), 'prototype'];
+
+describe('ids that are Object.prototype names (closing check)', () => {
+  const safe = PROTO_NAMES.filter((n) => n !== '__proto__');
+
+  test('every name works as an article id in reads, saved items, awarded and badges, from the file and from a save', () => {
+    for (const name of safe) {
+      const current = { read: { [name]: 1 }, saved: { [name]: ['f1'] }, folders: [{ id: 'f1', name: 'F' }], awarded: { [name]: 1 } };
+      const merged = mergeIncoming('product-feed', current, { read: { [`${name}2`]: 2 }, saved: { [`${name}2`]: ['f1'] }, folders: [{ id: 'f1', name: 'F' }], awarded: { [name]: 5 } });
+      assert.deepEqual(merged.saved, { [name]: ['f1'], [`${name}2`]: ['f1'] }, name);
+      assert.ok(Object.hasOwn(merged.read, name) && Object.hasOwn(merged.awarded, name), name);
+      const removed = mergeIncoming('product-feed', merged, { read: {}, saved: {}, folders: [{ id: 'f1', name: 'F' }], _removed: { read: [name], saved: [[name, 'f1']] } });
+      assert.equal(Object.hasOwn(removed.read, name), false, name);
+      assert.equal(Object.hasOwn(removed.saved, name), false, name);
+      assert.equal(Object.getPrototypeOf(removed.saved), Object.prototype);
+    }
+  });
+
+  test('a PUT and GET round trip with each name (a file already holding one never blocks a save)', async () => {
+    const home = tempHome();
+    const server = createServer({ deskHome: home, log: { error() {}, info() {} } });
+    await new Promise((r) => server.listen(0, '127.0.0.1', r));
+    const url = `http://127.0.0.1:${server.address().port}/api/state`;
+    const put = (v) => fetch(url, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(v) });
+    try {
+      for (const name of safe) {
+        assert.equal((await put({ folders: [{ id: 'f1', name: 'F' }], saved: { [name]: ['f1'] }, read: { [name]: 1 } })).status, 200, name);
+        assert.equal((await put({ notes: [{ id: 'n1', a: name, ts: 1, text: 'x' }] })).status, 200, `${name}: the next save`);
+        const got = await (await fetch(url)).json();
+        assert.deepEqual(got.saved[name], ['f1'], name);
+      }
+      assert.equal((await put(JSON.parse('{"saved": {"__proto__": ["f1"]}}'))).status, 400, 'a __proto__ article id is refused with a message, never a 500');
+      assert.equal((await put({ _removed: { read: ['__proto__'] } })).status, 400, '__proto__ in a list is refused');
+    } finally {
+      await new Promise((r) => { server.close(r); server.closeAllConnections(); });
+    }
+  });
+});
+
+describe('caps trim, never drop a listed addition (closing check)', () => {
+  const note = (id, ts) => ({ id, a: 'a1', text: id, ts });
+  test("page state over the cap is trimmed, not refused, and an item listed in _added always stays", () => {
+    const many = Array.from({ length: MAX_NOTES }, (_, i) => note(`n${i}`, 1000 + i));
+    assert.deepEqual(checkState({ notes: [...many, note('extra', 1)] }), { ok: true });
+    const merged = mergeIncoming('product-feed', { notes: many }, { notes: [...many, note('mine', 1)], _added: { notes: ['mine'] } });
+    assert.equal(merged.notes.length, MAX_NOTES);
+    assert.ok(merged.notes.some((n) => n.id === 'mine'), 'the listed note stays even though it is the oldest');
+    const folders = Array.from({ length: MAX_FOLDERS }, (_, i) => ({ id: `f${i}`, name: 'x' }));
+    const mergedF = mergeIncoming('product-feed', { folders }, { folders: [...folders, { id: 'new', name: 'N' }], _added: { folders: ['new'] } });
+    assert.equal(mergedF.folders.length, MAX_FOLDERS);
+    assert.equal(mergedF.folders.at(-1).id, 'new');
+  });
+});
+
+describe('tombstones (closing check)', () => {
+  const feed = (current, incoming, now) => mergeIncoming('product-feed', current, incoming, { now });
+
+  test('a removal leaves a tombstone only for an item in the file or one already tombstoned', () => {
+    const merged = feed({ notes: [{ id: 'real' }], _deleted: { 'notes:old': 5 }, _deletedAt: 5 }, { notes: [], _removed: { notes: ['real', 'old', 'forged1', 'forged2'] } }, 10);
+    assert.deepEqual(Object.keys(merged._deleted).sort(), ['notes:old', 'notes:real']);
+  });
+
+  test("forged removals can't push real tombstones out", () => {
+    const forged = Array.from({ length: 4000 }, (_, i) => `x${i}`);
+    const merged = feed({ notes: [{ id: 'real' }] }, { notes: [], _removed: { notes: ['real', ...forged.slice(0, 2000)] } }, 10);
+    assert.deepEqual(Object.keys(merged._deleted), ['notes:real']);
+  });
+
+  test("tombstones and tab marks sit outside the 1 MB cap, each trimmed to its own budget", async () => {
+    const big = Object.fromEntries(Array.from({ length: 2000 }, (_, i) => [`notes:${'x'.repeat(150)}${i}`, 1000 + i]));
+    const merged = feed({ _deleted: big, _deletedAt: 3000 }, {}, 3000);
+    assert.ok(Buffer.byteLength(JSON.stringify(merged._deleted)) <= TOMBSTONE_BYTES);
+    assert.ok(Object.hasOwn(merged._deleted, `notes:${'x'.repeat(150)}1999`), 'the newest kept');
+    const home = tempHome();
+    const store = createStateStore(home, 'product-feed');
+    // A state just under 1 MB still saves with tombstones on top of it.
+    await store.write({ notes: [{ id: 'gone', ts: 1 }] });
+    await store.write({ notes: [], _removed: { notes: ['gone'] } });
+    const pad = 'p'.repeat(MAX_STATE_BYTES - 40); // Snow's state itself just under 1 MB
+    await store.write({ notes: [], pad });
+    const saved = await store.read();
+    assert.ok(saved._deleted['notes:gone']);
+    assert.ok(Buffer.byteLength(JSON.stringify(forPage(saved))) <= MAX_STATE_BYTES);
+    assert.ok(Buffer.byteLength(JSON.stringify(saved)) > MAX_STATE_BYTES, 'the tombstones are on top of the cap, not inside it');
+  });
+
+  test("a rename doesn't undo a delete; only an Undo (the restore flag) does", () => {
+    const deleted = feed({ folders: [{ id: 'f1', name: 'Old' }] }, { folders: [], _removed: { folders: ['f1'] } }, 100);
+    assert.deepEqual(feed(deleted, { folders: [{ id: 'f1', name: 'Renamed' }], _added: { folders: ['f1'] } }, 200).folders, []);
+    assert.deepEqual(feed(deleted, { folders: [{ id: 'f1', name: 'Old' }], _added: { folders: ['f1'] }, _restored: { folders: ['f1'] } }, 200).folders, [{ id: 'f1', name: 'Old' }]);
+  });
+
+  test("a clock step can't expire tombstones early, and a step back can't keep them forever", () => {
+    const start = { notes: [], _deleted: { 'notes:n1': 0 }, _deletedAt: 0 };
+    const year = 365 * 864e5;
+    const jumped = feed(start, { notes: [] }, year);
+    assert.ok(jumped._deleted['notes:n1'] !== undefined, 'a year-long jump ages it by one step only');
+    assert.equal(year - jumped._deleted['notes:n1'], MAX_CLOCK_STEP);
+    const back = feed({ notes: [], _deleted: { 'notes:n1': 5000 }, _deletedAt: 5000 }, { notes: [] }, 1000);
+    assert.ok(back._deleted['notes:n1'] <= 1000, 'never in the future');
+    let state = start;
+    for (let day = 1; day <= 31; day++) state = feed(state, { notes: [] }, day * 864e5);
+    assert.equal(state._deleted, undefined, 'after 30 days of saves it goes, as it should');
+  });
+
+  test('News reads from the file keep only story keys', () => {
+    const merged = mergeIncoming('news', { read: { '2026-12-07/s1': 1, bogus: 2, '2026-02-30/s1': 3 } }, {});
+    assert.deepEqual(merged.read, { '2026-12-07/s1': 1 });
+  });
+});
+
+describe('stable ids for items found without one (closing check)', () => {
+  test('the page and the server compute the same id', () => {
+    for (const text of ['a1|1|hello', '', 'é ✓ 😀', 'x'.repeat(5000)]) assert.equal(pageStableId('n', text), stableId('n', text));
+  });
+  test('id-less notes and folders in the file get stable ids, repeats numbered; the same in every tab', () => {
+    const list = [{ a: 'a1', ts: 1, text: 'x' }, { a: 'a1', ts: 1, text: 'x' }, { id: 'n9', text: 'y' }];
+    const one = withIds(list, 'notes');
+    assert.deepEqual(one.map((n) => n.id), [stableId('n', 'a1|1|x'), `${stableId('n', 'a1|1|x')}-2`, 'n9']);
+    assert.deepEqual(withIds(list, 'notes'), one);
+    const merged = mergeIncoming('product-feed', { notes: list }, {});
+    assert.deepEqual(merged.notes.map((n) => n.id), one.map((n) => n.id));
   });
 });

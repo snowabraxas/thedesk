@@ -8,8 +8,9 @@ import { REPO_ROOT } from '../server/config.js';
 import { isHttpsLink } from '../server/schema-common.js';
 import { checkState } from '../server/state-store.js';
 import {
-  articlesFor, autoPhase, awardText, blank, createStateClient, dayKey, esc, fmtDate, fmtDay, freshBadges, level, mentorLine,
+  articlesFor, autoPhase, awardText, blank, createStateClient, feedOps, dayKey, esc, fmtDate, fmtDay, freshBadges, level, mentorLine,
   markArticleRead, mergeFeedState, moon, newestAnswer, normalizeState, readArticle, readsThisWeek, safeUrl, streak, sunTimes, themeScores, toggleArticleRead, wilaLine,
+  MAX_FOLDERS, MAX_NOTES, isItemId, own, stableId,
 } from '../app/lib.js';
 
 const MIN = 60e3;
@@ -261,6 +262,122 @@ describe('state and progress', () => {
     assert.deepEqual(S.days, ['2026-11-26', '2026-11-28']);
     assert.equal(S.xp, 0);
     assert.equal(checkState(S, 'product-feed', { now: () => now }).ok, true, 'the server accepts it');
+  });
+
+  test('normalizeState keeps ISO times with a zone, reads a zoneless one as UTC, and gives old notes and folders an id', () => {
+    const now = Date.parse('2026-11-27T15:00:00Z');
+    const S = normalizeState({
+      badges: { a: '2026-11-27T10:00:00-05:00', b: '2026-11-27T10:00:00', c: 'soon' },
+      notes: [{ text: 'no id' }, { id: 'n1', text: 'one' }, { id: 'n1', text: 'same id' }, null],
+      folders: [{ name: 'no id' }],
+    }, now);
+    assert.deepEqual(S.badges, { a: '2026-11-27T10:00:00-05:00', b: '2026-11-27T10:00:00Z', c: now });
+    assert.equal(S.notes.length, 3, 'every note kept');
+    assert.equal(new Set(S.notes.map((n) => n.id)).size, 3, 'each with its own id');
+    assert.equal(S.notes[1].id, 'n1');
+    assert.ok(S.folders[0].id);
+    assert.equal(checkState(S, 'product-feed', { now: () => now }).ok, true);
+  });
+
+  describe('ids from an agent, and caps (closing check)', () => {
+    const PROTO_NAMES = [...Object.getOwnPropertyNames(Object.prototype), 'prototype'];
+    const recorder = () => {
+      const calls = [];
+      return { calls, store: { added: (k, id) => calls.push(['add', k, id]), removed: (k, id) => calls.push(['remove', k, id]), restored: (k, id) => calls.push(['restore', k, id]) } };
+    };
+
+    test('feedOps.read lists nothing for an id the server would refuse, or when nothing changed', () => {
+      const { calls, store } = recorder();
+      feedOps.read(store, '__proto__', false, false);
+      feedOps.read(store, 'x'.repeat(201), true, false);
+      feedOps.read(store, 'a1', true, true); // was read, still read
+      feedOps.read(store, 'a1', false, false);
+      assert.deepEqual(calls, []);
+      feedOps.read(store, 'a1', true, false);
+      feedOps.read(store, 'constructor', false, true);
+      assert.deepEqual(calls, [['add', 'read', 'a1'], ['remove', 'read', 'constructor']]);
+      assert.deepEqual(toggleArticleRead(blank(), '__proto__'), { read: false, award: false }, 'and the read itself changes nothing');
+    });
+
+    test('every Object.prototype name works as an article id: saved, read, shelves, scores and Wila\'s line', () => {
+      for (const name of PROTO_NAMES.filter((n) => n !== '__proto__')) {
+        const { calls, store } = recorder();
+        const S = blank();
+        feedOps.addFolder(S, store, { id: 'f1', name: 'F' });
+        assert.equal(feedOps.setSaved(S, store, name, 'f1', true), 1, name);
+        assert.equal(feedOps.setSaved(S, store, name, 'f1', true), 1, `${name}: no change`);
+        assert.deepEqual(calls.filter((c) => c[1] === 'saved'), [['add', 'saved', [name, 'f1']]], name);
+        assert.equal(toggleArticleRead(S, name).read, true, name);
+        const feed = { themes: [{ id: 't', name: 'T' }], articles: [{ id: name, themes: ['t'], source: 'S' }, { id: 'other', themes: ['t'] }] };
+        assert.deepEqual(articlesFor(feed, S, 'saved').map((a) => a.id), [name], name);
+        assert.deepEqual(articlesFor(feed, S, 'f:f1').map((a) => a.id), [name], name);
+        assert.deepEqual(articlesFor(feed, S, 'unread').map((a) => a.id), ['other'], name);
+        assert.equal(themeScores(feed, S)[0].reads, 1, name);
+        assert.equal(mentorLine(feed, S), 'One pick to read, on T.', name);
+        const fresh = blank();
+        assert.equal(own(fresh.read, name), undefined, `${name} is not inherited`);
+        assert.deepEqual(articlesFor(feed, fresh, 'saved'), [], `${name}: nothing saved on a fresh state`);
+        const undo = feedOps.deleteFolder(S, store, 'f1');
+        assert.deepEqual(undo.pairs, [[name, 'f1']], name);
+      }
+      const { calls, store } = recorder();
+      assert.equal(feedOps.setSaved(blank(), store, '__proto__', 'f1', true), 0);
+      assert.deepEqual(calls, [], '__proto__ is never listed or set');
+    });
+
+    test('normalizeState drops __proto__ keys from reads and saved items', () => {
+      const S = normalizeState(JSON.parse('{"read": {"__proto__": 1, "a1": 2}, "saved": {"__proto__": ["f1"], "a2": ["f1", 7]}}'));
+      assert.deepEqual(Object.keys(S.read), ['a1']);
+      assert.deepEqual(S.saved, { a2: ['f1'] });
+      assert.equal(Object.getPrototypeOf(S.read), Object.prototype);
+    });
+
+    test('notes and folders stop at their caps (the page says so); Undo is listed as a restore, only when it changed', () => {
+      const { calls, store } = recorder();
+      const S = blank();
+      S.folders = Array.from({ length: MAX_FOLDERS }, (_, i) => ({ id: `f${i}`, name: 'x' }));
+      S.notes = Array.from({ length: MAX_NOTES }, (_, i) => ({ id: `n${i}` }));
+      assert.equal(feedOps.addFolder(S, store, { id: 'new', name: 'N' }), null);
+      assert.equal(feedOps.addNote(S, store, { id: 'new', a: 'a1', text: 'x', ts: 1 }), null);
+      assert.deepEqual(calls, []);
+      assert.equal(feedOps.renameFolder(S, store, 'f0', 'x'), false, 'the same name is no change');
+      const gone = feedOps.deleteNote(S, store, 'n0');
+      feedOps.restoreNote(S, store, gone);
+      feedOps.restoreNote(S, store, gone); // already back: nothing to list
+      assert.deepEqual(calls, [['remove', 'notes', 'n0'], ['restore', 'notes', 'n0']]);
+      assert.equal(isItemId('__proto__'), false);
+    });
+
+    test('an old note or folder without an id gets the same stable id in every tab', () => {
+      const raw = { notes: [{ a: 'a1', ts: 1, text: 'x' }], folders: [{ name: 'Evals' }] };
+      const one = normalizeState(structuredClone(raw));
+      const two = normalizeState(structuredClone(raw));
+      assert.equal(one.notes[0].id, stableId('n', 'a1|1|x'));
+      assert.equal(one.notes[0].id, two.notes[0].id);
+      assert.equal(one.folders[0].id, two.folders[0].id);
+    });
+  });
+
+  test('feedOps change the state and list each change for the server', () => {
+    const calls = [];
+    const store = { added: (k, id) => calls.push(['add', k, id]), removed: (k, id) => calls.push(['remove', k, id]), restored: (k, id) => calls.push(['restore', k, id]) };
+    const S = blank();
+    feedOps.addFolder(S, store, { id: 'f1', name: 'Evals' });
+    feedOps.setSaved(S, store, 'a1', 'f1', true);
+    feedOps.renameFolder(S, store, 'f1', 'Evals reading');
+    feedOps.addNote(S, store, { id: 'n1', a: 'a1', text: 'x', ts: 1 });
+    const gone = feedOps.deleteNote(S, store, 'n1');
+    feedOps.restoreNote(S, store, gone);
+    const undo = feedOps.deleteFolder(S, store, 'f1');
+    assert.deepEqual([S.folders, S.saved], [[], {}]);
+    feedOps.restoreFolder(S, store, undo);
+    assert.deepEqual(S.saved, { a1: ['f1'] });
+    feedOps.read(store, 'a1', false);
+    assert.deepEqual(calls, [
+      ['add', 'folders', 'f1'], ['add', 'saved', ['a1', 'f1']], ['add', 'folders', 'f1'], ['add', 'notes', 'n1'], ['remove', 'notes', 'n1'], ['restore', 'notes', 'n1'],
+      ['remove', 'folders', 'f1'], ['remove', 'saved', ['a1', 'f1']], ['restore', 'folders', 'f1'], ['add', 'saved', ['a1', 'f1']], ['remove', 'read', 'a1'],
+    ]);
+    assert.equal(S.folders[0].name, 'Evals reading');
   });
 
   test('toggleArticleRead pays once per article, ever', () => {
@@ -1145,6 +1262,129 @@ describe('createStateClient', () => {
       assert.equal(A.client.flushOnExit(), false);
       assert.equal(srv.puts.length, 0);
       assert.equal(A.client.canSave, false);
+    });
+
+    test('each PUT lists the items added and removed since the last save that landed, then clears them', async () => {
+      const srv = memoryServer({ xp: 0 });
+      const A = tab(srv);
+      A.S = (await A.client.load()).state;
+      A.client.added('read', 'a1');
+      A.client.removed('notes', 'n1');
+      A.client.added('saved', ['a1', 'f1']);
+      A.client.removed('read', 'a2');
+      A.client.added('read', 'a2'); // the latest change to an item wins
+      A.client.save();
+      await A.client.flush();
+      assert.deepEqual(srv.puts[0]._added, { read: ['a1', 'a2'], saved: [['a1', 'f1']] });
+      assert.deepEqual(srv.puts[0]._removed, { notes: ['n1'] });
+      assert.equal(A.client.changesWaiting, 0);
+      A.client.save();
+      await A.client.flush();
+      assert.equal('_added' in srv.puts[1] || '_removed' in srv.puts[1], false, 'nothing listed twice');
+    });
+
+    test('a change made while a PUT is out waits for the next one; a failed PUT keeps its lists', async (t) => {
+      t.mock.timers.enable({ apis: ['setTimeout'] });
+      const srv = memoryServer({ xp: 0 });
+      let release;
+      let fail = true;
+      const fetchFn = (url, opts = {}) => {
+        if (opts.method === 'PUT' && fail) return new Promise((r) => (release = () => r({ ok: false, status: 500, text: async () => '' })));
+        return srv.fetchFn(url, opts);
+      };
+      const A = tab(srv, { fetchFn });
+      A.S = (await A.client.load()).state;
+      A.client.removed('notes', 'n1');
+      A.client.save();
+      const flushing = A.client.flush();
+      A.client.added('notes', 'n2'); // while the PUT is out
+      release();
+      await flushing;
+      assert.equal(A.client.changesWaiting, 2, 'the failed PUT kept n1, and n2 waits');
+      fail = false;
+      t.mock.timers.tick(15_000);
+      await settle();
+      const last = srv.puts.at(-1);
+      assert.deepEqual([last._removed, last._added], [{ notes: ['n1'] }, { notes: ['n2'] }]);
+      assert.equal(A.client.changesWaiting, 0);
+    });
+
+    test('leaving the page sends the lists too', async () => {
+      const srv = memoryServer({ xp: 0 });
+      const A = tab(srv);
+      A.S = (await A.client.load()).state;
+      A.client.removed('folders', 'f1');
+      A.client.save();
+      assert.equal(A.client.flushOnExit(), true);
+      await settle();
+      assert.deepEqual(srv.puts[0]._removed, { folders: ['f1'] });
+    });
+
+    test('a window switch while a PUT is out (nothing new waiting) does not send it again when it fails', async (t) => {
+      t.mock.timers.enable({ apis: ['setTimeout'] });
+      const srv = memoryServer({ xp: 0 });
+      let puts = 0;
+      let release;
+      const failed = { ok: false, status: 500, text: async () => '' };
+      const fetchFn = (url, opts = {}) => {
+        if (opts.method === 'PUT') {
+          puts++;
+          if (puts === 1) return new Promise((r) => (release = () => r(failed))); // the first is held, then fails
+          return Promise.resolve(failed); // any other fails at once
+        }
+        return srv.fetchFn(url, opts);
+      };
+      const A = tab(srv, { fetchFn });
+      A.S = (await A.client.load()).state;
+      A.client.save();
+      const flushing = A.client.flush();
+      A.client.flush(); // blur: nothing new
+      A.client.flush(); // visibilitychange: nothing new
+      release();
+      await flushing;
+      await settle();
+      assert.equal(puts, 1, 'no second PUT straight away');
+      t.mock.timers.tick(15_000);
+      await settle();
+      assert.equal(puts, 2, 'just the usual retry');
+      A.client.dispose();
+    });
+
+    test('a late first load (catchUp) drops the lists made while nothing could be saved', async () => {
+      const srv = memoryServer({ xp: 0, notes: [{ id: 'kept' }] });
+      srv.down = true;
+      const A = tab(srv);
+      A.S = (await A.client.load()).state; // the server was down as the page opened
+      A.client.removed('notes', 'kept'); // a change made on the blank state
+      srv.down = false;
+      const r = await A.client.catchUp((fresh) => { A.S = fresh; });
+      assert.equal(r.loaded, true);
+      assert.equal(A.client.changesWaiting, 0, 'the blank-state removal is gone');
+      A.client.save();
+      await A.client.flush();
+      assert.equal('_removed' in srv.puts[0], false, 'so it can never delete the note another tab has');
+    });
+
+    test('a 413 is permanent: one clear message, no retry every 15 s; the next change tries once more', async (t) => {
+      t.mock.timers.enable({ apis: ['setTimeout'] });
+      const srv = memoryServer({ xp: 0 });
+      let puts = 0;
+      let tooLarge = 0;
+      let failed = 0;
+      const fetchFn = (url, opts = {}) => (opts.method === 'PUT' ? (puts++, Promise.resolve({ ok: false, status: 413, text: async () => '' })) : srv.fetchFn(url, opts));
+      const A = tab(srv, { fetchFn, onTooLarge: () => tooLarge++, onSaveFail: () => failed++ });
+      A.S = (await A.client.load()).state;
+      A.client.save();
+      await A.client.flush();
+      t.mock.timers.tick(120_000);
+      await settle();
+      assert.deepEqual([puts, tooLarge, failed], [1, 1, 0], 'no retries, one message, not the "keep trying" one');
+      assert.equal(A.client.tooLarge, true);
+      A.client.save(); // Snow deletes a note to make room
+      await A.client.flush();
+      assert.equal(puts, 2, 'the next change tries again');
+      assert.equal(tooLarge, 1, 'without a second message');
+      A.client.dispose();
     });
 
     test('a client whose first GET failed never reads, reloads or saves', async (t) => {

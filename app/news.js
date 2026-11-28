@@ -58,6 +58,7 @@ export function createNewsPage({ award, toast, isReady, canAward, reloadXpState 
     empty: blankNewsState,
     getState: () => N,
     onSaveFail: () => toast("I couldn't save that just now. I'll keep it here and keep trying."),
+    onTooLarge: () => toast("Your saved News reads have reached The Desk's 1 MB limit, so this change isn't saved."),
   });
   window.addEventListener('pagehide', () => store.flushOnExit());
 
@@ -208,7 +209,11 @@ export function createNewsPage({ award, toast, isReady, canAward, reloadXpState 
     // paid twice after a reload. Before paying, readStory checks the server's copy (another tab may
     // have paid for it already) while the latest XP is picked up.
     const canPay = !sample && store.canSave && canAward();
+    const wasRead = Object.hasOwn(N.read, key);
     const r = await readStory(() => N, key, { canPay, peek: () => store.peek(), also: reloadXpState });
+    // The server merges reads by item: a read is an addition, an un-mark a removal it passes on to every
+    // tab. Listed only when something changed.
+    if (r.read !== wasRead) store[r.read ? 'added' : 'removed']('read', key);
     store.save();
     if (r.award) award(READ_XP, 'story read');
     else if (r.read && sample) toast('Sample story: marked read, no XP.');

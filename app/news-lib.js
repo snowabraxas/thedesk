@@ -3,7 +3,7 @@
 // Everything in an edition or a breaking story is untrusted agent text. These functions only pass
 // it through as plain strings (collapsed to one line, never markup); news.js escapes every one of
 // them before it touches HTML, and links go through safeUrl.
-import { safeUrl } from './lib.js';
+import { DATE_TIME_PARTS, isCalendarDate, isDateTime, safeUrl } from './lib.js';
 
 export const NEWS_TIME_ZONE = 'America/Toronto';
 /** The contract's caps: 3 top stories, up to 7 on the shelf, up to 8 sources a story. */
@@ -31,27 +31,8 @@ export function text(v) {
 
 /* ================= dates and keys (the same rules as server/state-store.js) ================= */
 
-const DATE_PARTS = /^(\d{4})-(\d{2})-(\d{2})$/;
-/** Same as DATE_TIME_PARTS in server/schema-common.js (a test keeps them identical). */
-export const DATE_TIME_PARTS = /^(\d{4}-\d{2}-\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,9})?)?(?:Z|[+-](\d{2}):(\d{2}))$/;
-
-/** A YYYY-MM-DD that is a real day on the calendar. */
-export function isCalendarDate(v) {
-  const m = typeof v === 'string' && DATE_PARTS.exec(v);
-  if (!m) return false;
-  const [year, month, day] = [Number(m[1]), Number(m[2]), Number(m[3])];
-  if (month < 1 || month > 12 || day < 1) return false;
-  const leap = (year % 4 === 0 && year % 100 !== 0) || year % 400 === 0;
-  return day <= [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31][month - 1];
-}
-
-/** An ISO date-time with a timezone that is a real moment, as the server checks a breaking story's `at`. */
-export function isDateTime(v) {
-  const m = typeof v === 'string' && DATE_TIME_PARTS.exec(v);
-  if (!m || !isCalendarDate(m[1])) return false;
-  const [hour, minute, second = '0', offsetHour = '0', offsetMinute = '0'] = m.slice(2);
-  return Number(hour) <= 23 && Number(minute) <= 59 && Number(second) <= 59 && Number(offsetHour) <= 14 && Number(offsetMinute) <= 59;
-}
+// isCalendarDate, isDateTime and DATE_TIME_PARTS live in lib.js (the state client needs them too).
+export { DATE_TIME_PARTS, isCalendarDate, isDateTime };
 
 const STORY_ID = /^[A-Za-z0-9_-]{1,40}$/;
 const STORY_KEY = /^(\d{4}-\d{2}-\d{2})\/[A-Za-z0-9_-]{1,40}$/;

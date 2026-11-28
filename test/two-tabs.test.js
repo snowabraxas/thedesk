@@ -170,18 +170,15 @@ describe('a quick tab switch, inside the 600 ms save delay', () => {
     assert.equal(news.shelfOpen, true);
   });
 
-  test('without sending on leaving (before), the switch loses the note', async () => {
+  test('even when the other tab saves first (no catch-up at all), the note and the folder both survive', async () => {
     const pane = await openTab(desk, { delay: 60_000 });
     const browser = await openTab(desk, { delay: 60_000 });
     await pane.note('written just before switching', { wait: true });
     await browser.show(); // the pane's save is still waiting
-    browser.S.folders.push({ id: 'f1', name: 'Later' });
-    await browser.saveFeed();
-    await pane.hide(); // the pane's save lands afterwards and is last: but the browser had already saved without it
-    await browser.show();
-    // Last-save-wins: whichever saved last decides; here the pane's late save restores the note, but the folder is lost instead.
+    await browser.folder('Later');
+    await pane.hide(); // the pane's save lands last, and doesn't know the folder
     const feed = await feedState();
-    assert.equal(feed.notes.length + feed.folders.length, 1, 'one of the two changes was lost');
+    assert.deepEqual([feed.notes.length, feed.folders.length], [1, 1], 'nothing lost: the server merges notes and folders by item');
   });
 });
 
@@ -214,7 +211,128 @@ describe('the refresh race', () => {
   });
 });
 
-describe('invariants over a long mixed session', () => {
+describe('merged by item: nothing of Snow\'s is lost to the other tab (N4c)', () => {
+  const wait = (ms) => new Promise((r) => setTimeout(r, ms));
+
+  for (const gap of [0, 30, 100]) {
+    test(`a fast switch ${gap} ms after reading a story: the read survives the other tab's save`, async () => {
+      const pane = await openTab(desk, { delay: 600 });
+      const browser = await openTab(desk, { delay: 600 });
+      await pane.readStory(S1, { wait: true });
+      await wait(gap);
+      await Promise.all([pane.hide(), browser.show().then(() => {
+        browser.N.shelfOpen = true;
+        return browser.saveNews();
+      })]);
+      const news = await newsState();
+      assert.ok(news.read[S1], 'still read');
+      assert.equal(news.shelfOpen, true);
+    });
+
+    test(`a fast switch ${gap} ms after writing a note: the note survives the other tab's save`, async () => {
+      const pane = await openTab(desk, { delay: 600 });
+      const browser = await openTab(desk, { delay: 600 });
+      await pane.note('just before switching', { wait: true });
+      await wait(gap);
+      await Promise.all([pane.hide(), browser.show().then(() => browser.folder('Later'))]);
+      const feed = await feedState();
+      assert.deepEqual([feed.notes.length, feed.folders.length], [1, 1]);
+    });
+  }
+
+  test("writing a note in a tab whose drawer kept it from catching up doesn't wipe the other tab's read", async () => {
+    const reader = await openTab(desk);
+    const writer = await openTab(desk); // its notes drawer is open: it never catches up
+    await reader.readArticle('a1');
+    await reader.readStory(S1);
+    await writer.note('written with the drawer open');
+    const feed = await feedState();
+    assert.ok(feed.read.a1, 'the read survived');
+    assert.equal(feed.notes.length, 1);
+    assert.ok((await newsState()).read[S1]);
+  });
+
+  test('an un-mark reaches the other tab, and its stale save can\'t bring the read back', async () => {
+    const pane = await openTab(desk);
+    await pane.readArticle('a1');
+    await pane.readStory(S1);
+    const browser = await openTab(desk); // sees both read
+    await pane.readArticle('a1'); // un-mark
+    await pane.readStory(S1);
+    await browser.note('a stale save');
+    browser.N.shelfOpen = true;
+    await browser.saveNews();
+    assert.equal((await feedState()).read.a1, undefined);
+    assert.equal((await newsState()).read[S1], undefined);
+    await browser.show();
+    assert.equal(browser.S.read.a1, undefined, 'and the other tab sees it once it catches up');
+  });
+
+  test("a deleted note stays deleted: a stale tab can't bring it back", async () => {
+    const pane = await openTab(desk);
+    const n = await pane.note('to delete');
+    const browser = await openTab(desk); // has the note
+    await pane.deleteNote(n.id);
+    await browser.folder('Later'); // a stale save that still carries the deleted note
+    assert.deepEqual((await feedState()).notes, []);
+    await pane.restoreNote(n); // Undo brings it back on purpose
+    assert.deepEqual((await feedState()).notes.map((x) => x.id), [n.id]);
+  });
+
+  test('a deleted folder (and what was saved in it) reaches the other tab', async () => {
+    const pane = await openTab(desk);
+    const f = await pane.folder('Evals');
+    await pane.setSaved('a1', f.id, true);
+    const browser = await openTab(desk);
+    await pane.deleteFolder(f.id);
+    await browser.note('a stale save that still has the folder');
+    const feed = await feedState();
+    assert.deepEqual([feed.folders, feed.saved], [[], {}]);
+  });
+
+  test('a rename in one tab survives a stale copy from the other; the later rename wins', async () => {
+    const pane = await openTab(desk);
+    const f = await pane.folder('Evals');
+    const browser = await openTab(desk);
+    await pane.renameFolder(f.id, 'Evals reading');
+    await browser.note('stale');
+    assert.equal((await feedState()).folders[0].name, 'Evals reading');
+    await browser.renameFolder(f.id, 'Evals, later');
+    assert.equal((await feedState()).folders[0].name, 'Evals, later');
+  });
+
+  test('old pages (no lists): their saves add, never delete, and never bring a deleted item back', async () => {
+    const pane = await openTab(desk);
+    const doomed = await pane.note('will be deleted');
+    const old = await openTab(desk, { old: true }); // loaded with the note
+    await pane.deleteNote(doomed.id);
+    await pane.readArticle('a2');
+    await old.note('from the old page');
+    const feed = await feedState();
+    assert.deepEqual(feed.notes.map((x) => x.text), ['from the old page']);
+    assert.ok(feed.read.a2, "the new page's read survived the old page's save");
+  });
+});
+
+describe('ids from an agent (closing check)', () => {
+  test('a page that reads an article whose id is __proto__ (or any Object.prototype name) keeps saving', async () => {
+    const pane = await openTab(desk);
+    await pane.readArticle('__proto__'); // refused quietly: nothing changes, nothing is listed
+    for (const name of ['constructor', 'toString', 'valueOf', 'hasOwnProperty', '__defineGetter__', 'isPrototypeOf', 'prototype']) {
+      await pane.readArticle(name);
+      const f = await pane.folder(`for ${name}`);
+      await pane.setSaved(name, f.id, true);
+    }
+    const n = await pane.note('still saving');
+    const feed = await feedState();
+    assert.ok(feed.notes.some((x) => x.id === n.id), 'the saves after it all landed');
+    assert.ok(Object.hasOwn(feed.read, 'constructor') && Object.hasOwn(feed.saved, 'toString'));
+    assert.equal(Object.hasOwn(feed.read, '__proto__'), false);
+    assert.equal(pane.feed.dirty, false, 'nothing stuck waiting');
+  });
+});
+
+describe('invariants over long mixed sessions: everything exact', () => {
   // mulberry32: a small seeded random generator, so a failure can be replayed.
   const random = (seed) => () => {
     seed = (seed + 0x6d2b79f5) | 0;
@@ -223,44 +341,74 @@ describe('invariants over a long mixed session', () => {
     return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
   };
 
-  for (const seed of [1, 2, 3]) {
-    test(`seed ${seed}: XP never lost, payments never lost, nothing paid twice`, async () => {
+  for (const seed of [1, 2, 3, 4, 5]) {
+    test(`seed ${seed}: reads, notes, folders, saved items, XP and payments match what Snow did`, async () => {
       const rnd = random(seed);
       const pick = (xs) => xs[Math.floor(rnd() * xs.length)];
-      const tabs = [await openTab(desk, { delay: 60_000 }), await openTab(desk, { delay: 60_000 })];
+      // What Snow did, in order, as each tab saw it: the model the server must end up holding.
+      const model = { read: new Set(), stories: new Set(), notes: new Map(), folders: new Map(), saved: new Set() };
+      const tabs = [await openTab(desk), await openTab(desk)];
       const closed = [];
-      const dismissed = new Set();
-      for (let step = 0; step < 120; step++) {
+      let made = 0;
+      for (let step = 0; step < 150; step++) {
         const i = Math.floor(rnd() * tabs.length);
         const tab = tabs[i];
-        const action = pick(['article', 'article', 'story', 'story', 'note', 'shelf', 'dismiss', 'reload', 'close', 'wait']);
-        if (action === 'article') await tab.readArticle(pick(['a1', 'a2', 'a3', 'a4', 'a5']));
-        else if (action === 'story') await tab.readStory(pick(['2026-12-07/s1', '2026-12-07/s2', '2026-12-07/s3', '2026-12-07/m1']));
-        else if (action === 'note') await tab.note(`step ${step}`);
-        else if (action === 'shelf') {
-          tab.N.shelfOpen = !tab.N.shelfOpen;
-          tab.news.save(); // left waiting: saved by a later flush or the page closing
-        } else if (action === 'dismiss') {
-          const at = `2026-12-0${1 + Math.floor(rnd() * 7)}T12:00:00-05:00`;
-          tab.N.dismissed[at] = step;
-          dismissed.add(at);
-          tab.news.save();
-        } else if (action === 'reload') await tab.reload();
+        const action = pick(['article', 'article', 'story', 'story', 'note', 'deleteNote', 'folder', 'rename', 'deleteFolder', 'save', 'save', 'show', 'close']);
+        if (action === 'article') {
+          const id = pick(['a1', 'a2', 'a3', 'a4', 'a5']);
+          const r = await tab.readArticle(id);
+          if (r.read) model.read.add(id); else model.read.delete(id);
+        } else if (action === 'story') {
+          const key = pick(['2026-12-07/s1', '2026-12-07/s2', '2026-12-07/s3', '2026-12-07/m1']);
+          const r = await tab.readStory(key);
+          if (r.read) model.stories.add(key); else model.stories.delete(key);
+        } else if (action === 'note') {
+          const n = await tab.note(`note ${step}`, { id: `n${made++}` });
+          model.notes.set(n.id, n.text);
+        } else if (action === 'deleteNote' && tab.S.notes.length) {
+          const n = pick(tab.S.notes);
+          await tab.deleteNote(n.id);
+          model.notes.delete(n.id);
+        } else if (action === 'folder') {
+          const f = await tab.folder(`folder ${step}`, { id: `f${made++}` });
+          model.folders.set(f.id, f.name);
+        } else if (action === 'rename' && tab.S.folders.length) {
+          const f = pick(tab.S.folders);
+          await tab.renameFolder(f.id, `renamed ${step}`);
+          if (model.folders.has(f.id)) model.folders.set(f.id, `renamed ${step}`); // a rename never undoes a delete it never saw
+        } else if (action === 'deleteFolder' && tab.S.folders.length) {
+          const f = pick(tab.S.folders);
+          await tab.deleteFolder(f.id);
+          model.folders.delete(f.id);
+          for (const pair of [...model.saved]) if (JSON.parse(pair)[1] === f.id) model.saved.delete(pair);
+        } else if (action === 'save' && tab.S.folders.length) {
+          const f = pick(tab.S.folders);
+          const a = pick(['a1', 'a2', 'a3']);
+          const on = !(tab.S.saved[a] || []).includes(f.id);
+          await tab.setSaved(a, f.id, on);
+          const pair = JSON.stringify([a, f.id]);
+          if (on && model.folders.has(f.id)) model.saved.add(pair);
+          if (!on) model.saved.delete(pair);
+        } else if (action === 'show') await tab.show();
         else if (action === 'close') {
           await tab.close();
           closed.push(tab);
-          tabs[i] = await openTab(desk, { delay: 60_000 });
-        } else await Promise.all([tab.feed.flush(), tab.news.flush()]);
+          tabs[i] = await openTab(desk);
+        }
       }
       for (const tab of tabs) await Promise.all([tab.feed.flush(), tab.news.flush()]);
-      const paid = [...closed, ...tabs].flatMap((t) => t.paid);
       const [feed, news] = await Promise.all([feedState(), newsState()]);
-      assert.equal(new Set(paid).size, paid.length, `nothing paid twice: ${paid.join(', ')}`);
-      assert.equal(feed.xp, 10 * paid.length, 'XP is exactly 10 per payment');
-      assert.deepEqual(Object.keys(feed.awarded || {}).sort(), paid.filter((k) => !k.includes('/')).sort(), 'every article payment is recorded');
-      assert.deepEqual(Object.keys(news.awarded || {}).sort(), paid.filter((k) => k.includes('/')).sort(), 'every story payment is recorded');
-      for (const at of dismissed) assert.ok(news.dismissed[at] !== undefined, `dismissal ${at} kept`);
-      assert.ok(paid.length >= 5, `the session paid for something (${paid.length})`);
+      const paid = [...closed, ...tabs].flatMap((t) => t.paid);
+      const pairs = new Set(Object.entries(feed.saved || {}).flatMap(([a, fs]) => fs.map((f) => JSON.stringify([a, f]))));
+      assert.deepEqual(Object.keys(feed.read || {}).sort(), [...model.read].sort(), 'Product Feed reads');
+      assert.deepEqual(Object.keys(news.read || {}).sort(), [...model.stories].sort(), 'News reads');
+      assert.deepEqual(new Map((feed.notes || []).map((n) => [n.id, n.text])), model.notes, 'notes');
+      assert.deepEqual(new Map((feed.folders || []).map((f) => [f.id, f.name])), model.folders, 'folders');
+      assert.deepEqual(pairs, model.saved, 'saved items');
+      assert.equal(new Set(paid).size, paid.length, 'nothing paid twice');
+      assert.equal(feed.xp, 10 * paid.length, 'XP is 10 per payment');
+      assert.deepEqual(Object.keys(feed.awarded || {}).sort(), paid.filter((k) => !k.includes('/')).sort(), 'article payments recorded');
+      assert.deepEqual(Object.keys(news.awarded || {}).sort(), paid.filter((k) => k.includes('/')).sort(), 'story payments recorded');
     });
   }
 });
