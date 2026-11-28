@@ -11,7 +11,7 @@
 // back into view or focus (sync, from app.js), reload both states when nothing is waiting to be
 // saved; and before paying for a read, the server's `awarded` is checked, so another tab's payment
 // for the same story counts. Mark read clicks made while a check is out wait their turn.
-import { createStateClient } from './lib.js';
+import { GET_TIMEOUT, createStateClient, newestAnswer, timeoutSignal } from './lib.js';
 import {
   READ_XP, blankNewsState, breakingView, buildNewsView, dismissBreaking, editionLine, greeting, isBreakingVisible, newsLine,
   normalizeNewsState, readStory, tvSignals,
@@ -25,8 +25,10 @@ const STATE_URL = '/api/news/state';
 const $ = (s) => document.querySelector(s);
 const reducedMotion = () => matchMedia('(prefers-reduced-motion: reduce)').matches;
 
+// A GET that hasn't answered in 10 s counts as failed (lib.js's GET_TIMEOUT), so a stuck one can't
+// keep a catch-up round running.
 async function getJson(url) {
-  const r = await fetch(url, { cache: 'no-store' });
+  const r = await fetch(url, { cache: 'no-store', signal: timeoutSignal(GET_TIMEOUT) });
   if (!r.ok) throw new Error(`GET ${url} answered ${r.status}`);
   return r.json();
 }
@@ -64,19 +66,26 @@ export function createNewsPage({ award, toast, isReady, canAward, reloadXpState 
     N = r.state;
     if (!r.ok) toast("I couldn't open your saved News reads, so changes won't be saved for now. Try reloading in a bit.", 'Reload', () => location.reload());
   }
-  // A failed fetch keeps what was already there (nothing, on the first load).
+  // A failed fetch keeps what was already there (nothing, on the first load). Two refreshes can
+  // overlap (the tab coming back while #news or the room opens): each fetch takes a number, and an
+  // answer is used only if no newer fetch's answer has been used, so a slow older answer can never
+  // bring back yesterday's edition or a breaking story that has gone.
+  const editionAnswers = newestAnswer();
+  const breakingAnswers = newestAnswer();
   async function loadEdition() {
+    const take = editionAnswers.start();
     try {
       const d = await getJson(NEWS_URL);
-      news = d && typeof d === 'object' && !Array.isArray(d) ? d : null;
+      if (take()) news = d && typeof d === 'object' && !Array.isArray(d) ? d : null;
     } catch {
       /* keep the edition we had */
     }
   }
   async function loadBreaking() {
+    const take = breakingAnswers.start();
     try {
       const d = await getJson(BREAKING_URL);
-      breaking = d && typeof d === 'object' && d.breaking && typeof d.breaking === 'object' ? d.breaking : null;
+      if (take()) breaking = d && typeof d === 'object' && d.breaking && typeof d.breaking === 'object' ? d.breaking : null;
     } catch {
       /* keep the breaking story we had */
     }
@@ -86,18 +95,22 @@ export function createNewsPage({ award, toast, isReady, canAward, reloadXpState 
   /**
    * Opening the page again (later in the day, or after using another tab): fetch the edition and
    * breaking story again, and both states when nothing is waiting to be saved, then redraw.
+   * xp: false leaves Product Feed's state to the caller (app.js's catch-up reloads it itself).
    */
-  async function refresh() {
+  async function refresh({ xp = true } = {}) {
     if (!isReady()) return;
     const before = news?.edition;
     // reload hands over the fresh state only if nothing changed here while it was out (applyState).
-    await Promise.all([store.reload(applyState), reloadXpState(), loadEdition(), loadBreaking()]);
+    await Promise.all([freshState(), xp ? reloadXpState() : null, loadEdition(), loadBreaking()]);
     if (news?.edition !== before) openItems.clear(); // opened items are by position: a new edition starts closed
     if (!$('#news').hidden) render();
   }
   function applyState(fresh) {
     N = fresh;
   }
+  // Snow's News state, fresh: reloaded, or, if the first load failed (the server was down as the page
+  // opened), loaded now, so the TV and the page stop reading the edition against a blank state.
+  const freshState = () => store.catchUp(applyState);
   /**
    * The tab came back into view or focus: reload the News state when nothing is waiting to be saved,
    * and redraw if it changed. Returns whether it changed.
@@ -105,7 +118,7 @@ export function createNewsPage({ award, toast, isReady, canAward, reloadXpState 
   async function sync() {
     if (!isReady()) return false;
     const before = JSON.stringify(N);
-    await store.reload(applyState);
+    await freshState();
     const changed = JSON.stringify(N) !== before;
     if (changed && !$('#news').hidden) render();
     return changed;
@@ -241,7 +254,15 @@ export function createNewsPage({ award, toast, isReady, canAward, reloadXpState 
     /** Sends what is waiting now (the tab is being left). */
     flush: () => store.flush(),
     render,
-    /** For the TV in the room (N5): { unread, total, breaking, sample } from the edition, breaking story and News state. */
-    signals: () => tvSignals(news, breaking, N),
+    /**
+     * For the TV in the room (N5): { unread, total, breaking, sample } from the edition, breaking story
+     * and News state; null (a quiet TV) until Snow's News state has loaded, so a page that opened while
+     * the server was down never shows stories she has read or a banner she has dismissed as new.
+     */
+    signals: () => (store.canSave ? tvSignals(news, breaking, N) : null),
+    /** The last reload of the News state was skipped or dropped because of a change here. */
+    missed: () => store.missed,
+    /** Resolves once the News state has nothing waiting to be saved. */
+    whenIdle: () => store.whenIdle(),
   };
 }

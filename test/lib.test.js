@@ -9,7 +9,7 @@ import { isHttpsLink } from '../server/schema-common.js';
 import { checkState } from '../server/state-store.js';
 import {
   articlesFor, autoPhase, awardText, blank, createStateClient, dayKey, esc, fmtDate, fmtDay, freshBadges, level, mentorLine,
-  markArticleRead, mergeFeedState, moon, normalizeState, readArticle, readsThisWeek, safeUrl, streak, sunTimes, themeScores, toggleArticleRead, wilaLine,
+  markArticleRead, mergeFeedState, moon, newestAnswer, normalizeState, readArticle, readsThisWeek, safeUrl, streak, sunTimes, themeScores, toggleArticleRead, wilaLine,
 } from '../app/lib.js';
 
 const MIN = 60e3;
@@ -470,6 +470,40 @@ describe("mentorLine (Wila's note on the Product Feed)", () => {
   });
 });
 
+describe('newestAnswer (overlapping fetches of the same thing, N5)', () => {
+  test('an older answer arriving after a newer one has been used is dropped', () => {
+    const order = newestAnswer();
+    const first = order.start();
+    const second = order.start();
+    assert.equal(second(), true);
+    assert.equal(first(), false);
+  });
+
+  test('answers arriving in order are all used', () => {
+    const order = newestAnswer();
+    const first = order.start();
+    const second = order.start();
+    assert.equal(first(), true);
+    assert.equal(second(), true);
+  });
+
+  test('an older answer arriving first is used: it is newer than what was there', () => {
+    const order = newestAnswer();
+    const a = order.start(), b = order.start(), c = order.start();
+    assert.equal(b(), true);
+    assert.equal(a(), false);
+    assert.equal(c(), true);
+  });
+
+  test('each list keeps its own order', () => {
+    const edition = newestAnswer(), breaking = newestAnswer();
+    const e1 = edition.start(), b1 = breaking.start(), e2 = edition.start();
+    assert.equal(e2(), true);
+    assert.equal(b1(), true, 'the breaking story has no newer fetch');
+    assert.equal(e1(), false);
+  });
+});
+
 describe('createStateClient', () => {
   const settle = () => new Promise((resolve) => setImmediate(resolve));
   const okResponse = (value = {}) => ({ ok: true, status: 200, json: async () => value });
@@ -887,6 +921,171 @@ describe('createStateClient', () => {
       hold();
       assert.deepEqual(await pending, { ok: false });
       assert.deepEqual(A.S.notes, [{ id: 'mine' }], 'not replaced');
+    });
+
+    // GETs held until released one by one, so their answers can arrive in any order.
+    function heldGets(srv) {
+      const held = [];
+      const fetchFn = (url, opts = {}) => {
+        if (opts.method) return srv.fetchFn(url, opts);
+        const value = structuredClone(srv.value); // what the server had when the GET arrived
+        return new Promise((resolve) => held.push(() => resolve({ ok: true, status: 200, json: async () => value })));
+      };
+      return { held, fetchFn };
+    }
+
+    test('N5: a change made while the GET was out still wins even if its save has already landed', async () => {
+      // The answer was read before the change, so applying it would undo the change here (a dismissed
+      // breaking story coming back on the TV) until the next reload.
+      const srv = memoryServer({ xp: 0, notes: [] });
+      const gets = heldGets(srv);
+      const A = tab(srv, { fetchFn: gets.fetchFn });
+      const loading = A.client.load();
+      gets.held.shift()();
+      A.S = (await loading).state;
+      const pending = A.client.reload((fresh) => { A.S = fresh; });
+      await settle();
+      A.S.notes.push({ id: 'mine' });
+      A.client.save();
+      await A.client.flush(); // the PUT lands: the client is idle again before the GET answers
+      assert.equal(A.client.dirty, false);
+      gets.held.shift()(); // the old answer, read before the note
+      assert.deepEqual(await pending, { ok: false });
+      assert.deepEqual(A.S.notes.map((n) => n.id), ['mine'], 'the change made while the GET was out stays');
+    });
+
+    test('N5: two overlapping reloads: an older answer arriving last never replaces a newer one', async () => {
+      const srv = memoryServer({ xp: 0, notes: [] });
+      const gets = heldGets(srv);
+      const A = tab(srv, { fetchFn: gets.fetchFn });
+      const loading = A.client.load();
+      gets.held.shift()();
+      A.S = (await loading).state;
+      const apply = (fresh) => { A.S = fresh; };
+      const older = A.client.reload(apply); // the server has no notes yet
+      srv.value = { ...srv.value, notes: [{ id: 'from-the-other-tab' }] };
+      const newer = A.client.reload(apply);
+      await settle();
+      gets.held[1](); // the newer answer first
+      assert.equal((await newer).ok, true);
+      assert.deepEqual(A.S.notes.map((n) => n.id), ['from-the-other-tab']);
+      gets.held[0](); // then the older one
+      assert.deepEqual(await older, { ok: false });
+      assert.deepEqual(A.S.notes.map((n) => n.id), ['from-the-other-tab'], 'not set back');
+    });
+
+    test('N5 closing check: catchUp after a failed first load loads the state, hands it over and starts saving', async () => {
+      // The page opened while the server was down: everything after must not work from a blank state.
+      const srv = memoryServer({ xp: 30, notes: [{ id: 'kept' }] });
+      srv.down = true;
+      const A = tab(srv);
+      const first = await A.client.load();
+      A.S = first.state;
+      assert.equal(first.ok, false);
+      assert.equal(A.client.canSave, false);
+      const apply = (fresh) => { A.S = fresh; };
+      assert.deepEqual(await A.client.catchUp(apply), { ok: false }, 'still down: nothing handed over');
+      assert.deepEqual(A.S.notes, []);
+      srv.down = false;
+      const r = await A.client.catchUp(apply);
+      assert.equal(r.ok, true);
+      assert.equal(r.loaded, true);
+      assert.deepEqual(A.S.notes.map((n) => n.id), ['kept']);
+      assert.equal(A.client.canSave, true);
+      A.S.xp += 10;
+      A.client.save();
+      await A.client.flush();
+      assert.equal(srv.puts.at(-1)._sync.xp, 30, 'counts from the XP it loaded');
+      srv.value = { ...srv.value, notes: [{ id: 'kept' }, { id: 'later' }] };
+      await A.client.catchUp(apply);
+      assert.deepEqual(A.S.notes.map((n) => n.id), ['kept', 'later'], 'from then on catchUp is reload');
+    });
+
+    test('N5 closing check: a disposed client never comes back to life through catchUp', async () => {
+      const srv = memoryServer({ xp: 0 });
+      srv.down = true;
+      const A = tab(srv);
+      await A.client.load();
+      A.client.dispose();
+      srv.down = false;
+      let applied = false;
+      assert.deepEqual(await A.client.catchUp(() => { applied = true; }), { ok: false });
+      assert.equal(applied, false);
+      assert.equal(A.client.canSave, false);
+    });
+
+    test('N5 closing check: a GET that never answers fails after the timeout, so a catch-up round ends', async () => {
+      let gets = 0;
+      // A server that never answers, but stops when the request is aborted, as fetch does.
+      const fetchFn = (url, opts = {}) => {
+        gets++;
+        return new Promise((resolve, reject) => opts.signal?.addEventListener('abort', () => reject(opts.signal.reason)));
+      };
+      const A = tab(memoryServer(), { fetchFn, timeout: 40 });
+      const started = Date.now();
+      const r = await A.client.load();
+      assert.equal(r.ok, false);
+      assert.ok(Date.now() - started < 2000, 'gave up quickly');
+      assert.deepEqual(await A.client.catchUp(() => {}), { ok: false });
+      assert.equal(gets, 2);
+    });
+
+    test('N5 closing check: a reload skipped or dropped because of a change here is marked missed until one applies', async () => {
+      const srv = memoryServer({ xp: 0, notes: [] });
+      const A = tab(srv);
+      A.S = (await A.client.load()).state;
+      const apply = (fresh) => { A.S = fresh; };
+      assert.equal(A.client.missed, false);
+      A.S.notes.push({ id: 'mine' });
+      A.client.save();
+      assert.deepEqual(await A.client.reload(apply), { ok: false });
+      assert.equal(A.client.missed, true, 'skipped: a change was waiting');
+      let woke = false;
+      const idle = A.client.whenIdle().then(() => { woke = true; });
+      await settle();
+      assert.equal(woke, false, 'not idle while the change waits');
+      await A.client.flush();
+      await idle;
+      assert.equal(woke, true, 'idle once the PUT has landed');
+      srv.value = { ...srv.value, notes: [{ id: 'mine' }, { id: 'other-tab' }] };
+      assert.equal((await A.client.reload(apply)).ok, true);
+      assert.equal(A.client.missed, false, 'the retry applied');
+      assert.deepEqual(A.S.notes.map((n) => n.id), ['mine', 'other-tab']);
+      // Dropped after the GET: also missed.
+      const gets = heldGets(srv);
+      const B = tab(srv, { fetchFn: gets.fetchFn });
+      const loading = B.client.load();
+      gets.held.shift()();
+      B.S = (await loading).state;
+      const pending = B.client.reload((fresh) => { B.S = fresh; });
+      await settle();
+      B.S.notes.push({ id: 'b' });
+      B.client.save();
+      await B.client.flush();
+      gets.held.shift()();
+      await pending;
+      assert.equal(B.client.missed, true);
+      assert.equal(await Promise.race([B.client.whenIdle().then(() => 'idle'), settle().then(() => 'waiting')]), 'idle', 'already idle: resolves at once');
+    });
+
+    test('N5: overlapping reloads answering in order both apply, the newer last', async () => {
+      const srv = memoryServer({ xp: 0, notes: [] });
+      const gets = heldGets(srv);
+      const A = tab(srv, { fetchFn: gets.fetchFn });
+      const loading = A.client.load();
+      gets.held.shift()();
+      A.S = (await loading).state;
+      const seen = [];
+      const apply = (fresh) => { A.S = fresh; seen.push(fresh.notes.length); };
+      const older = A.client.reload(apply);
+      srv.value = { ...srv.value, notes: [{ id: 'n1' }] };
+      const newer = A.client.reload(apply);
+      await settle();
+      gets.held[0]();
+      assert.equal((await older).ok, true);
+      gets.held[1]();
+      assert.equal((await newer).ok, true);
+      assert.deepEqual(seen, [0, 1]);
     });
 
     test('after a failed read, leaving the page sends nothing and keeps the change waiting', async () => {
